@@ -1,8 +1,21 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Simulation,
+  SimulationNodeDatum,
+  forceCollide,
+  forceLink,
+  forceManyBody,
+  forceRadial,
+  forceSimulation,
+  forceX,
+  forceY,
+} from 'd3-force';
 import { GraphEdge, GraphNode, PaperArgumentGraph } from './api';
 
 type Point = { x: number; y: number };
 type ViewBox = { x: number; y: number; w: number; h: number };
+
+type SimNode = SimulationNodeDatum & { id: string; nodeType: string };
 
 export const NODE_COLORS: Record<string, string> = {
   Paper: '#4f8cff',
@@ -23,85 +36,28 @@ export const NODE_COLORS: Record<string, string> = {
 };
 
 const LAYOUT_SIZE = 900;
+const CENTER = LAYOUT_SIZE / 2;
 
-function nodeRadius(node: GraphNode): number {
+function nodeRadius(node: Pick<GraphNode, 'node_type'>): number {
   if (node.node_type === 'Paper') return 26;
   if (node.node_type === 'Contribution') return 19;
   if (node.node_type === 'Reference') return 11;
   return 13;
 }
 
-function computeLayout(nodes: GraphNode[], edges: GraphEdge[]): Map<string, Point> {
-  const positions = new Map<string, Point>();
-  const center = LAYOUT_SIZE / 2;
-  const contributions = nodes.filter((n) => n.node_type === 'Contribution');
-  const others = nodes.filter((n) => n.node_type !== 'Contribution' && n.node_type !== 'Paper');
+function linkDistance(edge: GraphEdge, typeById: Map<string, string>): number {
+  const source = typeById.get(edge.source_node_id);
+  const target = typeById.get(edge.target_node_id);
+  if (source === 'Paper' || target === 'Paper') return 230;
+  if (source === 'Reference' || target === 'Reference') return 120;
+  return 150;
+}
 
-  nodes.forEach((node) => {
-    if (node.node_type === 'Paper') {
-      positions.set(node.id, { x: center, y: center });
-    }
-  });
-  contributions.forEach((node, i) => {
-    const angle = (2 * Math.PI * i) / Math.max(contributions.length, 1);
-    positions.set(node.id, { x: center + 170 * Math.cos(angle), y: center + 170 * Math.sin(angle) });
-  });
-  others.forEach((node, i) => {
-    const angle = (2 * Math.PI * i) / Math.max(others.length, 1) + 0.4;
-    positions.set(node.id, { x: center + 330 * Math.cos(angle), y: center + 330 * Math.sin(angle) });
-  });
-
-  const ids = nodes.map((n) => n.id);
-  const links = edges
-    .filter((e) => positions.has(e.source_node_id) && positions.has(e.target_node_id))
-    .map((e) => [e.source_node_id, e.target_node_id] as const);
-
-  for (let iter = 0; iter < 260; iter += 1) {
-    const forces = new Map<string, Point>(ids.map((id) => [id, { x: 0, y: 0 }]));
-    for (let i = 0; i < ids.length; i += 1) {
-      for (let j = i + 1; j < ids.length; j += 1) {
-        const a = positions.get(ids[i])!;
-        const b = positions.get(ids[j])!;
-        const dx = a.x - b.x;
-        const dy = a.y - b.y;
-        const distSq = Math.max(dx * dx + dy * dy, 64);
-        const force = 26000 / distSq;
-        const dist = Math.sqrt(distSq);
-        const fx = (dx / dist) * force;
-        const fy = (dy / dist) * force;
-        const fa = forces.get(ids[i])!;
-        const fb = forces.get(ids[j])!;
-        fa.x += fx; fa.y += fy;
-        fb.x -= fx; fb.y -= fy;
-      }
-    }
-    for (const [source, target] of links) {
-      const a = positions.get(source)!;
-      const b = positions.get(target)!;
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-      const stretch = (dist - 150) * 0.02;
-      const fx = (dx / dist) * stretch;
-      const fy = (dy / dist) * stretch;
-      const fa = forces.get(source)!;
-      const fb = forces.get(target)!;
-      fa.x += fx; fa.y += fy;
-      fb.x -= fx; fb.y -= fy;
-    }
-    const cooling = 1 - iter / 260;
-    for (const id of ids) {
-      const pos = positions.get(id)!;
-      const force = forces.get(id)!;
-      force.x += (center - pos.x) * 0.012;
-      force.y += (center - pos.y) * 0.012;
-      const magnitude = Math.sqrt(force.x * force.x + force.y * force.y) || 1;
-      const step = Math.min(magnitude, 24 * cooling + 2);
-      pos.x += (force.x / magnitude) * step;
-      pos.y += (force.y / magnitude) * step;
-    }
-  }
-  return positions;
+function seedPosition(node: GraphNode, index: number, total: number): Point {
+  if (node.node_type === 'Paper') return { x: CENTER, y: CENTER };
+  const ring = node.node_type === 'Contribution' ? 170 : 320;
+  const angle = (2 * Math.PI * index) / Math.max(total, 1) + (node.node_type === 'Contribution' ? 0 : 0.4);
+  return { x: CENTER + ring * Math.cos(angle), y: CENTER + ring * Math.sin(angle) };
 }
 
 type GraphViewProps = {
@@ -115,15 +71,83 @@ export function GraphView({ graph, selectedNodeId, query, onSelectNode }: GraphV
   const [positions, setPositions] = useState<Map<string, Point>>(new Map());
   const [viewBox, setViewBox] = useState<ViewBox>({ x: 0, y: 0, w: LAYOUT_SIZE, h: LAYOUT_SIZE });
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const simulationRef = useRef<Simulation<SimNode, undefined> | null>(null);
+  const simNodesRef = useRef<Map<string, SimNode>>(new Map());
   const dragState = useRef<
     | { kind: 'node'; id: string }
     | { kind: 'pan'; startX: number; startY: number; box: ViewBox }
     | null
   >(null);
+  const userAdjustedView = useRef(false);
 
   useEffect(() => {
-    setPositions(computeLayout(graph.nodes, graph.edges));
+    const typeById = new Map(graph.nodes.map((node) => [node.id, node.node_type]));
+    const grouped = new Map<string, number>();
+    const simNodes: SimNode[] = graph.nodes.map((node) => {
+      const siblings = graph.nodes.filter((n) => n.node_type === node.node_type).length;
+      const index = grouped.get(node.node_type) ?? 0;
+      grouped.set(node.node_type, index + 1);
+      const seed = seedPosition(node, index, siblings);
+      return { id: node.id, nodeType: node.node_type, x: seed.x, y: seed.y };
+    });
+    simNodesRef.current = new Map(simNodes.map((n) => [n.id, n]));
+
+    const links = graph.edges
+      .filter((e) => typeById.has(e.source_node_id) && typeById.has(e.target_node_id))
+      .map((e) => ({ source: e.source_node_id, target: e.target_node_id, distance: linkDistance(e, typeById) }));
+
+    const simulation = forceSimulation<SimNode>(simNodes)
+      .force(
+        'link',
+        forceLink<SimNode, { source: string; target: string; distance: number }>(links)
+          .id((n) => n.id)
+          .distance((l) => l.distance)
+          .strength(0.6),
+      )
+      .force('charge', forceManyBody<SimNode>().strength(-560).distanceMax(560))
+      .force(
+        'collide',
+        forceCollide<SimNode>()
+          .radius((n) => nodeRadius({ node_type: n.nodeType }) + 28)
+          .strength(0.95),
+      )
+      .force('x', forceX<SimNode>(CENTER).strength(0.03))
+      .force('y', forceY<SimNode>(CENTER).strength(0.03))
+      .force(
+        'radial',
+        forceRadial<SimNode>(380, CENTER, CENTER).strength((n) => (n.nodeType === 'Reference' ? 0.12 : 0)),
+      )
+      .alpha(1)
+      .alphaDecay(0.028)
+      .on('tick', () => {
+        setPositions(new Map(simNodes.map((n) => [n.id, { x: n.x ?? CENTER, y: n.y ?? CENTER }])));
+      })
+      .on('end', () => {
+        if (!simNodes.length || userAdjustedView.current) return;
+        const xs = simNodes.map((n) => n.x ?? CENTER);
+        const ys = simNodes.map((n) => n.y ?? CENTER);
+        const pad = 90;
+        const minX = Math.min(...xs) - pad;
+        const maxX = Math.max(...xs) + pad;
+        const minY = Math.min(...ys) - pad;
+        const maxY = Math.max(...ys) + pad;
+        const size = Math.max(maxX - minX, maxY - minY, 320);
+        setViewBox({
+          x: (minX + maxX) / 2 - size / 2,
+          y: (minY + maxY) / 2 - size / 2,
+          w: size,
+          h: size,
+        });
+      });
+
+    simulationRef.current = simulation;
+    userAdjustedView.current = false;
+    setPositions(new Map(simNodes.map((n) => [n.id, { x: n.x ?? CENTER, y: n.y ?? CENTER }])));
     setViewBox({ x: 0, y: 0, w: LAYOUT_SIZE, h: LAYOUT_SIZE });
+    return () => {
+      simulation.stop();
+      simulationRef.current = null;
+    };
   }, [graph]);
 
   const matchedIds = useMemo(() => {
@@ -148,6 +172,7 @@ export function GraphView({ graph, selectedNodeId, query, onSelectNode }: GraphV
   }
 
   function handleWheel(event: React.WheelEvent<SVGSVGElement>) {
+    userAdjustedView.current = true;
     const scale = event.deltaY > 0 ? 1.12 : 1 / 1.12;
     const focus = toGraphCoords(event);
     setViewBox((box) => {
@@ -172,21 +197,31 @@ export function GraphView({ graph, selectedNodeId, query, onSelectNode }: GraphV
     const state = dragState.current;
     if (!state) return;
     if (state.kind === 'pan') {
+      userAdjustedView.current = true;
       const rect = svgRef.current!.getBoundingClientRect();
       const dx = ((event.clientX - state.startX) / rect.width) * state.box.w;
       const dy = ((event.clientY - state.startY) / rect.height) * state.box.h;
       setViewBox({ ...state.box, x: state.box.x - dx, y: state.box.y - dy });
     } else {
       const point = toGraphCoords(event);
-      setPositions((prev) => {
-        const next = new Map(prev);
-        next.set(state.id, point);
-        return next;
-      });
+      const simNode = simNodesRef.current.get(state.id);
+      if (simNode) {
+        simNode.fx = point.x;
+        simNode.fy = point.y;
+      }
     }
   }
 
   function handlePointerUp() {
+    const state = dragState.current;
+    if (state?.kind === 'node') {
+      const simNode = simNodesRef.current.get(state.id);
+      if (simNode) {
+        simNode.fx = null;
+        simNode.fy = null;
+      }
+      simulationRef.current?.alphaTarget(0);
+    }
     dragState.current = null;
   }
 
@@ -194,6 +229,12 @@ export function GraphView({ graph, selectedNodeId, query, onSelectNode }: GraphV
     event.stopPropagation();
     dragState.current = { kind: 'node', id: nodeId };
     (event.currentTarget as Element).setPointerCapture?.(event.pointerId);
+    const simNode = simNodesRef.current.get(nodeId);
+    if (simNode) {
+      simNode.fx = simNode.x;
+      simNode.fy = simNode.y;
+    }
+    simulationRef.current?.alphaTarget(0.3).restart();
   }
 
   return (
