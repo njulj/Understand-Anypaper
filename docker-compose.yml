@@ -1,0 +1,30 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: understand_anypaper
+      POSTGRES_USER: understand
+      POSTGRES_PASSWORD: understand
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./apps/server/sql/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+  server:
+    build: ./apps/server
+    environment:
+      DATABASE_URL: postgresql+psycopg://understand:understand@db:5432/understand_anypaper
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+  web:
+    build: ./apps/web
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "5173:5173"
+    depends_on:
+      - server
+volumes:
+  pgdata:
