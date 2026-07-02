@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS content_blocks (
   embedding vector(1536)
 );
 
-CREATE TABLE IF NOT EXISTS references (
+CREATE TABLE IF NOT EXISTS paper_references (
   id TEXT PRIMARY KEY,
   paper_id UUID NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
   raw_text TEXT NOT NULL,
@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS references (
 
 CREATE TABLE IF NOT EXISTS citation_mentions (
   id TEXT PRIMARY KEY,
-  reference_id TEXT NOT NULL REFERENCES references(id) ON DELETE CASCADE,
+  reference_id TEXT NOT NULL REFERENCES paper_references(id) ON DELETE CASCADE,
   content_block_id TEXT NOT NULL REFERENCES content_blocks(id) ON DELETE CASCADE,
   sentence TEXT NOT NULL,
   intent TEXT NOT NULL,
