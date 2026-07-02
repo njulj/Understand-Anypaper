@@ -1,0 +1,14 @@
+body { margin: 0; font-family: Inter, system-ui, sans-serif; background: #0f172a; color: #e2e8f0; }
+.shell { min-height: 100vh; }
+.toolbar { height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; border-bottom: 1px solid #334155; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; }
+.workspace { display: grid; grid-template-columns: 1fr 1.4fr 1fr; gap: 16px; padding: 16px; height: calc(100vh - 96px); }
+.pdf-pane, .graph-pane, .inspector { background: #111827; border: 1px solid #334155; border-radius: 18px; padding: 24px; }
+.pdf-pane { display: grid; place-content: center; text-align: center; color: #cbd5e1; }
+.graph-pane { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 28px; }
+.row { display: flex; gap: 18px; }
+.node { border-radius: 16px; padding: 18px 24px; box-shadow: 0 12px 32px rgb(0 0 0 / 0.25); }
+.paper { background: #2563eb; }
+.contribution { background: #7c3aed; }
+.lanes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; width: 100%; text-align: center; color: #93c5fd; font-weight: 700; }
+.inspector li { margin: 12px 0; }
