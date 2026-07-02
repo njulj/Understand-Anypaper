@@ -1,0 +1,476 @@
+import json
+import logging
+from abc import ABC, abstractmethod
+from uuid import uuid4
+
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
+
+from understand_anypaper.config import settings
+from understand_anypaper.graph.schema import GraphEdge, GraphNode, PaperArgumentGraph
+from understand_anypaper.parser.models import CitationMention, ContentBlock, PaperReference, ParsedPaper
+from understand_anypaper.retrieval.embeddings import EmbeddingClient
+
+logger = logging.getLogger(__name__)
+
+
+class GraphStore(ABC):
+    """Persistence contract for parsed papers and their argument graphs."""
+
+    @abstractmethod
+    def save_paper(self, parsed: ParsedPaper, graph: PaperArgumentGraph) -> None: ...
+
+    @abstractmethod
+    def list_papers(self) -> list[dict]: ...
+
+    @abstractmethod
+    def get_graph(self, paper_id: str) -> PaperArgumentGraph | None: ...
+
+    @abstractmethod
+    def replace_graph(self, paper_id: str, graph: PaperArgumentGraph) -> None: ...
+
+    @abstractmethod
+    def get_blocks(self, paper_id: str) -> list[ContentBlock]: ...
+
+    @abstractmethod
+    def get_references(self, paper_id: str) -> list[PaperReference]: ...
+
+    @abstractmethod
+    def find_reference(self, reference_id: str) -> PaperReference | None: ...
+
+    @abstractmethod
+    def update_reference(self, reference: PaperReference) -> None: ...
+
+    @abstractmethod
+    def get_mentions(self, reference_id: str) -> list[CitationMention]: ...
+
+    @abstractmethod
+    def record_patch(self, paper_id: str, operations: list[dict]) -> str: ...
+
+    @abstractmethod
+    def vector_search(self, paper_id: str, query: str, limit: int = 10) -> list[tuple[str, float]]:
+        """Returns (node_id, similarity) pairs; empty when embeddings are unavailable."""
+
+
+class InMemoryGraphStore(GraphStore):
+    def __init__(self) -> None:
+        self._papers: dict[str, ParsedPaper] = {}
+        self._graphs: dict[str, PaperArgumentGraph] = {}
+        self._patches: dict[str, list[dict]] = {}
+
+    def save_paper(self, parsed: ParsedPaper, graph: PaperArgumentGraph) -> None:
+        self._papers[parsed.paper_id] = parsed
+        self._graphs[parsed.paper_id] = graph
+
+    def list_papers(self) -> list[dict]:
+        return [
+            {"paper_id": paper.paper_id, "title": paper.title, "abstract": paper.abstract}
+            for paper in self._papers.values()
+        ]
+
+    def get_graph(self, paper_id: str) -> PaperArgumentGraph | None:
+        return self._graphs.get(paper_id)
+
+    def replace_graph(self, paper_id: str, graph: PaperArgumentGraph) -> None:
+        self._graphs[paper_id] = graph
+
+    def get_blocks(self, paper_id: str) -> list[ContentBlock]:
+        paper = self._papers.get(paper_id)
+        return paper.blocks if paper else []
+
+    def get_references(self, paper_id: str) -> list[PaperReference]:
+        paper = self._papers.get(paper_id)
+        return paper.references if paper else []
+
+    def find_reference(self, reference_id: str) -> PaperReference | None:
+        for paper in self._papers.values():
+            for reference in paper.references:
+                if reference.reference_id == reference_id:
+                    return reference
+        return None
+
+    def update_reference(self, reference: PaperReference) -> None:
+        for paper in self._papers.values():
+            for index, existing in enumerate(paper.references):
+                if existing.reference_id == reference.reference_id:
+                    paper.references[index] = reference
+                    return
+
+    def get_mentions(self, reference_id: str) -> list[CitationMention]:
+        for paper in self._papers.values():
+            mentions = [m for m in paper.mentions if m.reference_id == reference_id]
+            if mentions:
+                return mentions
+        return []
+
+    def record_patch(self, paper_id: str, operations: list[dict]) -> str:
+        patch_id = str(uuid4())
+        self._patches.setdefault(paper_id, []).append({"id": patch_id, "operations": operations})
+        return patch_id
+
+    def vector_search(self, paper_id: str, query: str, limit: int = 10) -> list[tuple[str, float]]:
+        return []
+
+
+class PostgresGraphStore(GraphStore):
+    def __init__(self, engine: Engine, embeddings: EmbeddingClient | None = None) -> None:
+        self._engine = engine
+        self._embeddings = embeddings or EmbeddingClient()
+
+    def save_paper(self, parsed: ParsedPaper, graph: PaperArgumentGraph) -> None:
+        node_embeddings = self._embed_nodes(graph.nodes)
+        with self._engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO papers (id, title, abstract) VALUES (:id, :title, :abstract) "
+                    "ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, abstract = EXCLUDED.abstract"
+                ),
+                {"id": parsed.paper_id, "title": parsed.title, "abstract": parsed.abstract},
+            )
+            for table in ("citation_mentions", "edges", "nodes", "content_blocks", "paper_references"):
+                if table == "citation_mentions":
+                    conn.execute(
+                        text(
+                            "DELETE FROM citation_mentions WHERE reference_id IN "
+                            "(SELECT id FROM paper_references WHERE paper_id = :pid)"
+                        ),
+                        {"pid": parsed.paper_id},
+                    )
+                else:
+                    conn.execute(text(f"DELETE FROM {table} WHERE paper_id = :pid"), {"pid": parsed.paper_id})  # noqa: S608
+
+            for block in parsed.blocks:
+                conn.execute(
+                    text(
+                        "INSERT INTO content_blocks (id, paper_id, page, section, block_type, semantic_role, bbox, text) "
+                        "VALUES (:id, :pid, :page, :section, :block_type, :semantic_role, :bbox, :text)"
+                    ),
+                    {
+                        "id": block.content_id,
+                        "pid": parsed.paper_id,
+                        "page": block.page,
+                        "section": block.section,
+                        "block_type": block.block_type,
+                        "semantic_role": block.semantic_role,
+                        "bbox": json.dumps(block.bbox) if block.bbox else None,
+                        "text": block.text,
+                    },
+                )
+            self._insert_nodes(conn, graph.nodes, node_embeddings)
+            self._insert_edges(conn, graph.edges)
+            for reference in parsed.references:
+                conn.execute(
+                    text(
+                        "INSERT INTO paper_references (id, paper_id, raw_text, title, authors, year, doi, arxiv_id, metadata_json) "
+                        "VALUES (:id, :pid, :raw_text, :title, :authors, :year, :doi, :arxiv_id, :metadata)"
+                    ),
+                    {
+                        "id": reference.reference_id,
+                        "pid": parsed.paper_id,
+                        "raw_text": reference.raw_text,
+                        "title": reference.title,
+                        "authors": json.dumps(reference.authors),
+                        "year": reference.year,
+                        "doi": reference.doi,
+                        "arxiv_id": reference.arxiv_id,
+                        "metadata": json.dumps({"marker": reference.marker}),
+                    },
+                )
+            for mention in parsed.mentions:
+                conn.execute(
+                    text(
+                        "INSERT INTO citation_mentions (id, reference_id, content_block_id, sentence, intent, confidence) "
+                        "VALUES (:id, :ref, :block, :sentence, :intent, :confidence)"
+                    ),
+                    {
+                        "id": mention.mention_id,
+                        "ref": mention.reference_id,
+                        "block": mention.content_id,
+                        "sentence": mention.sentence,
+                        "intent": mention.intent,
+                        "confidence": mention.confidence,
+                    },
+                )
+
+    def list_papers(self) -> list[dict]:
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT id, title, abstract, created_at FROM papers ORDER BY created_at DESC")
+            ).mappings()
+            return [
+                {
+                    "paper_id": str(row["id"]),
+                    "title": row["title"],
+                    "abstract": row["abstract"],
+                    "created_at": row["created_at"].isoformat(),
+                }
+                for row in rows
+            ]
+
+    def get_graph(self, paper_id: str) -> PaperArgumentGraph | None:
+        with self._engine.connect() as conn:
+            exists = conn.execute(text("SELECT 1 FROM papers WHERE id = :pid"), {"pid": paper_id}).first()
+            if not exists:
+                return None
+            node_rows = conn.execute(
+                text(
+                    "SELECT id, node_type, title, summary, properties_json, evidence_ids, page_ranges, "
+                    "confidence, source_type, created_by, verified FROM nodes WHERE paper_id = :pid"
+                ),
+                {"pid": paper_id},
+            ).mappings()
+            nodes = [
+                GraphNode(
+                    id=row["id"],
+                    paper_id=paper_id,
+                    node_type=row["node_type"],
+                    title=row["title"],
+                    summary=row["summary"],
+                    confidence=row["confidence"],
+                    source_type=row["source_type"],
+                    evidence_ids=list(row["evidence_ids"] or []),
+                    page_ranges=[tuple(pair) for pair in row["page_ranges"]],
+                    properties=row["properties_json"],
+                    created_by=row["created_by"],
+                    verified=row["verified"],
+                )
+                for row in node_rows
+            ]
+            edge_rows = conn.execute(
+                text(
+                    "SELECT id, source_node_id, target_node_id, edge_type, evidence_json, confidence, "
+                    "inference_type, properties_json FROM edges WHERE paper_id = :pid"
+                ),
+                {"pid": paper_id},
+            ).mappings()
+            edges = [
+                GraphEdge(
+                    id=row["id"],
+                    paper_id=paper_id,
+                    source_node_id=row["source_node_id"],
+                    target_node_id=row["target_node_id"],
+                    edge_type=row["edge_type"],
+                    confidence=row["confidence"],
+                    evidence=row["evidence_json"],
+                    inference_type=row["inference_type"],
+                    properties=row["properties_json"],
+                )
+                for row in edge_rows
+            ]
+        return PaperArgumentGraph(paper_id=paper_id, nodes=nodes, edges=edges)
+
+    def replace_graph(self, paper_id: str, graph: PaperArgumentGraph) -> None:
+        node_embeddings = self._embed_nodes(graph.nodes)
+        with self._engine.begin() as conn:
+            conn.execute(text("DELETE FROM edges WHERE paper_id = :pid"), {"pid": paper_id})
+            conn.execute(text("DELETE FROM nodes WHERE paper_id = :pid"), {"pid": paper_id})
+            self._insert_nodes(conn, graph.nodes, node_embeddings)
+            self._insert_edges(conn, graph.edges)
+
+    def get_blocks(self, paper_id: str) -> list[ContentBlock]:
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT id, page, section, block_type, semantic_role, bbox, text "
+                    "FROM content_blocks WHERE paper_id = :pid ORDER BY id"
+                ),
+                {"pid": paper_id},
+            ).mappings()
+            blocks = [
+                ContentBlock(
+                    content_id=row["id"],
+                    order=index,
+                    page=row["page"],
+                    section=row["section"],
+                    bbox=row["bbox"],
+                    text=row["text"],
+                    block_type=row["block_type"],
+                    semantic_role=row["semantic_role"],
+                )
+                for index, row in enumerate(rows, start=1)
+            ]
+        blocks.sort(key=lambda b: (b.page, self._block_number(b.content_id)))
+        for order, block in enumerate(blocks, start=1):
+            block.order = order
+        return blocks
+
+    @staticmethod
+    def _block_number(content_id: str) -> int:
+        tail = content_id.rsplit("block", 1)[-1]
+        return int(tail) if tail.isdigit() else 0
+
+    def get_references(self, paper_id: str) -> list[PaperReference]:
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT id, raw_text, title, authors, year, doi, arxiv_id, metadata_json "
+                    "FROM paper_references WHERE paper_id = :pid ORDER BY id"
+                ),
+                {"pid": paper_id},
+            ).mappings()
+            return [self._reference_from_row(row) for row in rows]
+
+    def find_reference(self, reference_id: str) -> PaperReference | None:
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT id, raw_text, title, authors, year, doi, arxiv_id, metadata_json "
+                    "FROM paper_references WHERE id = :rid"
+                ),
+                {"rid": reference_id},
+            ).mappings().first()
+            return self._reference_from_row(row) if row else None
+
+    @staticmethod
+    def _reference_from_row(row) -> PaperReference:
+        return PaperReference(
+            reference_id=row["id"],
+            marker=(row["metadata_json"] or {}).get("marker"),
+            raw_text=row["raw_text"],
+            title=row["title"],
+            authors=row["authors"] or [],
+            year=row["year"],
+            doi=row["doi"],
+            arxiv_id=row["arxiv_id"],
+        )
+
+    def update_reference(self, reference: PaperReference) -> None:
+        with self._engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE paper_references SET title = :title, authors = :authors, year = :year, "
+                    "doi = :doi, arxiv_id = :arxiv_id WHERE id = :rid"
+                ),
+                {
+                    "rid": reference.reference_id,
+                    "title": reference.title,
+                    "authors": json.dumps(reference.authors),
+                    "year": reference.year,
+                    "doi": reference.doi,
+                    "arxiv_id": reference.arxiv_id,
+                },
+            )
+
+    def get_mentions(self, reference_id: str) -> list[CitationMention]:
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT id, reference_id, content_block_id, sentence, intent, confidence "
+                    "FROM citation_mentions WHERE reference_id = :rid"
+                ),
+                {"rid": reference_id},
+            ).mappings()
+            return [
+                CitationMention(
+                    mention_id=row["id"],
+                    reference_id=row["reference_id"],
+                    content_id=row["content_block_id"],
+                    sentence=row["sentence"],
+                    intent=row["intent"],
+                    confidence=row["confidence"],
+                )
+                for row in rows
+            ]
+
+    def record_patch(self, paper_id: str, operations: list[dict]) -> str:
+        patch_id = str(uuid4())
+        with self._engine.begin() as conn:
+            conn.execute(
+                text("INSERT INTO graph_patches (id, paper_id, operations_json) VALUES (:id, :pid, :ops)"),
+                {"id": patch_id, "pid": paper_id, "ops": json.dumps(operations)},
+            )
+        return patch_id
+
+    def vector_search(self, paper_id: str, query: str, limit: int = 10) -> list[tuple[str, float]]:
+        if not self._embeddings.available:
+            return []
+        vectors = self._embeddings.embed([query])
+        if not vectors:
+            return []
+        query_vector = "[" + ",".join(f"{value:.6f}" for value in vectors[0]) + "]"
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT id, 1 - (embedding <=> CAST(:qvec AS vector)) AS similarity FROM nodes "
+                    "WHERE paper_id = :pid AND embedding IS NOT NULL "
+                    "ORDER BY embedding <=> CAST(:qvec AS vector) LIMIT :limit"
+                ),
+                {"qvec": query_vector, "pid": paper_id, "limit": limit},
+            )
+            return [(row[0], float(row[1])) for row in rows]
+
+    def _embed_nodes(self, nodes: list[GraphNode]) -> dict[str, str]:
+        if not self._embeddings.available or not nodes:
+            return {}
+        vectors = self._embeddings.embed([f"{node.title}\n{node.summary}" for node in nodes])
+        if not vectors:
+            return {}
+        return {
+            node.id: "[" + ",".join(f"{value:.6f}" for value in vector) + "]"
+            for node, vector in zip(nodes, vectors)
+        }
+
+    @staticmethod
+    def _insert_nodes(conn, nodes: list[GraphNode], embeddings: dict[str, str]) -> None:
+        for node in nodes:
+            conn.execute(
+                text(
+                    "INSERT INTO nodes (id, paper_id, node_type, title, summary, properties_json, evidence_ids, "
+                    "page_ranges, confidence, source_type, created_by, verified, embedding) "
+                    "VALUES (:id, :pid, :node_type, :title, :summary, :properties, :evidence_ids, :page_ranges, "
+                    ":confidence, :source_type, :created_by, :verified, CAST(:embedding AS vector))"
+                ),
+                {
+                    "id": node.id,
+                    "pid": node.paper_id,
+                    "node_type": str(node.node_type),
+                    "title": node.title,
+                    "summary": node.summary,
+                    "properties": json.dumps(node.properties, default=str),
+                    "evidence_ids": node.evidence_ids,
+                    "page_ranges": json.dumps([list(pair) for pair in node.page_ranges]),
+                    "confidence": node.confidence,
+                    "source_type": node.source_type,
+                    "created_by": node.created_by,
+                    "verified": node.verified,
+                    "embedding": embeddings.get(node.id),
+                },
+            )
+
+    @staticmethod
+    def _insert_edges(conn, edges: list[GraphEdge]) -> None:
+        for edge in edges:
+            conn.execute(
+                text(
+                    "INSERT INTO edges (id, paper_id, source_node_id, target_node_id, edge_type, evidence_json, "
+                    "confidence, inference_type, properties_json) VALUES (:id, :pid, :source, :target, :edge_type, "
+                    ":evidence, :confidence, :inference_type, :properties)"
+                ),
+                {
+                    "id": edge.id,
+                    "pid": edge.paper_id,
+                    "source": edge.source_node_id,
+                    "target": edge.target_node_id,
+                    "edge_type": str(edge.edge_type),
+                    "evidence": edge.evidence.model_dump_json() if edge.evidence else None,
+                    "confidence": edge.confidence,
+                    "inference_type": edge.inference_type,
+                    "properties": json.dumps(edge.properties, default=str),
+                },
+            )
+
+
+def create_graph_store() -> GraphStore:
+    """Returns a Postgres-backed store when the database is reachable, else in-memory."""
+    if settings.database_url in {"", "memory"}:
+        return InMemoryGraphStore()
+    try:
+        engine = create_engine(settings.database_url, pool_pre_ping=True, connect_args={"connect_timeout": 3})
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        logger.info("Using PostgreSQL graph store at %s", engine.url.render_as_string(hide_password=True))
+        return PostgresGraphStore(engine)
+    except SQLAlchemyError as exc:
+        logger.warning("Database unavailable (%s); falling back to in-memory graph store", exc)
+        return InMemoryGraphStore()

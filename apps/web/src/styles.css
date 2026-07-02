@@ -93,8 +93,8 @@ button {
 }
 
 .primary-action,
-.upload-drop,
-.node {
+.danger-action,
+.upload-drop {
   border: 1px solid transparent;
   border-radius: 8px;
   color: var(--text);
@@ -172,18 +172,15 @@ button {
   color: var(--danger);
 }
 
-.source-preview,
 .inspector-title {
   margin-top: 18px;
 }
 
-.source-preview h3,
 .inspector-title h3 {
   margin: 8px 0;
   font-size: 18px;
 }
 
-.source-preview p,
 .inspector-title p,
 .empty-state p,
 .edge-item p,
@@ -192,7 +189,6 @@ button {
   line-height: 1.5;
 }
 
-.source-preview p,
 .inspector-title p {
   max-height: 240px;
   overflow: auto;
@@ -241,72 +237,250 @@ button {
   font-size: 12px;
 }
 
-.graph-groups {
-  display: grid;
-  gap: 14px;
-  padding: 16px;
-}
-
-.node-group h3,
-.edge-list h3 {
+.edge-list h3,
+.evidence-list h3,
+.edit-form h3 {
   margin: 0 0 10px;
   font-size: 13px;
   color: var(--muted);
   text-transform: uppercase;
 }
 
-.node-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 10px;
+.graph-canvas {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  touch-action: none;
+  cursor: grab;
+  background:
+    radial-gradient(circle at 1px 1px, #222b35 1px, transparent 0) 0 0 / 26px 26px,
+    var(--panel);
 }
 
-.node {
-  min-height: 76px;
+.graph-canvas:active {
+  cursor: grabbing;
+}
+
+.graph-edge line {
+  stroke: #5b6b7d;
+  stroke-width: 1.4;
+  opacity: 0.75;
+}
+
+.graph-edge.dimmed line {
+  opacity: 0.12;
+}
+
+.graph-node {
+  cursor: pointer;
+}
+
+.graph-node circle {
+  stroke: rgba(0, 0, 0, 0.45);
+  stroke-width: 1.5;
+}
+
+.graph-node.selected circle:first-of-type {
+  stroke: #fff;
+  stroke-width: 2.5;
+}
+
+.graph-node .verified-ring {
+  fill: none;
+  stroke: var(--success);
+  stroke-width: 2;
+  stroke-dasharray: 4 3;
+}
+
+.graph-node text {
+  fill: var(--muted);
+  font-size: 11px;
+  text-anchor: middle;
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 3px;
+  pointer-events: none;
+}
+
+.graph-node.selected text {
+  fill: var(--text);
+}
+
+.graph-node.dimmed {
+  opacity: 0.18;
+}
+
+.graph-legend {
   display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 12px;
-  background: var(--panel-soft);
-  border-color: var(--border);
-  text-align: left;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
 }
 
-.node:hover,
-.node.selected {
+.graph-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.graph-legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.block-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.content-block {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.content-block.highlighted {
+  border-color: var(--accent);
+  background: #1c2c44;
+}
+
+.content-block header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.content-block p {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.role-tag {
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.paper-select {
+  height: 38px;
+  max-width: 220px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.evidence-list {
+  margin-top: 20px;
+}
+
+.evidence-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.evidence-chip {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.evidence-chip:hover {
   border-color: var(--accent);
 }
 
-.node.selected {
-  box-shadow: inset 0 0 0 1px var(--accent);
+.edit-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 22px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-soft);
 }
 
-.node span {
-  overflow-wrap: anywhere;
-  font-weight: 700;
-}
-
-.node small {
+.edit-form label {
+  display: grid;
+  gap: 6px;
   color: var(--muted);
+  font-size: 13px;
 }
 
-.node.Paper {
-  background: #1a355c;
+.edit-form input,
+.edit-form textarea {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  resize: vertical;
 }
 
-.node.Contribution {
-  background: #213f37;
+.edit-form .checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-.node.Method,
-.node.Module {
-  background: #403628;
+.edit-actions {
+  display: flex;
+  gap: 10px;
 }
 
-.node.Experiment,
-.node.Result {
-  background: #49313b;
+.edit-actions .primary-action {
+  height: 34px;
+  font-size: 13px;
+}
+
+.danger-action {
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  background: transparent;
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--border));
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.danger-action:hover {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+.edge-link {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: 13px;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.edge-link:hover {
+  text-decoration: underline;
 }
 
 .empty-state {

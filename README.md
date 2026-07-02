@@ -43,14 +43,22 @@ Web client: <http://localhost:5173>
 
 ## API surface
 
-- `POST /api/papers` uploads/registers a paper and queues analysis.
+- `POST /api/papers` uploads a paper (PDF/txt/md), parses it, builds the PAG, and persists it.
+- `GET /api/papers` lists stored papers.
 - `GET /api/papers/{paper_id}/graph` returns the global PAG.
 - `GET /api/papers/{paper_id}/graph/subgraph?node_id=...&depth=2` returns a focused subgraph.
-- `GET /api/nodes/{node_id}/evidence` returns source-backed evidence.
+- `GET /api/papers/{paper_id}/blocks` returns parsed content blocks (page, section, bbox, role).
+- `GET /api/papers/{paper_id}/references` returns extracted reference entries.
+- `GET /api/papers/{paper_id}/completeness` scores each contribution's evidence coverage.
+- `GET /api/nodes/{node_id}/evidence` returns source-backed evidence with block text.
 - `GET /api/content/{content_id}/assignments` explains contribution assignments.
-- `POST /api/references/{reference_id}/resolve` resolves metadata for a citation.
-- `POST /api/references/{reference_id}/analyze` recursively analyzes a cited paper within policy limits.
-- `POST /api/graph/search` searches the graph with lexical/vector hooks.
+- `POST /api/papers/{paper_id}/graph/patch` applies manual corrections (add/update/remove nodes and edges).
+- `POST /api/references/{reference_id}/resolve` enriches citation metadata via Crossref.
+- `POST /api/references/{reference_id}/analyze` returns citation mentions, intents, and traversal-policy bounds.
+- `POST /api/graph/search` hybrid search (lexical + pgvector when embeddings are configured).
+
+Set `OPENAI_API_KEY` (see `.env.example`) to enable LLM-based semantic-role classification,
+contribution extraction, and vector search; without it the rule-based pipeline runs fully offline.
 
 ## Development
 

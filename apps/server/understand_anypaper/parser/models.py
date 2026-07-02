@@ -20,8 +20,30 @@ class ContentBlock(BaseModel):
         return EvidenceRef(page=self.page, block_id=self.content_id, text=self.text, bbox=self.bbox)
 
 
+class PaperReference(BaseModel):
+    reference_id: str
+    marker: str | None = None
+    raw_text: str
+    title: str | None = None
+    authors: list[str] = Field(default_factory=list)
+    year: int | None = None
+    doi: str | None = None
+    arxiv_id: str | None = None
+
+
+class CitationMention(BaseModel):
+    mention_id: str
+    reference_id: str
+    content_id: str
+    sentence: str
+    intent: str = "BACKGROUND"
+    confidence: float = Field(ge=0, le=1, default=0.6)
+
+
 class ParsedPaper(BaseModel):
     paper_id: str
     title: str
     abstract: str = ""
     blocks: list[ContentBlock] = Field(default_factory=list)
+    references: list[PaperReference] = Field(default_factory=list)
+    mentions: list[CitationMention] = Field(default_factory=list)

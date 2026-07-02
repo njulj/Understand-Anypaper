@@ -1,50 +1,343 @@
+import re
+from collections import Counter
 from pathlib import Path
 from uuid import uuid4
 
-from understand_anypaper.parser.models import ContentBlock, ParsedPaper
+import fitz  # PyMuPDF
+
+from understand_anypaper.analyzers.citation_intent_classifier import CitationIntentClassifier
+from understand_anypaper.analyzers.semantic_role_classifier import SemanticRoleClassifier
+from understand_anypaper.parser.models import CitationMention, ContentBlock, PaperReference, ParsedPaper
+
+_REFERENCE_SECTION = re.compile(r"^\s*(references|bibliography)\s*$", re.IGNORECASE)
+_NUMERIC_CITATION = re.compile(r"\[(\d+(?:\s*[,;\-–]\s*\d+)*)\]")
+_REF_MARKER = re.compile(r"^\s*\[(\d+)\]\s*")
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z\[])")
+_CAPTION = re.compile(r"^(figure|fig\.|table)\s*\d+", re.IGNORECASE)
+_YEAR = re.compile(r"\b(19|20)\d{2}\b")
+_DOI = re.compile(r"\b10\.\d{4,9}/[^\s,;]+", re.IGNORECASE)
+_ARXIV = re.compile(r"arxiv[:\s]*(\d{4}\.\d{4,5})", re.IGNORECASE)
+_MATH_CHARS = set("=+−-*/^_∑∏∫√∂∇≈≠≤≥∈∀∃αβγδεζηθλμπσφψωΔΣΠΩ()|{}")
 
 
 class PdfParser:
-    """MVP parser facade.
+    """Parses PDF (via PyMuPDF) and text/markdown papers into traceable content blocks.
 
-    Production parsing will plug in layout, equation, figure, table, and reference
-    extractors. For now, text-like inputs and uploaded filenames create stable
-    content atoms so the rest of the PAG pipeline is runnable.
+    Produces per-block page numbers and bounding boxes, section-aware semantic
+    roles, extracted reference entries, and inline citation mentions.
     """
 
+    def __init__(self) -> None:
+        self._roles = SemanticRoleClassifier()
+        self._intents = CitationIntentClassifier()
+
     def parse(self, path: Path) -> ParsedPaper:
-        text = path.read_text(errors="ignore") if path.suffix.lower() in {".txt", ".md"} else ""
-        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()] or [path.name]
-        blocks = [
-            ContentBlock(
-                content_id=f"text-page1-block{i}",
-                order=i,
-                page=1,
-                text=paragraph,
-                semantic_role=self._classify_role(paragraph),
+        if path.suffix.lower() == ".pdf":
+            return self._parse_pdf(path)
+        return self._parse_text(path)
+
+    # ------------------------------------------------------------------ PDF
+
+    def _parse_pdf(self, path: Path) -> ParsedPaper:
+        paper_id = str(uuid4())
+        prefix = paper_id[:8]
+        doc = fitz.open(path)
+        try:
+            raw_blocks = self._extract_raw_blocks(doc)
+            title = self._detect_title(doc, raw_blocks)
+        finally:
+            doc.close()
+
+        body_size = self._body_font_size(raw_blocks)
+        blocks: list[ContentBlock] = []
+        reference_lines: list[str] = []
+        section: str | None = None
+        in_references = False
+        order = 0
+
+        for raw in raw_blocks:
+            text = raw["text"].strip()
+            if not text:
+                continue
+            is_heading = self._is_heading(raw, body_size)
+            if is_heading:
+                section = text
+                in_references = bool(_REFERENCE_SECTION.match(text))
+                continue
+            if in_references:
+                reference_lines.append(text)
+                continue
+            block_type = self._block_type(text, raw, body_size)
+            order += 1
+            flat_text = re.sub(r"\s+", " ", text)
+            blocks.append(
+                ContentBlock(
+                    content_id=f"text-{prefix}-page{raw['page']}-block{order}",
+                    order=order,
+                    page=raw["page"],
+                    section=section,
+                    bbox=list(raw["bbox"]),
+                    text=flat_text,
+                    block_type=block_type,
+                    semantic_role=self._roles.classify(flat_text, section, block_type),
+                )
             )
-            for i, paragraph in enumerate(paragraphs, start=1)
-        ]
+
+        abstract = self._detect_abstract(blocks)
+        references = self._parse_reference_entries(reference_lines, prefix)
+        mentions = self._extract_mentions(blocks, references, prefix)
+        self._link_neighbors(blocks)
         return ParsedPaper(
-            paper_id=str(uuid4()),
-            title=path.stem,
-            abstract=paragraphs[0][:1000] if paragraphs else "",
+            paper_id=paper_id,
+            title=title or path.stem,
+            abstract=abstract,
             blocks=blocks,
+            references=references,
+            mentions=mentions,
         )
 
     @staticmethod
-    def _classify_role(text: str) -> str:
-        lower = text.lower()
-        if "contribution" in lower or "we propose" in lower:
-            return "contribution"
-        if "limitation" in lower or "gap" in lower:
-            return "gap"
-        if "method" in lower or "module" in lower:
-            return "method"
-        if "experiment" in lower or "ablation" in lower:
-            return "experiment"
-        if "result" in lower or "improve" in lower:
-            return "result"
-        if "conclusion" in lower:
-            return "conclusion"
-        return "background"
+    def _extract_raw_blocks(doc: fitz.Document) -> list[dict]:
+        raw_blocks: list[dict] = []
+        for page_index, page in enumerate(doc, start=1):
+            for block in page.get_text("dict")["blocks"]:
+                if block.get("type") != 0:
+                    continue
+                spans = [span for line in block.get("lines", []) for span in line.get("spans", [])]
+                if not spans:
+                    continue
+                text = "\n".join(
+                    " ".join(span["text"] for span in line.get("spans", [])).strip()
+                    for line in block.get("lines", [])
+                ).strip()
+                sizes = [round(span["size"], 1) for span in spans]
+                raw_blocks.append(
+                    {
+                        "page": page_index,
+                        "bbox": block["bbox"],
+                        "text": text,
+                        "max_size": max(sizes),
+                        "mode_size": Counter(sizes).most_common(1)[0][0],
+                        "bold": all(span.get("flags", 0) & 16 for span in spans),
+                    }
+                )
+        return raw_blocks
+
+    @staticmethod
+    def _body_font_size(raw_blocks: list[dict]) -> float:
+        sizes = Counter(raw["mode_size"] for raw in raw_blocks if len(raw["text"]) > 120)
+        if not sizes:
+            sizes = Counter(raw["mode_size"] for raw in raw_blocks)
+        return sizes.most_common(1)[0][0] if sizes else 10.0
+
+    @staticmethod
+    def _detect_title(doc: fitz.Document, raw_blocks: list[dict]) -> str:
+        meta_title = (doc.metadata or {}).get("title", "").strip()
+        if meta_title:
+            return meta_title
+        first_page = [raw for raw in raw_blocks if raw["page"] == 1 and len(raw["text"]) > 8]
+        if not first_page:
+            return ""
+        return max(first_page, key=lambda raw: raw["max_size"])["text"]
+
+    @staticmethod
+    def _is_heading(raw: dict, body_size: float) -> bool:
+        text = raw["text"]
+        if len(text) > 90 or "\n" in text:
+            return False
+        if _REFERENCE_SECTION.match(text):
+            return True
+        looks_bigger = raw["mode_size"] >= body_size * 1.12
+        numbered = bool(re.match(r"^\d+(\.\d+)*\.?\s+[A-Z]", text))
+        return (looks_bigger and (raw["bold"] or numbered or text.istitle() or text.isupper())) or (
+            raw["bold"] and numbered
+        )
+
+    @staticmethod
+    def _block_type(text: str, raw: dict, body_size: float) -> str:
+        if _CAPTION.match(text):
+            return "figure_caption" if text.lower().startswith(("figure", "fig.")) else "table_caption"
+        stripped = text.replace(" ", "")
+        if stripped:
+            math_ratio = sum(1 for ch in stripped if ch in _MATH_CHARS or ch.isdigit()) / len(stripped)
+            if math_ratio > 0.45 and len(stripped) < 200:
+                return "equation"
+        return "paragraph"
+
+    @staticmethod
+    def _detect_abstract(blocks: list[ContentBlock]) -> str:
+        for block in blocks:
+            section = (block.section or "").lower()
+            text = block.text
+            if section.startswith("abstract"):
+                return text[:2000]
+            if text.lower().startswith("abstract"):
+                return text[len("abstract"):].lstrip(" .:—-")[:2000]
+        return blocks[0].text[:1000] if blocks else ""
+
+    # ----------------------------------------------------------- text / md
+
+    def _parse_text(self, path: Path) -> ParsedPaper:
+        paper_id = str(uuid4())
+        prefix = paper_id[:8]
+        text = path.read_text(errors="ignore")
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()] or [path.name]
+
+        blocks: list[ContentBlock] = []
+        reference_lines: list[str] = []
+        section: str | None = None
+        in_references = False
+        title = path.stem
+        order = 0
+
+        for paragraph in paragraphs:
+            heading = re.match(r"^#{1,6}\s+(.+)$", paragraph)
+            if heading:
+                section = heading.group(1).strip()
+                in_references = bool(_REFERENCE_SECTION.match(section))
+                if title == path.stem and paragraph.startswith("# "):
+                    title = section
+                continue
+            if _REFERENCE_SECTION.match(paragraph):
+                in_references = True
+                section = paragraph.strip()
+                continue
+            if in_references:
+                reference_lines.extend(line for line in paragraph.splitlines() if line.strip())
+                continue
+            order += 1
+            blocks.append(
+                ContentBlock(
+                    content_id=f"text-{prefix}-page1-block{order}",
+                    order=order,
+                    page=1,
+                    section=section,
+                    text=paragraph,
+                    semantic_role=self._roles.classify(paragraph, section),
+                )
+            )
+
+        references = self._parse_reference_entries(reference_lines, prefix)
+        mentions = self._extract_mentions(blocks, references, prefix)
+        self._link_neighbors(blocks)
+        return ParsedPaper(
+            paper_id=paper_id,
+            title=title,
+            abstract=blocks[0].text[:1000] if blocks else "",
+            blocks=blocks,
+            references=references,
+            mentions=mentions,
+        )
+
+    # ----------------------------------------------------------- references
+
+    def _parse_reference_entries(self, lines: list[str], prefix: str) -> list[PaperReference]:
+        text = "\n".join(lines).strip()
+        if not text:
+            return []
+        entries: list[tuple[str | None, str]] = []
+        markers = list(re.finditer(r"\[(\d+)\]", text))
+        # Entry markers in a reference list form an increasing sequence; keeping
+        # only those filters out inline citations inside an entry.
+        starts: list[re.Match[str]] = []
+        for match in markers:
+            if not starts or int(match.group(1)) == int(starts[-1].group(1)) + 1:
+                starts.append(match)
+        if starts:
+            for i, match in enumerate(starts):
+                end = starts[i + 1].start() if i + 1 < len(starts) else len(text)
+                entries.append((match.group(1), text[match.end():end].strip()))
+        else:
+            entries = [(None, line.strip()) for line in text.splitlines() if len(line.strip()) > 20]
+        return [
+            self._build_reference(index, marker, raw, prefix)
+            for index, (marker, raw) in enumerate(entries, start=1)
+        ]
+
+    @staticmethod
+    def _build_reference(index: int, marker: str | None, raw: str, prefix: str) -> PaperReference:
+        raw = re.sub(r"\s+", " ", raw).strip()
+        year_match = _YEAR.search(raw)
+        doi_match = _DOI.search(raw)
+        arxiv_match = _ARXIV.search(raw)
+        title = None
+        quoted = re.search(r"[“\"](.+?)[”\"]", raw)
+        if quoted:
+            title = quoted.group(1).strip(" .,")
+        else:
+            parts = [part.strip() for part in raw.split(". ") if len(part.strip()) > 12]
+            title = next((part.strip(" .,") for part in parts if not _YEAR.search(part)), None)
+        authors: list[str] = []
+        author_part = raw.split(title, 1)[0] if title and title in raw else raw.split(". ")[0]
+        author_part = author_part.strip(" .,")
+        if 0 < len(author_part) < 160 and not _YEAR.search(author_part):
+            authors = [a.strip(" .") for a in re.split(r",| and ", author_part) if len(a.strip()) > 2][:8]
+        return PaperReference(
+            reference_id=f"ref-{prefix}-{marker or index}",
+            marker=f"[{marker}]" if marker else None,
+            raw_text=raw,
+            title=title,
+            authors=authors,
+            year=int(year_match.group(0)) if year_match else None,
+            doi=doi_match.group(0).rstrip(".") if doi_match else None,
+            arxiv_id=arxiv_match.group(1) if arxiv_match else None,
+        )
+
+    def _extract_mentions(
+        self, blocks: list[ContentBlock], references: list[PaperReference], prefix: str
+    ) -> list[CitationMention]:
+        by_marker = {ref.marker: ref for ref in references if ref.marker}
+        mentions: list[CitationMention] = []
+        for block in blocks:
+            for match in _NUMERIC_CITATION.finditer(block.text):
+                sentence = self._containing_sentence(block.text, match.start())
+                for number in self._expand_numbers(match.group(1)):
+                    reference = by_marker.get(f"[{number}]")
+                    if reference is None:
+                        continue
+                    if reference.marker not in block.citations:
+                        block.citations.append(reference.marker or f"[{number}]")
+                    mentions.append(
+                        CitationMention(
+                            mention_id=f"mention-{prefix}-{len(mentions) + 1}",
+                            reference_id=reference.reference_id,
+                            content_id=block.content_id,
+                            sentence=sentence,
+                            intent=str(self._intents.classify(sentence)),
+                            confidence=0.6,
+                        )
+                    )
+        return mentions
+
+    @staticmethod
+    def _expand_numbers(group: str) -> list[int]:
+        numbers: list[int] = []
+        for part in re.split(r"[,;]", group):
+            part = part.strip()
+            range_match = re.match(r"^(\d+)\s*[\-–]\s*(\d+)$", part)
+            if range_match:
+                start, end = int(range_match.group(1)), int(range_match.group(2))
+                if 0 < end - start <= 30:
+                    numbers.extend(range(start, end + 1))
+            elif part.isdigit():
+                numbers.append(int(part))
+        return numbers
+
+    @staticmethod
+    def _containing_sentence(text: str, position: int) -> str:
+        sentences = _SENTENCE_SPLIT.split(text)
+        offset = 0
+        for sentence in sentences:
+            end = offset + len(sentence) + 1
+            if position < end:
+                return sentence.strip()
+            offset = end
+        return text[:300]
+
+    @staticmethod
+    def _link_neighbors(blocks: list[ContentBlock]) -> None:
+        for i, block in enumerate(blocks):
+            if i > 0:
+                block.neighbor_ids.append(blocks[i - 1].content_id)
+            if i + 1 < len(blocks):
+                block.neighbor_ids.append(blocks[i + 1].content_id)

@@ -14,6 +14,8 @@ services:
     build: ./apps/server
     environment:
       DATABASE_URL: postgresql+psycopg://understand:understand@db:5432/understand_anypaper
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
     ports:
       - "8000:8000"
     depends_on:
