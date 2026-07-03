@@ -100,6 +100,7 @@ class PdfParser:
     def _extract_raw_blocks(doc: fitz.Document) -> list[dict]:
         raw_blocks: list[dict] = []
         for page_index, page in enumerate(doc, start=1):
+            page_blocks: list[dict] = []
             for block in page.get_text("dict")["blocks"]:
                 if block.get("type") != 0:
                     continue
@@ -111,7 +112,7 @@ class PdfParser:
                     for line in block.get("lines", [])
                 ).strip()
                 sizes = [round(span["size"], 1) for span in spans]
-                raw_blocks.append(
+                page_blocks.append(
                     {
                         "page": page_index,
                         "bbox": block["bbox"],
@@ -121,7 +122,38 @@ class PdfParser:
                         "bold": all(span.get("flags", 0) & 16 for span in spans),
                     }
                 )
+            raw_blocks.extend(PdfParser._sort_page_blocks(page_blocks, page.rect.width, page.rect.height))
         return raw_blocks
+
+    @staticmethod
+    def _sort_page_blocks(blocks: list[dict], page_width: float, page_height: float) -> list[dict]:
+        if len(blocks) < 4:
+            return sorted(blocks, key=lambda raw: (raw["bbox"][1], raw["bbox"][0]))
+
+        mid_x = page_width / 2
+        narrow_blocks = [
+            raw
+            for raw in blocks
+            if (raw["bbox"][2] - raw["bbox"][0]) < page_width * 0.72
+        ]
+        left = [raw for raw in narrow_blocks if (raw["bbox"][0] + raw["bbox"][2]) / 2 < mid_x]
+        right = [raw for raw in narrow_blocks if (raw["bbox"][0] + raw["bbox"][2]) / 2 >= mid_x]
+        two_column = len(left) >= 2 and len(right) >= 2
+        if not two_column:
+            return sorted(blocks, key=lambda raw: (raw["bbox"][1], raw["bbox"][0]))
+
+        def key(raw: dict) -> tuple[int, float, float]:
+            x0, y0, x1, _ = raw["bbox"]
+            width = x1 - x0
+            center_x = (x0 + x1) / 2
+            is_wide = width >= page_width * 0.72
+            if is_wide and y0 < page_height * 0.25:
+                return (-1, y0, x0)
+            if is_wide:
+                return (2, y0, x0)
+            return (0 if center_x < mid_x else 1, y0, x0)
+
+        return sorted(blocks, key=key)
 
     @staticmethod
     def _body_font_size(raw_blocks: list[dict]) -> float:

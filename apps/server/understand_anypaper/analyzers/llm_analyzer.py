@@ -12,6 +12,7 @@ _ROLE_VALUES = {
     "contribution", "motivation", "gap", "method", "experiment",
     "result", "conclusion", "background", "equation", "figure", "table",
 }
+_LINK_ROLES = _ROLE_VALUES - {"contribution"}
 
 _ROLE_SYSTEM_PROMPT = (
     "You classify paragraphs of a research paper into semantic roles. "
@@ -25,6 +26,16 @@ _CONTRIBUTION_SYSTEM_PROMPT = (
     "needs a short title, a one-paragraph summary grounded in the given text, and the "
     "content_ids of the blocks that state or support it. Respond with JSON only: "
     '{"contributions": [{"title": "...", "summary": "...", "evidence_content_ids": ["..."]}]}'
+)
+
+_EVIDENCE_LINK_SYSTEM_PROMPT = (
+    "You link paper evidence blocks to extracted contributions. Use only the provided "
+    "contribution indexes and content_ids. Pick blocks that explain WHY the contribution "
+    "is needed, HOW it works, or PROOF that it works. Valid roles: motivation, gap, "
+    "method, equation, figure, table, experiment, result, conclusion, background. "
+    "Respond with JSON only: "
+    '{"links": [{"contribution_index": 1, "content_id": "...", "role": "method", '
+    '"confidence": 0.8, "reason": "..."}]}'
 )
 
 
@@ -80,6 +91,54 @@ class LLMAnalyzer:
             evidence = [cid for cid in item.get("evidence_content_ids", []) if cid in known_ids]
             cleaned.append({"title": str(item["title"]), "summary": str(item["summary"]), "evidence_content_ids": evidence})
         return cleaned or None
+
+    def link_evidence(self, parsed: ParsedPaper, contribution_specs: list[dict]) -> dict[int, list[dict]] | None:
+        if not self.available or not parsed.blocks or not contribution_specs:
+            return None
+        contributions = "\n".join(
+            f"{index}. {spec['title']}: {spec['summary'][:600]}"
+            for index, spec in enumerate(contribution_specs, start=1)
+        )
+        blocks = "\n\n".join(
+            f"[{block.content_id}] ({block.section or 'no section'}, {block.semantic_role}) {block.text[:700]}"
+            for block in parsed.blocks[:90]
+        )
+        payload = self._chat_json(
+            _EVIDENCE_LINK_SYSTEM_PROMPT,
+            f"Title: {parsed.title}\n\nContributions:\n{contributions}\n\nBlocks:\n{blocks}",
+        )
+        if not payload:
+            return None
+        links = payload.get("links")
+        if not isinstance(links, list):
+            return None
+        known_ids = {block.content_id for block in parsed.blocks}
+        by_contribution: dict[int, list[dict]] = {}
+        for item in links:
+            if not isinstance(item, dict):
+                continue
+            try:
+                contribution_index = int(item.get("contribution_index"))
+                confidence = float(item.get("confidence", 0.75))
+            except (TypeError, ValueError):
+                continue
+            content_id = item.get("content_id")
+            role = item.get("role")
+            if (
+                not 1 <= contribution_index <= len(contribution_specs)
+                or content_id not in known_ids
+                or role not in _LINK_ROLES
+            ):
+                continue
+            by_contribution.setdefault(contribution_index, []).append(
+                {
+                    "content_id": content_id,
+                    "role": role,
+                    "confidence": max(0.0, min(confidence, 1.0)),
+                    "reason": str(item.get("reason") or ""),
+                }
+            )
+        return by_contribution or None
 
     def _chat_json(self, system: str, user: str) -> dict | None:
         try:

@@ -23,8 +23,8 @@
 - [x] 点击 evidence 跳转/高亮原文块已实现
 - [x] 人工修正 UI 已实现（编辑标题/摘要、标记 verified、删除节点，走 patch API）
 - [x] 刷新后自动从后端恢复已有论文；多论文切换下拉
-- [ ] 真实 PDF 阅读器（渲染 PDF 页面 + bbox 高亮）未实现，当前是文本块视图
-- [ ] 手动添加节点/边的 UI 未实现（API 已支持）
+- [x] 真实 PDF 阅读器已实现（后端 PyMuPDF 渲染页面 PNG + 前端 bbox 高亮；文本块视图保留为 fallback）
+- [x] 手动添加节点/边的 UI 已实现（走 patch API，并标记 human-added / verified）
 
 ## 后端 API
 
@@ -41,7 +41,7 @@
 - [x] `POST /api/papers/{paper_id}/graph/patch` 已实现（增删改节点/边，记录到 graph_patches）
 - [x] `POST /api/references/{reference_id}/resolve` 已实现（Crossref 元数据补全，失败回退本地解析结果）
 - [x] `POST /api/references/{reference_id}/analyze` 已实现（返回 mention + 意图统计 + 递归边界判断）
-- [ ] 引用论文自动递归抓取/分析未实现（analyze 只做当前论文内分析）
+- [x] 引用论文递归抓取/分析基础版已实现（`analyze` 传 `expand: true` 时优先缓存命中，再尝试 arXiv PDF 下载并复用解析建图管线）
 
 ## PDF / Parser
 
@@ -52,7 +52,8 @@
 - [x] 公式块、图/表 caption 检测已实现（启发式）
 - [x] 参考文献列表抽取已实现（`[n]` 编号切分 + 年份/DOI/arXiv/标题/作者解析）
 - [x] citation mention 抽取已实现（`[n]`/`[n,m]`/`[n-m]` → 所在句子 + 意图分类）
-- [ ] 版面双栏重排、跨页段落合并未实现
+- [x] 版面双栏阅读顺序重排已实现基础启发式
+- [ ] 跨页段落合并未实现
 - [ ] 图片/表格内容本身未抽取（只有 caption）
 
 ## Graph
@@ -66,7 +67,7 @@
 - [x] LLM 版语义角色分类已实现（`analyzers/llm_analyzer.py`，无 key 回退规则）
 - [x] LLM 版贡献抽取已实现（同上，evidence 落到 content_id）
 - [x] 图修正 patch 机制已接入 API 和 UI
-- [ ] LLM 版 evidence linking / 关系判断未细化（当前 LLM 只出角色和贡献）
+- [x] LLM 版 evidence linking / 关系判断已接入（无 key 时使用角色、距离、关键词的 WHY/HOW/PROOF 规则 linking 兜底）
 
 ## 存储
 
@@ -82,7 +83,7 @@
 - [x] embedding 生成已实现（`retrieval/embeddings.py`，需 API key）
 - [x] pgvector 相似度查询已实现（cosine）
 - [x] hybrid search 已实现（lexical + vector 分数合并）
-- [ ] graph retrieval（沿边扩展的检索）未实现
+- [x] graph retrieval（沿边扩展的检索）已实现（`POST /api/graph/search` 支持 `expand_depth` 并返回 `expanded_subgraph`）
 
 ## 引用与递归
 
@@ -91,8 +92,8 @@
 - [x] 引用列表抽取已实现
 - [x] citation mention 抽取已实现
 - [x] 引用元数据解析已实现（本地规则 + Crossref resolve）
-- [ ] 引用论文递归分析未实现（需要拿到被引论文 PDF）
-- [ ] 递归分析缓存未实现
+- [x] 引用论文递归分析基础版已实现（arXiv PDF 可自动下载；无可下载 PDF 时仍提示上传）
+- [x] 递归分析缓存基础版已实现（按 source reference、arXiv ID、标题匹配已解析论文）
 
 ## LLM / 外部依赖
 
@@ -100,8 +101,15 @@
 - [x] embedding 模型配置已定义（`PAG_EMBEDDING_MODEL` / `PAG_EMBEDDING_DIMENSIONS`）
 - [x] PDF 解析依赖 `pymupdf` 已接入
 - [x] Crossref 已接入（reference resolve）
-- [ ] Codex CLI 未接入实际调用
-- [ ] Semantic Scholar / arXiv 服务未接入
+- [ ] Codex CLI 未接入实际调用（规划定位：不替代主流水线；用于后期 agent + skill 微调、复杂 evidence linking、递归引用分析和图谱一致性修正建议）
+- [x] Semantic Scholar / arXiv 服务已接入（Semantic Scholar 元数据补全；arXiv PDF 递归扩展）
+
+## 分析架构规划
+
+- [x] 确定分层方向：前置流程固定 workflow 化，保证上传、解析、建图、持久化、检索链路可重复、可测试、可回退
+- [x] 当前 LLM calls 定位为结构化局部识别器：贡献抽取、语义角色分类、后续 evidence linking / 关系判断
+- [ ] agent + skill 定位为后期微调层：基于已有 paper_id / node_id / block_id 读取上下文，产出候选 graph patch 或解释，不直接替代基础 pipeline
+- [ ] 未来可抽象 `AnalyzerBackend`：默认使用 OpenAI 兼容 API；复杂多步任务可切换到 Codex CLI + skill 执行
 
 ## 测试
 
@@ -115,7 +123,8 @@
 
 ## 建议下一步
 
-- [ ] 前端接入真实 PDF 渲染（pdf.js）并用 bbox 做原文高亮
-- [ ] LLM evidence linking / 边关系判断，替换邻近窗口启发式
-- [ ] 引用论文递归分析（arXiv/Semantic Scholar 拉取 PDF → 复用同一管线）
-- [ ] 手动添加节点/边的 UI
+- [x] 前端接入真实 PDF 页面渲染并用 bbox 做原文高亮（当前采用后端渲染 PNG，不依赖 pdf.js）
+- [x] LLM evidence linking / 边关系判断，替换邻近窗口启发式
+- [ ] 将高级分析设计成候选 patch 流程：agent/skill 只提出新增、删除、改边、合并等修正建议，经用户确认或 API 记录后应用
+- [x] 引用论文递归分析（arXiv 拉取 PDF → 复用同一管线；Semantic Scholar 做元数据补全）
+- [x] 手动添加节点/边的 UI

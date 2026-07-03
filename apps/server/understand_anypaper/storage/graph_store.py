@@ -1,6 +1,8 @@
 import json
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import create_engine, text
@@ -15,11 +17,24 @@ from understand_anypaper.retrieval.embeddings import EmbeddingClient
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class SourceDocument:
+    filename: str
+    media_type: str
+    data: bytes
+
+
 class GraphStore(ABC):
     """Persistence contract for parsed papers and their argument graphs."""
 
     @abstractmethod
     def save_paper(self, parsed: ParsedPaper, graph: PaperArgumentGraph) -> None: ...
+
+    @abstractmethod
+    def save_source_document(self, paper_id: str, filename: str, media_type: str, data: bytes) -> None: ...
+
+    @abstractmethod
+    def get_source_document(self, paper_id: str) -> SourceDocument | None: ...
 
     @abstractmethod
     def list_papers(self) -> list[dict]: ...
@@ -58,14 +73,32 @@ class InMemoryGraphStore(GraphStore):
         self._papers: dict[str, ParsedPaper] = {}
         self._graphs: dict[str, PaperArgumentGraph] = {}
         self._patches: dict[str, list[dict]] = {}
+        self._documents: dict[str, SourceDocument] = {}
 
     def save_paper(self, parsed: ParsedPaper, graph: PaperArgumentGraph) -> None:
         self._papers[parsed.paper_id] = parsed
         self._graphs[parsed.paper_id] = graph
 
+    def save_source_document(self, paper_id: str, filename: str, media_type: str, data: bytes) -> None:
+        self._documents[paper_id] = SourceDocument(filename=filename, media_type=media_type, data=data)
+        if paper_id in self._papers:
+            self._papers[paper_id].metadata["source_document"] = {
+                "filename": filename,
+                "media_type": media_type,
+                "size": len(data),
+            }
+
+    def get_source_document(self, paper_id: str) -> SourceDocument | None:
+        return self._documents.get(paper_id)
+
     def list_papers(self) -> list[dict]:
         return [
-            {"paper_id": paper.paper_id, "title": paper.title, "abstract": paper.abstract}
+            {
+                "paper_id": paper.paper_id,
+                "title": paper.title,
+                "abstract": paper.abstract,
+                "metadata": paper.metadata,
+            }
             for paper in self._papers.values()
         ]
 
@@ -123,10 +156,17 @@ class PostgresGraphStore(GraphStore):
         with self._engine.begin() as conn:
             conn.execute(
                 text(
-                    "INSERT INTO papers (id, title, abstract) VALUES (:id, :title, :abstract) "
-                    "ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, abstract = EXCLUDED.abstract"
+                    "INSERT INTO papers (id, title, abstract, metadata_json) "
+                    "VALUES (:id, :title, :abstract, CAST(:metadata AS jsonb)) "
+                    "ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, "
+                    "abstract = EXCLUDED.abstract, metadata_json = EXCLUDED.metadata_json"
                 ),
-                {"id": parsed.paper_id, "title": parsed.title, "abstract": parsed.abstract},
+                {
+                    "id": parsed.paper_id,
+                    "title": parsed.title,
+                    "abstract": parsed.abstract,
+                    "metadata": json.dumps(parsed.metadata, default=str),
+                },
             )
             for table in ("citation_mentions", "edges", "nodes", "content_blocks", "paper_references"):
                 if table == "citation_mentions":
@@ -196,17 +236,62 @@ class PostgresGraphStore(GraphStore):
     def list_papers(self) -> list[dict]:
         with self._engine.connect() as conn:
             rows = conn.execute(
-                text("SELECT id, title, abstract, created_at FROM papers ORDER BY created_at DESC")
+                text(
+                    "SELECT id, title, abstract, metadata_json, created_at "
+                    "FROM papers ORDER BY created_at DESC"
+                )
             ).mappings()
             return [
                 {
                     "paper_id": str(row["id"]),
                     "title": row["title"],
                     "abstract": row["abstract"],
+                    "metadata": row["metadata_json"] or {},
                     "created_at": row["created_at"].isoformat(),
                 }
                 for row in rows
             ]
+
+    def save_source_document(self, paper_id: str, filename: str, media_type: str, data: bytes) -> None:
+        directory = Path(settings.document_store_dir).expanduser().resolve()
+        directory.mkdir(parents=True, exist_ok=True)
+        suffix = Path(filename).suffix.lower() or ".pdf"
+        path = directory / f"{paper_id}{suffix}"
+        path.write_bytes(data)
+        metadata = {
+            "source_document": {
+                "filename": filename,
+                "media_type": media_type,
+                "path": str(path),
+                "size": len(data),
+            }
+        }
+        with self._engine.begin() as conn:
+            conn.execute(
+                text("UPDATE papers SET metadata_json = metadata_json || CAST(:metadata AS jsonb) WHERE id = :pid"),
+                {"pid": paper_id, "metadata": json.dumps(metadata, default=str)},
+            )
+
+    def get_source_document(self, paper_id: str) -> SourceDocument | None:
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT metadata_json FROM papers WHERE id = :pid"),
+                {"pid": paper_id},
+            ).mappings().first()
+        if not row:
+            return None
+        source = (row["metadata_json"] or {}).get("source_document") or {}
+        path_value = source.get("path")
+        if not path_value:
+            return None
+        path = Path(path_value)
+        if not path.exists() or not path.is_file():
+            return None
+        return SourceDocument(
+            filename=source.get("filename") or path.name,
+            media_type=source.get("media_type") or "application/octet-stream",
+            data=path.read_bytes(),
+        )
 
     def get_graph(self, paper_id: str) -> PaperArgumentGraph | None:
         with self._engine.connect() as conn:

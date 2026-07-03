@@ -35,13 +35,34 @@ def test_blocks_references_and_evidence(client, sample_txt):
     assert evidence["evidence"] and evidence["evidence"][0]["text"]
 
 
+def test_pdf_document_info_and_page_rendering(client, sample_pdf):
+    with sample_pdf.open("rb") as handle:
+        response = client.post("/api/papers", files={"file": (sample_pdf.name, handle, "application/pdf")})
+    assert response.status_code == 200, response.text
+    paper_id = response.json()["paper_id"]
+
+    document = client.get(f"/api/papers/{paper_id}/document")
+    assert document.status_code == 200, document.text
+    assert document.json()["pages"][0]["page"] == 1
+
+    page = client.get(f"/api/papers/{paper_id}/document/pages/1.png")
+    assert page.status_code == 200, page.text
+    assert page.headers["content-type"] == "image/png"
+    assert page.content.startswith(b"\x89PNG")
+
+
 def test_search_and_completeness(client, sample_txt):
     graph = _upload(client, sample_txt)
     paper_id = graph["paper_id"]
 
-    result = client.post("/api/graph/search", json={"query": "attention", "paper_id": paper_id}).json()
+    result = client.post(
+        "/api/graph/search",
+        json={"query": "attention", "paper_id": paper_id, "expand_depth": 1},
+    ).json()
     assert result["matches"], "lexical search should match"
     assert result["matches"][0]["source"] == "lexical"
+    assert result["expanded_subgraph"]["nodes"]
+    assert len(result["expanded_subgraph"]["nodes"]) >= len(result["matches"])
 
     completeness = client.get(f"/api/papers/{paper_id}/completeness").json()
     assert completeness["scores"], "expected completeness scores for contributions"

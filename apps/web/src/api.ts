@@ -52,6 +52,19 @@ export type PaperSummary = {
   paper_id: string;
   title: string;
   abstract: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type DocumentPageInfo = {
+  page: number;
+  width: number;
+  height: number;
+};
+
+export type PaperDocumentInfo = {
+  filename: string;
+  media_type: string;
+  pages: DocumentPageInfo[];
 };
 
 export type PatchOperation = {
@@ -89,6 +102,14 @@ export function fetchGraph(paperId: string): Promise<PaperArgumentGraph> {
 
 export function fetchBlocks(paperId: string): Promise<ContentBlock[]> {
   return request<ContentBlock[]>(`/api/papers/${paperId}/blocks`);
+}
+
+export function fetchDocumentInfo(paperId: string): Promise<PaperDocumentInfo> {
+  return request<PaperDocumentInfo>(`/api/papers/${paperId}/document`);
+}
+
+export function documentPageImageUrl(paperId: string, page: number, scale = 1.8): string {
+  return `${API_BASE_URL}/api/papers/${paperId}/document/pages/${page}.png?scale=${scale}`;
 }
 
 export function patchGraph(paperId: string, operations: PatchOperation[]): Promise<PaperArgumentGraph> {

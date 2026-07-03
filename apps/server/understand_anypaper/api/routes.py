@@ -3,9 +3,11 @@ import re
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Annotated, Literal
+from urllib.parse import quote
 
+import fitz
 import httpx
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from understand_anypaper.config import settings
@@ -33,12 +35,26 @@ def get_store() -> GraphStore:
 class ReferenceAnalyzeRequest(BaseModel):
     depth: int = 1
     focus: str = "current_citation_context"
+    expand: bool = False
 
 
 class GraphSearchRequest(BaseModel):
     query: str
     paper_id: str
     node_types: list[str] = []
+    expand_depth: int = Field(default=0, ge=0, le=3)
+
+
+class DocumentPageInfo(BaseModel):
+    page: int
+    width: float
+    height: float
+
+
+class PaperDocumentInfo(BaseModel):
+    filename: str
+    media_type: str
+    pages: list[DocumentPageInfo]
 
 
 class PatchOperation(BaseModel):
@@ -56,8 +72,10 @@ class GraphPatchRequest(BaseModel):
 @router.post("/papers", response_model=PaperArgumentGraph)
 async def upload_paper(file: Annotated[UploadFile, File(...)]) -> PaperArgumentGraph:
     suffix = Path(file.filename or "paper.pdf").suffix
+    media_type = "application/pdf" if suffix.lower() == ".pdf" else (file.content_type or "application/octet-stream")
+    data = await file.read()
     with NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(await file.read())
+        tmp.write(data)
         tmp_path = Path(tmp.name)
     try:
         parsed = PdfParser().parse(tmp_path)
@@ -65,8 +83,22 @@ async def upload_paper(file: Annotated[UploadFile, File(...)]) -> PaperArgumentG
         raise HTTPException(status_code=422, detail=f"Failed to parse document: {exc}") from exc
     finally:
         tmp_path.unlink(missing_ok=True)
+    parsed.metadata.update(
+        {
+            "source_filename": file.filename or f"paper{suffix}",
+            "source_media_type": media_type,
+        }
+    )
     graph = PaperArgumentGraphBuilder().build(parsed)
-    get_store().save_paper(parsed, graph)
+    store = get_store()
+    store.save_paper(parsed, graph)
+    if suffix.lower() == ".pdf":
+        store.save_source_document(
+            parsed.paper_id,
+            file.filename or f"{parsed.paper_id}.pdf",
+            media_type,
+            data,
+        )
     return graph
 
 
@@ -84,6 +116,51 @@ def get_graph(paper_id: str) -> PaperArgumentGraph:
 def get_blocks(paper_id: str) -> list[ContentBlock]:
     _get_graph(paper_id)
     return get_store().get_blocks(paper_id)
+
+
+@router.get("/papers/{paper_id}/document", response_model=PaperDocumentInfo)
+def get_document_info(paper_id: str) -> PaperDocumentInfo:
+    _get_graph(paper_id)
+    document = get_store().get_source_document(paper_id)
+    if document is None or not _is_pdf_media_type(document.media_type):
+        raise HTTPException(status_code=404, detail="PDF source document not available")
+    try:
+        pdf = fitz.open(stream=document.data, filetype="pdf")
+        try:
+            pages = [
+                DocumentPageInfo(page=index + 1, width=page.rect.width, height=page.rect.height)
+                for index, page in enumerate(pdf)
+            ]
+        finally:
+            pdf.close()
+    except Exception as exc:  # noqa: BLE001 - corrupt stored PDFs should be reported as bad source data
+        raise HTTPException(status_code=422, detail=f"Failed to inspect PDF source: {exc}") from exc
+    return PaperDocumentInfo(filename=document.filename, media_type=document.media_type, pages=pages)
+
+
+@router.get("/papers/{paper_id}/document/pages/{page_number}.png")
+def render_document_page(paper_id: str, page_number: int, scale: float = 1.6) -> Response:
+    _get_graph(paper_id)
+    document = get_store().get_source_document(paper_id)
+    if document is None or not _is_pdf_media_type(document.media_type):
+        raise HTTPException(status_code=404, detail="PDF source document not available")
+    if page_number < 1:
+        raise HTTPException(status_code=404, detail="Page not found")
+    scale = min(max(scale, 0.8), 3.0)
+    try:
+        pdf = fitz.open(stream=document.data, filetype="pdf")
+        try:
+            if page_number > pdf.page_count:
+                raise HTTPException(status_code=404, detail="Page not found")
+            page = pdf.load_page(page_number - 1)
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            return Response(content=pixmap.tobytes("png"), media_type="image/png")
+        finally:
+            pdf.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - surface render failures as HTTP 422
+        raise HTTPException(status_code=422, detail=f"Failed to render PDF page: {exc}") from exc
 
 
 @router.get("/papers/{paper_id}/references", response_model=list[PaperReference])
@@ -166,11 +243,11 @@ def resolve_reference(reference_id: str) -> PaperReference:
     reference = store.find_reference(reference_id)
     if reference is None:
         raise HTTPException(status_code=404, detail="Reference not found")
-    enriched = _crossref_enrich(reference)
-    if enriched is not None:
+    enriched = _crossref_enrich(reference) or reference
+    enriched = _semantic_scholar_enrich(enriched) or enriched
+    if enriched != reference:
         store.update_reference(enriched)
-        return enriched
-    return reference
+    return enriched
 
 
 @router.post("/references/{reference_id}/analyze")
@@ -184,15 +261,18 @@ def analyze_reference(reference_id: str, request: ReferenceAnalyzeRequest) -> di
     intent_counts: dict[str, int] = {}
     for mention in mentions:
         intent_counts[mention.intent] = intent_counts.get(mention.intent, 0) + 1
+    can_expand = policy.can_expand(reference_id, request.depth)
+    expansion = _expand_reference(reference, store) if request.expand and can_expand else None
     return {
         "reference_id": reference_id,
         "reference": reference.model_dump(),
         "focus": request.focus,
         "mentions": [mention.model_dump() for mention in mentions],
         "intent_summary": intent_counts,
-        "can_expand": policy.can_expand(reference_id, request.depth),
+        "can_expand": can_expand,
+        "expansion": expansion,
         "expand_hint": "Upload the referenced paper to build its own argument graph."
-        if policy.can_expand(reference_id, request.depth)
+        if can_expand
         else "Traversal policy limit reached.",
     }
 
@@ -221,12 +301,30 @@ def search_graph(request: GraphSearchRequest) -> dict:
             scored[node_id] = {"node": node, "score": similarity, "source": "vector"}
 
     matches = sorted(scored.values(), key=lambda item: item["score"], reverse=True)
+    selected_ids = {item["node"].id for item in matches}
+    for _ in range(request.expand_depth):
+        next_ids = set(selected_ids)
+        for edge in graph.edges:
+            if edge.source_node_id in selected_ids or edge.target_node_id in selected_ids:
+                next_ids.update([edge.source_node_id, edge.target_node_id])
+        selected_ids = next_ids
+    expanded_nodes = [node for node in graph.nodes if node.id in selected_ids]
+    expanded_edges = [
+        edge
+        for edge in graph.edges
+        if edge.source_node_id in selected_ids and edge.target_node_id in selected_ids
+    ]
     return {
         "query": request.query,
         "matches": [
             {"node": item["node"], "score": round(item["score"], 4), "source": item["source"]}
             for item in matches
         ],
+        "expanded_subgraph": {
+            "nodes": expanded_nodes,
+            "edges": expanded_edges,
+            "depth": request.expand_depth,
+        },
     }
 
 
@@ -331,8 +429,118 @@ def _crossref_enrich(reference: PaperReference) -> PaperReference | None:
         return None
 
 
+def _semantic_scholar_enrich(reference: PaperReference) -> PaperReference | None:
+    try:
+        fields = "title,year,authors,externalIds"
+        if reference.arxiv_id:
+            url = f"https://api.semanticscholar.org/graph/v1/paper/ARXIV:{quote(reference.arxiv_id)}"
+            response = httpx.get(url, params={"fields": fields}, timeout=8)
+            payload = response.json()
+        elif reference.doi:
+            url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{quote(reference.doi, safe='')}"
+            response = httpx.get(url, params={"fields": fields}, timeout=8)
+            payload = response.json()
+        else:
+            query = reference.title or re.sub(r"\[\d+\]", "", reference.raw_text)[:200]
+            response = httpx.get(
+                "https://api.semanticscholar.org/graph/v1/paper/search",
+                params={"query": query, "limit": 1, "fields": fields},
+                timeout=8,
+            )
+            payload = (response.json().get("data") or [None])[0]
+        response.raise_for_status()
+        if not payload:
+            return None
+        updated = reference.model_copy()
+        if payload.get("title"):
+            updated.title = payload["title"]
+        if payload.get("year"):
+            updated.year = int(payload["year"])
+        authors = [author.get("name") for author in payload.get("authors", []) if author.get("name")]
+        if authors:
+            updated.authors = authors[:12]
+        external = payload.get("externalIds") or {}
+        updated.doi = external.get("DOI") or updated.doi
+        updated.arxiv_id = external.get("ArXiv") or updated.arxiv_id
+        return updated
+    except (httpx.HTTPError, KeyError, IndexError, ValueError, TypeError) as exc:
+        logger.warning("Semantic Scholar resolution failed for %s: %s", reference.reference_id, exc)
+        return None
+
+
+def _expand_reference(reference: PaperReference, store: GraphStore) -> dict:
+    cached = _find_cached_reference_graph(reference, store)
+    if cached:
+        return {"status": "cached", "paper_id": cached["paper_id"], "title": cached["title"]}
+    if not reference.arxiv_id:
+        return {"status": "unavailable", "reason": "No arXiv identifier or downloadable PDF is known."}
+
+    url = f"https://arxiv.org/pdf/{reference.arxiv_id}.pdf"
+    try:
+        response = httpx.get(url, timeout=40, follow_redirects=True)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        logger.warning("arXiv PDF download failed for %s: %s", reference.reference_id, exc)
+        return {"status": "unavailable", "reason": "arXiv PDF download failed."}
+    data = response.content
+    if not data.startswith(b"%PDF"):
+        return {"status": "unavailable", "reason": "Downloaded arXiv response was not a PDF."}
+
+    with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(data)
+        tmp_path = Path(tmp.name)
+    try:
+        parsed = PdfParser().parse(tmp_path)
+    except Exception as exc:  # noqa: BLE001 - reference expansion should not break citation analysis
+        logger.warning("Recursive reference parse failed for %s: %s", reference.reference_id, exc)
+        return {"status": "failed", "reason": f"Failed to parse referenced PDF: {exc}"}
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    parsed.metadata.update(
+        {
+            "source_reference_id": reference.reference_id,
+            "source_arxiv_id": reference.arxiv_id,
+            "source_filename": f"{reference.arxiv_id}.pdf",
+            "source_media_type": "application/pdf",
+        }
+    )
+    graph = PaperArgumentGraphBuilder().build(parsed)
+    store.save_paper(parsed, graph)
+    store.save_source_document(parsed.paper_id, f"{reference.arxiv_id}.pdf", "application/pdf", data)
+    return {
+        "status": "expanded",
+        "paper_id": parsed.paper_id,
+        "title": parsed.title,
+        "nodes": len(graph.nodes),
+        "edges": len(graph.edges),
+    }
+
+
+def _find_cached_reference_graph(reference: PaperReference, store: GraphStore) -> dict | None:
+    reference_title = _normalize_title(reference.title or "")
+    for paper in store.list_papers():
+        metadata = paper.get("metadata") or {}
+        if metadata.get("source_reference_id") == reference.reference_id:
+            return paper
+        if reference.arxiv_id and metadata.get("source_arxiv_id") == reference.arxiv_id:
+            return paper
+        paper_title = _normalize_title(paper.get("title") or "")
+        if reference_title and (reference_title == paper_title or reference_title in paper_title):
+            return paper
+    return None
+
+
+def _normalize_title(title: str) -> str:
+    return re.sub(r"\W+", " ", title).strip().casefold()
+
+
 def _get_graph(paper_id: str) -> PaperArgumentGraph:
     graph = get_store().get_graph(paper_id)
     if graph is None:
         raise HTTPException(status_code=404, detail="Paper not found")
     return graph
+
+
+def _is_pdf_media_type(media_type: str) -> bool:
+    return media_type.split(";", 1)[0].strip().lower() == "application/pdf"

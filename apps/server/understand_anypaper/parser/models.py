@@ -1,3 +1,5 @@
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from understand_anypaper.graph.schema import EvidenceRef
@@ -47,3 +49,4 @@ class ParsedPaper(BaseModel):
     blocks: list[ContentBlock] = Field(default_factory=list)
     references: list[PaperReference] = Field(default_factory=list)
     mentions: list[CitationMention] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
