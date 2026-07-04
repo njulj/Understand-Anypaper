@@ -50,13 +50,6 @@ class EdgeType(StrEnum):
     REFERENCED_BY = "REFERENCED_BY"
 
 
-class EvidenceRef(BaseModel):
-    page: int | None = None
-    block_id: str | None = None
-    text: str | None = None
-    bbox: list[float] | None = None
-
-
 class GraphNode(BaseModel):
     id: str
     paper_id: str
@@ -65,7 +58,7 @@ class GraphNode(BaseModel):
     summary: str = ""
     confidence: float = Field(ge=0, le=1, default=0.0)
     source_type: str = "system_inferred"
-    evidence_ids: list[str] = Field(default_factory=list)
+    semantic_unit_ids: list[str] = Field(default_factory=list)
     page_ranges: list[tuple[int, int]] = Field(default_factory=list)
     properties: dict[str, Any] = Field(default_factory=dict)
     created_by: str = "pag-builder"
@@ -79,7 +72,7 @@ class GraphEdge(BaseModel):
     target_node_id: str
     edge_type: EdgeType
     confidence: float = Field(ge=0, le=1, default=0.0)
-    evidence: EvidenceRef | None = None
+    semantic_unit_ids: list[str] = Field(default_factory=list)
     inference_type: str = "direct_extraction"
     properties: dict[str, Any] = Field(default_factory=dict)
 

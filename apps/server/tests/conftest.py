@@ -2,11 +2,6 @@ from pathlib import Path
 
 import fitz
 import pytest
-from fastapi.testclient import TestClient
-
-import understand_anypaper.api.routes as routes
-from understand_anypaper.main import app
-from understand_anypaper.storage import InMemoryGraphStore
 
 SAMPLE_TEXT = """# LinearAttention: Efficient Transformers
 
@@ -26,14 +21,6 @@ We run experiments on the LRA dataset and our results outperform baselines [3].
 [2] J. Devlin. BERT: Pre-training of deep bidirectional transformers. 2019. arXiv:1810.04805
 [3] Y. Tay. Long range arena. ICLR, 2021.
 """
-
-
-@pytest.fixture()
-def client() -> TestClient:
-    routes._store = InMemoryGraphStore()
-    with TestClient(app) as test_client:
-        yield test_client
-    routes._store = None
 
 
 @pytest.fixture()

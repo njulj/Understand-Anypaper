@@ -11,10 +11,10 @@ from fastapi import APIRouter, File, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from understand_anypaper.config import settings
-from understand_anypaper.graph.graph_builder import PaperArgumentGraphBuilder
+from understand_anypaper.graph.graph_builder import GraphBuildError, PaperArgumentGraphBuilder
 from understand_anypaper.graph.graph_validator import GraphValidator
 from understand_anypaper.graph.schema import GraphEdge, GraphNode, PaperArgumentGraph
-from understand_anypaper.parser.models import ContentBlock, PaperReference
+from understand_anypaper.parser.models import PaperReference, SemanticUnit, SourceBlock
 from understand_anypaper.parser.pdf_parser import PdfParser
 from understand_anypaper.recursive.traversal_policy import TraversalPolicy
 from understand_anypaper.storage import GraphStore, create_graph_store
@@ -89,7 +89,10 @@ async def upload_paper(file: Annotated[UploadFile, File(...)]) -> PaperArgumentG
             "source_media_type": media_type,
         }
     )
-    graph = PaperArgumentGraphBuilder().build(parsed)
+    try:
+        graph = PaperArgumentGraphBuilder().build(parsed)
+    except GraphBuildError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     store = get_store()
     store.save_paper(parsed, graph)
     if suffix.lower() == ".pdf":
@@ -107,15 +110,29 @@ def list_papers() -> list[dict]:
     return get_store().list_papers()
 
 
+@router.delete("/papers/{paper_id}")
+def delete_paper(paper_id: str) -> dict:
+    store = get_store()
+    if not store.delete_paper(paper_id):
+        raise HTTPException(status_code=404, detail="Paper not found")
+    return {"deleted": paper_id, "papers": store.list_papers()}
+
+
 @router.get("/papers/{paper_id}/graph", response_model=PaperArgumentGraph)
 def get_graph(paper_id: str) -> PaperArgumentGraph:
     return _get_graph(paper_id)
 
 
-@router.get("/papers/{paper_id}/blocks", response_model=list[ContentBlock])
-def get_blocks(paper_id: str) -> list[ContentBlock]:
+@router.get("/papers/{paper_id}/blocks", response_model=list[SourceBlock])
+def get_blocks(paper_id: str) -> list[SourceBlock]:
     _get_graph(paper_id)
     return get_store().get_blocks(paper_id)
+
+
+@router.get("/papers/{paper_id}/semantic-units", response_model=list[SemanticUnit])
+def get_semantic_units(paper_id: str) -> list[SemanticUnit]:
+    _get_graph(paper_id)
+    return get_store().get_semantic_units(paper_id)
 
 
 @router.get("/papers/{paper_id}/document", response_model=PaperDocumentInfo)
@@ -195,20 +212,33 @@ def get_node_evidence(node_id: str, paper_id: str | None = None) -> dict:
         node = next((n for n in graph.nodes if n.id == node_id), None)
         if node is None:
             continue
-        blocks = {block.content_id: block for block in store.get_blocks(pid)}
+        blocks = {block.source_block_id: block for block in store.get_blocks(pid)}
+        semantic_units = {unit.semantic_unit_id: unit for unit in store.get_semantic_units(pid)}
         evidence = [
             {
-                "content_id": content_id,
-                "page": blocks[content_id].page if content_id in blocks else None,
-                "text": blocks[content_id].text if content_id in blocks else None,
-                "bbox": blocks[content_id].bbox if content_id in blocks else None,
+                "semantic_unit_id": semantic_unit_id,
+                "role": semantic_units[semantic_unit_id].role if semantic_unit_id in semantic_units else None,
+                "title": semantic_units[semantic_unit_id].title if semantic_unit_id in semantic_units else None,
+                "text": semantic_units[semantic_unit_id].text if semantic_unit_id in semantic_units else None,
+                "source_ranges": [
+                    {
+                        **source_range.model_dump(),
+                        "page": blocks[source_range.source_block_id].page
+                        if source_range.source_block_id in blocks else None,
+                        "bbox": blocks[source_range.source_block_id].bbox
+                        if source_range.source_block_id in blocks else None,
+                        "source_text": blocks[source_range.source_block_id].text
+                        if source_range.source_block_id in blocks else None,
+                    }
+                    for source_range in semantic_units[semantic_unit_id].source_ranges
+                ] if semantic_unit_id in semantic_units else [],
             }
-            for content_id in node.evidence_ids
+            for semantic_unit_id in node.semantic_unit_ids
         ]
         return {
             "node_id": node_id,
             "paper_id": pid,
-            "evidence_ids": node.evidence_ids,
+            "semantic_unit_ids": node.semantic_unit_ids,
             "page_ranges": node.page_ranges,
             "evidence": evidence,
         }
@@ -232,7 +262,7 @@ def get_content_assignments(content_id: str) -> dict:
                 "explanation": edge.inference_type,
             }
             for edge in graph.edges
-            if edge.source_node_id == content_id and edge.target_node_id.startswith("contribution-")
+            if content_id in edge.semantic_unit_ids and edge.target_node_id.startswith("contribution-")
         )
     return {"content_id": content_id, "assignments": assignments}
 
@@ -344,8 +374,8 @@ def patch_graph(paper_id: str, request: GraphPatchRequest) -> PaperArgumentGraph
     return graph
 
 
-_MUTABLE_NODE_FIELDS = {"title", "summary", "node_type", "confidence", "verified", "properties"}
-_MUTABLE_EDGE_FIELDS = {"edge_type", "confidence", "inference_type", "properties"}
+_MUTABLE_NODE_FIELDS = {"title", "summary", "node_type", "confidence", "verified", "properties", "semantic_unit_ids"}
+_MUTABLE_EDGE_FIELDS = {"edge_type", "confidence", "inference_type", "properties", "semantic_unit_ids"}
 
 
 def _apply_patch_operation(graph: PaperArgumentGraph, operation: PatchOperation) -> None:

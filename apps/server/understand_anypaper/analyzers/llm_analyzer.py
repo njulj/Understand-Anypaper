@@ -1,49 +1,48 @@
 import json
 import logging
+from uuid import uuid4
 
 import httpx
 
 from understand_anypaper.config import Settings, settings
-from understand_anypaper.parser.models import ContentBlock, ParsedPaper
+from understand_anypaper.parser.models import ParsedPaper, SemanticUnit, SourceRange
 
 logger = logging.getLogger(__name__)
 
 _ROLE_VALUES = {
-    "contribution", "motivation", "gap", "method", "experiment",
-    "result", "conclusion", "background", "equation", "figure", "table",
+    "contribution",
+    "motivation",
+    "gap",
+    "method",
+    "experiment",
+    "result",
+    "conclusion",
+    "background",
+    "equation",
+    "figure",
+    "table",
+    "reference",
 }
-_LINK_ROLES = _ROLE_VALUES - {"contribution"}
 
-_ROLE_SYSTEM_PROMPT = (
-    "You classify paragraphs of a research paper into semantic roles. "
-    "Valid roles: contribution, motivation, gap, method, experiment, result, "
-    "conclusion, background. Respond with JSON only: "
-    '{"roles": {"<content_id>": "<role>", ...}}'
-)
-
-_CONTRIBUTION_SYSTEM_PROMPT = (
-    "You extract the concrete contributions of a research paper. Each contribution "
-    "needs a short title, a one-paragraph summary grounded in the given text, and the "
-    "content_ids of the blocks that state or support it. Respond with JSON only: "
-    '{"contributions": [{"title": "...", "summary": "...", "evidence_content_ids": ["..."]}]}'
-)
-
-_EVIDENCE_LINK_SYSTEM_PROMPT = (
-    "You link paper evidence blocks to extracted contributions. Use only the provided "
-    "contribution indexes and content_ids. Pick blocks that explain WHY the contribution "
-    "is needed, HOW it works, or PROOF that it works. Valid roles: motivation, gap, "
-    "method, equation, figure, table, experiment, result, conclusion, background. "
-    "Respond with JSON only: "
-    '{"links": [{"contribution_index": 1, "content_id": "...", "role": "method", '
-    '"confidence": 0.8, "reason": "..."}]}'
+_SEMANTIC_UNIT_SYSTEM_PROMPT = (
+    "You slice a research paper into semantic argument units for a Paper Argument Graph. "
+    "Use only the provided source_block_id values. A semantic unit has exactly one role. "
+    "Split mixed paragraphs into multiple units when they contain different roles, such as "
+    "a contribution statement and a method mechanism in the same source block. Keep units "
+    "large enough to be meaningful graph evidence, not sentence fragments. Valid roles: "
+    "contribution, motivation, gap, method, experiment, result, conclusion, background, "
+    "equation, figure, table, reference. Respond with JSON only: "
+    '{"semantic_units": [{"role": "contribution", "title": "...", "text": "...", '
+    '"source_ranges": [{"source_block_id": "...", "start_char": 0, "end_char": 120}], '
+    '"confidence": 0.9}]}'
 )
 
 
 class LLMAnalyzer:
-    """OpenAI-compatible chat analyzer for semantic roles and contribution extraction.
+    """OpenAI-compatible analyzer that performs semantic slicing.
 
-    Every method returns None when the LLM is not configured or the call fails,
-    so callers can fall back to the rule-based analyzers.
+    The PAG builder intentionally depends on this output instead of assigning
+    semantic roles to parser blocks with rules.
     """
 
     def __init__(self, config: Settings = settings) -> None:
@@ -53,92 +52,77 @@ class LLMAnalyzer:
     def available(self) -> bool:
         return bool(self._config.openai_api_key)
 
-    def classify_roles(self, blocks: list[ContentBlock]) -> dict[str, str] | None:
-        if not self.available or not blocks:
+    def slice_semantic_units(self, parsed: ParsedPaper) -> list[SemanticUnit] | None:
+        if not self.available or not parsed.source_blocks:
             return None
-        listing = "\n\n".join(f"[{b.content_id}] ({b.section or 'no section'}) {b.text[:600]}" for b in blocks)
-        payload = self._chat_json(_ROLE_SYSTEM_PROMPT, listing)
-        if not payload:
-            return None
-        roles = payload.get("roles")
-        if not isinstance(roles, dict):
-            return None
-        known_ids = {b.content_id for b in blocks}
-        return {
-            content_id: role
-            for content_id, role in roles.items()
-            if content_id in known_ids and isinstance(role, str) and role in _ROLE_VALUES
-        }
-
-    def extract_contributions(self, parsed: ParsedPaper) -> list[dict] | None:
-        if not self.available or not parsed.blocks:
-            return None
-        listing = "\n\n".join(
-            f"[{b.content_id}] {b.text[:600]}" for b in parsed.blocks[:60]
-        )
-        user = f"Title: {parsed.title}\nAbstract: {parsed.abstract[:1200]}\n\nBlocks:\n{listing}"
-        payload = self._chat_json(_CONTRIBUTION_SYSTEM_PROMPT, user)
-        if not payload:
-            return None
-        contributions = payload.get("contributions")
-        if not isinstance(contributions, list):
-            return None
-        known_ids = {b.content_id for b in parsed.blocks}
-        cleaned = []
-        for item in contributions:
-            if not isinstance(item, dict) or not item.get("title") or not item.get("summary"):
-                continue
-            evidence = [cid for cid in item.get("evidence_content_ids", []) if cid in known_ids]
-            cleaned.append({"title": str(item["title"]), "summary": str(item["summary"]), "evidence_content_ids": evidence})
-        return cleaned or None
-
-    def link_evidence(self, parsed: ParsedPaper, contribution_specs: list[dict]) -> dict[int, list[dict]] | None:
-        if not self.available or not parsed.blocks or not contribution_specs:
-            return None
-        contributions = "\n".join(
-            f"{index}. {spec['title']}: {spec['summary'][:600]}"
-            for index, spec in enumerate(contribution_specs, start=1)
-        )
         blocks = "\n\n".join(
-            f"[{block.content_id}] ({block.section or 'no section'}, {block.semantic_role}) {block.text[:700]}"
-            for block in parsed.blocks[:90]
+            f"[{block.source_block_id}] page={block.page} section={block.section or 'none'} "
+            f"type={block.block_type}\n{block.text[:1600]}"
+            for block in parsed.source_blocks[:120]
         )
         payload = self._chat_json(
-            _EVIDENCE_LINK_SYSTEM_PROMPT,
-            f"Title: {parsed.title}\n\nContributions:\n{contributions}\n\nBlocks:\n{blocks}",
+            _SEMANTIC_UNIT_SYSTEM_PROMPT,
+            f"Title: {parsed.title}\nAbstract: {parsed.abstract[:1600]}\n\nSource blocks:\n{blocks}",
         )
         if not payload:
             return None
-        links = payload.get("links")
-        if not isinstance(links, list):
+        raw_units = payload.get("semantic_units")
+        if not isinstance(raw_units, list):
             return None
-        known_ids = {block.content_id for block in parsed.blocks}
-        by_contribution: dict[int, list[dict]] = {}
-        for item in links:
+
+        known_blocks = {block.source_block_id for block in parsed.source_blocks}
+        units: list[SemanticUnit] = []
+        prefix = parsed.paper_id[:8]
+        for index, item in enumerate(raw_units, start=1):
             if not isinstance(item, dict):
                 continue
+            role = item.get("role")
+            title = item.get("title")
+            text = item.get("text")
+            if role not in _ROLE_VALUES or not isinstance(title, str) or not isinstance(text, str):
+                continue
+            ranges = self._clean_source_ranges(item.get("source_ranges"), known_blocks)
+            if not ranges:
+                continue
             try:
-                contribution_index = int(item.get("contribution_index"))
                 confidence = float(item.get("confidence", 0.75))
             except (TypeError, ValueError):
-                continue
-            content_id = item.get("content_id")
-            role = item.get("role")
-            if (
-                not 1 <= contribution_index <= len(contribution_specs)
-                or content_id not in known_ids
-                or role not in _LINK_ROLES
-            ):
-                continue
-            by_contribution.setdefault(contribution_index, []).append(
-                {
-                    "content_id": content_id,
-                    "role": role,
-                    "confidence": max(0.0, min(confidence, 1.0)),
-                    "reason": str(item.get("reason") or ""),
-                }
+                confidence = 0.75
+            units.append(
+                SemanticUnit(
+                    semantic_unit_id=f"unit-{prefix}-{index}-{uuid4().hex[:8]}",
+                    paper_id=parsed.paper_id,
+                    role=role,
+                    title=title.strip()[:160] or role.title(),
+                    text=text.strip(),
+                    source_ranges=ranges,
+                    confidence=max(0.0, min(confidence, 1.0)),
+                    created_by="llm-semantic-slicer",
+                )
             )
-        return by_contribution or None
+        return units or None
+
+    @staticmethod
+    def _clean_source_ranges(raw_ranges: object, known_blocks: set[str]) -> list[SourceRange]:
+        if not isinstance(raw_ranges, list):
+            return []
+        ranges: list[SourceRange] = []
+        for raw in raw_ranges:
+            if not isinstance(raw, dict):
+                continue
+            source_block_id = raw.get("source_block_id")
+            if source_block_id not in known_blocks:
+                continue
+            start = raw.get("start_char")
+            end = raw.get("end_char")
+            ranges.append(
+                SourceRange(
+                    source_block_id=source_block_id,
+                    start_char=start if isinstance(start, int) and start >= 0 else None,
+                    end_char=end if isinstance(end, int) and end >= 0 else None,
+                )
+            )
+        return ranges
 
     def _chat_json(self, system: str, user: str) -> dict | None:
         try:
@@ -160,5 +144,5 @@ class LLMAnalyzer:
             content = response.json()["choices"][0]["message"]["content"]
             return json.loads(content)
         except (httpx.HTTPError, KeyError, IndexError, json.JSONDecodeError) as exc:
-            logger.warning("LLM analysis failed, falling back to rules: %s", exc)
+            logger.warning("LLM semantic slicing failed: %s", exc)
             return None

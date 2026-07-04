@@ -6,8 +6,7 @@ from uuid import uuid4
 import fitz  # PyMuPDF
 
 from understand_anypaper.analyzers.citation_intent_classifier import CitationIntentClassifier
-from understand_anypaper.analyzers.semantic_role_classifier import SemanticRoleClassifier
-from understand_anypaper.parser.models import CitationMention, ContentBlock, PaperReference, ParsedPaper
+from understand_anypaper.parser.models import CitationMention, PaperReference, ParsedPaper, SourceBlock
 
 _REFERENCE_SECTION = re.compile(r"^\s*(references|bibliography)\s*$", re.IGNORECASE)
 _NUMERIC_CITATION = re.compile(r"\[(\d+(?:\s*[,;\-–]\s*\d+)*)\]")
@@ -21,14 +20,14 @@ _MATH_CHARS = set("=+−-*/^_∑∏∫√∂∇≈≠≤≥∈∀∃αβγδεζ
 
 
 class PdfParser:
-    """Parses PDF (via PyMuPDF) and text/markdown papers into traceable content blocks.
+    """Parses PDF (via PyMuPDF) and text/markdown papers into traceable source blocks.
 
-    Produces per-block page numbers and bounding boxes, section-aware semantic
-    roles, extracted reference entries, and inline citation mentions.
+    Produces per-block page numbers and bounding boxes, extracted reference
+    entries, and inline citation mentions. Semantic slicing is intentionally
+    delegated to the LLM analyzer.
     """
 
     def __init__(self) -> None:
-        self._roles = SemanticRoleClassifier()
         self._intents = CitationIntentClassifier()
 
     def parse(self, path: Path) -> ParsedPaper:
@@ -49,7 +48,7 @@ class PdfParser:
             doc.close()
 
         body_size = self._body_font_size(raw_blocks)
-        blocks: list[ContentBlock] = []
+        blocks: list[SourceBlock] = []
         reference_lines: list[str] = []
         section: str | None = None
         in_references = False
@@ -71,15 +70,14 @@ class PdfParser:
             order += 1
             flat_text = re.sub(r"\s+", " ", text)
             blocks.append(
-                ContentBlock(
-                    content_id=f"text-{prefix}-page{raw['page']}-block{order}",
+                SourceBlock(
+                    source_block_id=f"text-{prefix}-page{raw['page']}-block{order}",
                     order=order,
                     page=raw["page"],
                     section=section,
                     bbox=list(raw["bbox"]),
                     text=flat_text,
                     block_type=block_type,
-                    semantic_role=self._roles.classify(flat_text, section, block_type),
                 )
             )
 
@@ -91,7 +89,7 @@ class PdfParser:
             paper_id=paper_id,
             title=title or path.stem,
             abstract=abstract,
-            blocks=blocks,
+            source_blocks=blocks,
             references=references,
             mentions=mentions,
         )
@@ -197,7 +195,7 @@ class PdfParser:
         return "paragraph"
 
     @staticmethod
-    def _detect_abstract(blocks: list[ContentBlock]) -> str:
+    def _detect_abstract(blocks: list[SourceBlock]) -> str:
         for block in blocks:
             section = (block.section or "").lower()
             text = block.text
@@ -215,7 +213,7 @@ class PdfParser:
         text = path.read_text(errors="ignore")
         paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()] or [path.name]
 
-        blocks: list[ContentBlock] = []
+        blocks: list[SourceBlock] = []
         reference_lines: list[str] = []
         section: str | None = None
         in_references = False
@@ -239,13 +237,12 @@ class PdfParser:
                 continue
             order += 1
             blocks.append(
-                ContentBlock(
-                    content_id=f"text-{prefix}-page1-block{order}",
+                SourceBlock(
+                    source_block_id=f"text-{prefix}-page1-block{order}",
                     order=order,
                     page=1,
                     section=section,
                     text=paragraph,
-                    semantic_role=self._roles.classify(paragraph, section),
                 )
             )
 
@@ -256,7 +253,7 @@ class PdfParser:
             paper_id=paper_id,
             title=title,
             abstract=blocks[0].text[:1000] if blocks else "",
-            blocks=blocks,
+            source_blocks=blocks,
             references=references,
             mentions=mentions,
         )
@@ -316,7 +313,7 @@ class PdfParser:
         )
 
     def _extract_mentions(
-        self, blocks: list[ContentBlock], references: list[PaperReference], prefix: str
+        self, blocks: list[SourceBlock], references: list[PaperReference], prefix: str
     ) -> list[CitationMention]:
         by_marker = {ref.marker: ref for ref in references if ref.marker}
         mentions: list[CitationMention] = []
@@ -333,7 +330,7 @@ class PdfParser:
                         CitationMention(
                             mention_id=f"mention-{prefix}-{len(mentions) + 1}",
                             reference_id=reference.reference_id,
-                            content_id=block.content_id,
+                            source_block_id=block.source_block_id,
                             sentence=sentence,
                             intent=str(self._intents.classify(sentence)),
                             confidence=0.6,
@@ -367,9 +364,9 @@ class PdfParser:
         return text[:300]
 
     @staticmethod
-    def _link_neighbors(blocks: list[ContentBlock]) -> None:
+    def _link_neighbors(blocks: list[SourceBlock]) -> None:
         for i, block in enumerate(blocks):
             if i > 0:
-                block.neighbor_ids.append(blocks[i - 1].content_id)
+                block.neighbor_ids.append(blocks[i - 1].source_block_id)
             if i + 1 < len(blocks):
-                block.neighbor_ids.append(blocks[i + 1].content_id)
+                block.neighbor_ids.append(blocks[i + 1].source_block_id)

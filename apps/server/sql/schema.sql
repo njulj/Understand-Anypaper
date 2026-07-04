@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   title TEXT NOT NULL,
   summary TEXT NOT NULL DEFAULT '',
   properties_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-  evidence_ids TEXT[] NOT NULL DEFAULT '{}',
+  semantic_unit_ids TEXT[] NOT NULL DEFAULT '{}',
   page_ranges JSONB NOT NULL DEFAULT '[]'::jsonb,
   confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
   source_type TEXT NOT NULL,
@@ -31,23 +31,36 @@ CREATE TABLE IF NOT EXISTS edges (
   source_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
   target_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
   edge_type TEXT NOT NULL,
-  evidence_json JSONB,
+  semantic_unit_ids TEXT[] NOT NULL DEFAULT '{}',
   confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
   inference_type TEXT NOT NULL DEFAULT 'direct_extraction',
   properties_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS content_blocks (
+CREATE TABLE IF NOT EXISTS source_blocks (
   id TEXT PRIMARY KEY,
   paper_id UUID NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  block_order INTEGER NOT NULL,
   page INTEGER NOT NULL,
   section TEXT,
   block_type TEXT NOT NULL,
-  semantic_role TEXT NOT NULL,
   bbox JSONB,
   text TEXT NOT NULL,
   embedding vector(1536)
+);
+
+CREATE TABLE IF NOT EXISTS semantic_units (
+  id TEXT PRIMARY KEY,
+  paper_id UUID NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  title TEXT NOT NULL,
+  text TEXT NOT NULL,
+  source_ranges_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+  created_by TEXT NOT NULL,
+  properties_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS paper_references (
@@ -65,7 +78,7 @@ CREATE TABLE IF NOT EXISTS paper_references (
 CREATE TABLE IF NOT EXISTS citation_mentions (
   id TEXT PRIMARY KEY,
   reference_id TEXT NOT NULL REFERENCES paper_references(id) ON DELETE CASCADE,
-  content_block_id TEXT NOT NULL REFERENCES content_blocks(id) ON DELETE CASCADE,
+  source_block_id TEXT NOT NULL REFERENCES source_blocks(id) ON DELETE CASCADE,
   sentence TEXT NOT NULL,
   intent TEXT NOT NULL,
   cited_object TEXT,

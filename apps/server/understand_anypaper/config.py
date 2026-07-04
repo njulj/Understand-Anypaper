@@ -12,8 +12,8 @@ class Settings(BaseSettings):
     document_store_dir: str = "data/documents"
     codex_cli: str = "codex"
 
-    # LLM / embeddings. Empty api key disables LLM analysis and vector search;
-    # the pipeline then falls back to the rule-based analyzers.
+    # LLM / embeddings. Empty api key disables semantic slicing and vector search;
+    # graph building requires semantic units from the LLM analyzer.
     openai_api_key: str = Field(
         default="",
         validation_alias=AliasChoices("PAG_OPENAI_API_KEY", "OPENAI_API_KEY"),

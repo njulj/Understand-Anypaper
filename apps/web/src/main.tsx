@@ -17,15 +17,18 @@ import {
   X,
 } from 'lucide-react';
 import {
-  ContentBlock,
   GraphNode,
   PaperArgumentGraph,
   GraphEdge,
   PaperDocumentInfo,
   PaperSummary,
+  SemanticUnit,
+  SourceBlock,
+  deletePaper,
   documentPageImageUrl,
   fetchBlocks,
   fetchDocumentInfo,
+  fetchSemanticUnits,
   fetchGraph,
   listPapers,
   patchGraph,
@@ -71,7 +74,8 @@ function App() {
   const blockRefs = useRef(new Map<string, HTMLElement>());
   const [papers, setPapers] = useState<PaperSummary[]>([]);
   const [graph, setGraph] = useState<PaperArgumentGraph | null>(null);
-  const [blocks, setBlocks] = useState<ContentBlock[]>([]);
+  const [blocks, setBlocks] = useState<SourceBlock[]>([]);
+  const [semanticUnits, setSemanticUnits] = useState<SemanticUnit[]>([]);
   const [documentInfo, setDocumentInfo] = useState<PaperDocumentInfo | null>(null);
   const [sourceMode, setSourceMode] = useState<'pages' | 'blocks'>('blocks');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -92,9 +96,13 @@ function App() {
   const [newEdgeEvidenceId, setNewEdgeEvidenceId] = useState('');
 
   const selectedNode = graph?.nodes.find((node) => node.id === selectedNodeId) ?? null;
-  const blockById = useMemo(() => new Map(blocks.map((block) => [block.content_id, block])), [blocks]);
+  const blockById = useMemo(() => new Map(blocks.map((block) => [block.source_block_id, block])), [blocks]);
+  const unitById = useMemo(
+    () => new Map(semanticUnits.map((unit) => [unit.semantic_unit_id, unit])),
+    [semanticUnits],
+  );
   const blocksByPage = useMemo(() => {
-    const grouped = new Map<number, ContentBlock[]>();
+    const grouped = new Map<number, SourceBlock[]>();
     for (const block of blocks) {
       if (!block.bbox) continue;
       grouped.set(block.page, [...(grouped.get(block.page) ?? []), block]);
@@ -105,12 +113,15 @@ function App() {
     const byEvidence = new Map<string, string>();
     if (!graph) return byEvidence;
     for (const node of graph.nodes) {
-      for (const contentId of node.evidence_ids) {
-        if (!byEvidence.has(contentId)) byEvidence.set(contentId, node.id);
+      for (const unitId of node.semantic_unit_ids) {
+        const unit = unitById.get(unitId);
+        for (const sourceRange of unit?.source_ranges ?? []) {
+          if (!byEvidence.has(sourceRange.source_block_id)) byEvidence.set(sourceRange.source_block_id, node.id);
+        }
       }
     }
     return byEvidence;
-  }, [graph]);
+  }, [graph, unitById]);
   const incidentEdges = useMemo(() => {
     if (!graph || !selectedNode) return [];
     return graph.edges.filter(
@@ -118,7 +129,16 @@ function App() {
     );
   }, [graph, selectedNode]);
 
-  const evidenceIds = useMemo(() => new Set(selectedNode?.evidence_ids ?? []), [selectedNode]);
+  const evidenceIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const unitId of selectedNode?.semantic_unit_ids ?? []) {
+      const unit = unitById.get(unitId);
+      for (const sourceRange of unit?.source_ranges ?? []) {
+        ids.add(sourceRange.source_block_id);
+      }
+    }
+    return ids;
+  }, [selectedNode, unitById]);
 
   useEffect(() => {
     listPapers()
@@ -136,16 +156,20 @@ function App() {
     setEditTitle(selectedNode.title);
     setEditSummary(selectedNode.summary);
     setEditVerified(selectedNode.verified);
-    const first = selectedNode.evidence_ids.find((id) => blockRefs.current.has(id));
+    const first = selectedNode.semantic_unit_ids
+      .flatMap((id) => unitById.get(id)?.source_ranges.map((range) => range.source_block_id) ?? [])
+      .find((id) => blockRefs.current.has(id));
     if (first) {
       scrollToEvidence(first);
     }
-  }, [selectedNodeId, graph]);
+  }, [selectedNodeId, graph, unitById]);
 
   useEffect(() => {
-    const first = selectedNode?.evidence_ids.find((id) => blockById.has(id));
+    const first = selectedNode?.semantic_unit_ids
+      .flatMap((id) => unitById.get(id)?.source_ranges.map((range) => range.source_block_id) ?? [])
+      .find((id) => blockById.has(id));
     if (first) window.requestAnimationFrame(() => scrollToEvidence(first));
-  }, [sourceMode, documentInfo, selectedNodeId]);
+  }, [sourceMode, documentInfo, selectedNodeId, unitById, blockById]);
 
   useEffect(() => {
     if (!graph) return;
@@ -153,24 +177,37 @@ function App() {
     const target = graph.nodes.find((node) => node.id !== source)?.id ?? source;
     setNewEdgeSourceId(source);
     setNewEdgeTargetId(target);
-    const evidence = selectedNode?.evidence_ids.find((id) => blockById.has(id)) ?? '';
+    const evidence = selectedNode?.semantic_unit_ids.find((id) => unitById.has(id)) ?? '';
     setNewNodeEvidenceId(evidence);
     setNewEdgeEvidenceId(evidence);
-  }, [graph?.paper_id, selectedNodeId, blockById]);
+  }, [graph?.paper_id, selectedNodeId, unitById]);
 
   async function loadPaper(paperId: string, readyMessage?: string) {
-    const [nextGraph, nextBlocks, nextDocumentInfo] = await Promise.all([
+    const [nextGraph, nextBlocks, nextSemanticUnits, nextDocumentInfo] = await Promise.all([
       fetchGraph(paperId),
       fetchBlocks(paperId),
+      fetchSemanticUnits(paperId),
       fetchDocumentInfo(paperId).catch(() => null),
     ]);
     setGraph(nextGraph);
     setBlocks(nextBlocks);
+    setSemanticUnits(nextSemanticUnits);
     setDocumentInfo(nextDocumentInfo);
     setSourceMode(nextDocumentInfo ? 'pages' : 'blocks');
     setSelectedNodeId(nextGraph.nodes[0]?.id ?? null);
     setStatus('ready');
     setMessage(readyMessage ?? `Graph ready: ${nextGraph.nodes.length} nodes, ${nextGraph.edges.length} edges.`);
+  }
+
+  function clearPaperState(nextMessage = 'Upload a .txt, .md, or PDF to build a Paper Argument Graph.') {
+    setGraph(null);
+    setBlocks([]);
+    setSemanticUnits([]);
+    setDocumentInfo(null);
+    setSelectedNodeId(null);
+    setQuery('');
+    setStatus('idle');
+    setMessage(nextMessage);
   }
 
   function scrollToEvidence(contentId: string) {
@@ -191,24 +228,49 @@ function App() {
     setMessage(`Uploading ${file.name}...`);
     try {
       const nextGraph = await uploadPaper(file);
-      const [nextBlocks, nextDocumentInfo] = await Promise.all([
+      const [nextBlocks, nextSemanticUnits, nextDocumentInfo] = await Promise.all([
         fetchBlocks(nextGraph.paper_id),
+        fetchSemanticUnits(nextGraph.paper_id),
         fetchDocumentInfo(nextGraph.paper_id).catch(() => null),
       ]);
       setGraph(nextGraph);
       setBlocks(nextBlocks);
+      setSemanticUnits(nextSemanticUnits);
       setDocumentInfo(nextDocumentInfo);
       setSourceMode(nextDocumentInfo ? 'pages' : 'blocks');
       setSelectedNodeId(nextGraph.nodes[0]?.id ?? null);
       setQuery('');
       setStatus('ready');
       setMessage(`Graph ready: ${nextGraph.nodes.length} nodes, ${nextGraph.edges.length} edges.`);
-      listPapers().then(setPapers).catch(() => undefined);
+      const nextPapers = await listPapers();
+      setPapers(nextPapers);
     } catch (error) {
       setStatus('error');
       setMessage(error instanceof Error ? error.message : 'Upload failed.');
     } finally {
       event.target.value = '';
+    }
+  }
+
+  async function deleteCurrentPaper() {
+    if (!graph) return;
+    const title = graph.nodes.find((node) => node.node_type === 'Paper')?.title ?? graph.paper_id;
+    if (!window.confirm(`Delete “${title}” and its graph?`)) return;
+    setSaving(true);
+    try {
+      const result = await deletePaper(graph.paper_id);
+      setPapers(result.papers);
+      const nextPaper = result.papers[0];
+      if (nextPaper) {
+        await loadPaper(nextPaper.paper_id, `Deleted “${title}”.`);
+      } else {
+        clearPaperState(`Deleted “${title}”.`);
+      }
+    } catch (error) {
+      setStatus('error');
+      setMessage(error instanceof Error ? error.message : 'Failed to delete paper.');
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -254,7 +316,10 @@ function App() {
 
   async function addManualNode() {
     if (!graph || !newNodeTitle.trim()) return;
-    const evidenceBlock = newNodeEvidenceId ? blockById.get(newNodeEvidenceId) : null;
+    const evidenceUnit = newNodeEvidenceId ? unitById.get(newNodeEvidenceId) : null;
+    const evidenceBlock = evidenceUnit?.source_ranges[0]
+      ? blockById.get(evidenceUnit.source_ranges[0].source_block_id)
+      : null;
     const node: GraphNode = {
       id: `manual-${graph.paper_id.slice(0, 8)}-${Date.now()}`,
       paper_id: graph.paper_id,
@@ -263,7 +328,7 @@ function App() {
       summary: newNodeSummary.trim(),
       confidence: 1,
       source_type: 'human_added',
-      evidence_ids: evidenceBlock ? [evidenceBlock.content_id] : [],
+      semantic_unit_ids: evidenceUnit ? [evidenceUnit.semantic_unit_id] : [],
       page_ranges: evidenceBlock ? [[evidenceBlock.page, evidenceBlock.page]] : [],
       properties: { manual: true },
       created_by: 'human',
@@ -288,7 +353,7 @@ function App() {
 
   async function addManualEdge() {
     if (!graph || !newEdgeSourceId || !newEdgeTargetId || newEdgeSourceId === newEdgeTargetId) return;
-    const evidenceBlock = newEdgeEvidenceId ? blockById.get(newEdgeEvidenceId) : null;
+    const evidenceUnit = newEdgeEvidenceId ? unitById.get(newEdgeEvidenceId) : null;
     const edge: GraphEdge = {
       id: `manual-edge-${graph.paper_id.slice(0, 8)}-${Date.now()}`,
       paper_id: graph.paper_id,
@@ -296,14 +361,7 @@ function App() {
       target_node_id: newEdgeTargetId,
       edge_type: newEdgeType,
       confidence: 1,
-      evidence: evidenceBlock
-        ? {
-            page: evidenceBlock.page,
-            block_id: evidenceBlock.content_id,
-            text: evidenceBlock.text,
-            bbox: evidenceBlock.bbox,
-          }
-        : null,
+      semantic_unit_ids: evidenceUnit ? [evidenceUnit.semantic_unit_id] : [],
       inference_type: 'human_added',
       properties: { manual: true },
     };
@@ -351,11 +409,20 @@ function App() {
       <header className="toolbar">
         <div className="brand"><GitBranch size={22} /> Understand Anypaper</div>
         <div className="toolbar-actions">
-          {papers.length > 1 ? (
+          {papers.length ? (
             <select
               className="paper-select"
               value={graph?.paper_id ?? ''}
-              onChange={(event) => loadPaper(event.target.value).catch(() => undefined)}
+              onChange={(event) => {
+                const paper = papers.find((item) => item.paper_id === event.target.value);
+                loadPaper(
+                  event.target.value,
+                  paper ? `Loaded “${paper.title}”.` : undefined,
+                ).catch((error) => {
+                  setStatus('error');
+                  setMessage(error instanceof Error ? error.message : 'Failed to load paper.');
+                });
+              }}
               aria-label="Switch paper"
             >
               {papers.map((paper) => (
@@ -363,6 +430,15 @@ function App() {
               ))}
             </select>
           ) : null}
+          <button
+            className="icon-action"
+            type="button"
+            title="Delete current paper"
+            onClick={deleteCurrentPaper}
+            disabled={!graph || saving}
+          >
+            <Trash2 size={16} />
+          </button>
           <label className="search-box" aria-label="Search graph nodes">
             <Search size={16} />
             <input
@@ -436,13 +512,13 @@ function App() {
                     {(blocksByPage.get(page.page) ?? []).map((block) => {
                       if (!block.bbox) return null;
                       const [x0, y0, x1, y1] = block.bbox;
-                      const highlighted = evidenceIds.has(block.content_id);
+                      const highlighted = evidenceIds.has(block.source_block_id);
                       return (
                         <button
-                          key={block.content_id}
+                          key={block.source_block_id}
                           ref={(el) => {
-                            if (el) blockRefs.current.set(block.content_id, el);
-                            else blockRefs.current.delete(block.content_id);
+                            if (el) blockRefs.current.set(block.source_block_id, el);
+                            else blockRefs.current.delete(block.source_block_id);
                           }}
                           type="button"
                           className={`bbox-highlight ${highlighted ? 'highlighted' : ''}`}
@@ -452,8 +528,8 @@ function App() {
                             width: `${((x1 - x0) / page.width) * 100}%`,
                             height: `${((y1 - y0) / page.height) * 100}%`,
                           }}
-                          title={`${block.semantic_role}: ${block.text.slice(0, 180)}`}
-                          onClick={() => selectEvidenceOwner(block.content_id)}
+                          title={`${block.block_type}: ${block.text.slice(0, 180)}`}
+                          onClick={() => selectEvidenceOwner(block.source_block_id)}
                         />
                       );
                     })}
@@ -465,16 +541,16 @@ function App() {
             <div className="block-list">
               {blocks.map((block) => (
                 <div
-                  key={block.content_id}
+                  key={block.source_block_id}
                   ref={(el) => {
-                    if (el) blockRefs.current.set(block.content_id, el);
-                    else blockRefs.current.delete(block.content_id);
+                    if (el) blockRefs.current.set(block.source_block_id, el);
+                    else blockRefs.current.delete(block.source_block_id);
                   }}
-                  className={`content-block ${evidenceIds.has(block.content_id) ? 'highlighted' : ''}`}
-                  onClick={() => selectEvidenceOwner(block.content_id)}
+                  className={`content-block ${evidenceIds.has(block.source_block_id) ? 'highlighted' : ''}`}
+                  onClick={() => selectEvidenceOwner(block.source_block_id)}
                 >
                   <header>
-                    <span className="role-tag">{block.semantic_role}</span>
+                    <span className="role-tag">{block.block_type}</span>
                     <span>p.{block.page}{block.section ? ` · ${block.section}` : ''}</span>
                   </header>
                   <p>{block.text}</p>
@@ -547,24 +623,31 @@ function App() {
                 <span>Verified</span><strong>{selectedNode.verified ? 'Yes' : 'No'}</strong>
               </div>
 
-              {selectedNode.evidence_ids.length ? (
+              {selectedNode.semantic_unit_ids.length ? (
                 <section className="evidence-list">
-                  <h3>Evidence</h3>
+                  <h3>Semantic Units</h3>
                   <div className="evidence-chips">
-                    {selectedNode.evidence_ids.map((contentId) => (
-                      <button
-                        key={contentId}
-                        type="button"
-                        className="evidence-chip"
-                        onClick={() =>
-                          blockRefs.current.get(contentId)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-                        }
-                      >
-                        {blocks.find((block) => block.content_id === contentId)
-                          ? `p.${blocks.find((block) => block.content_id === contentId)!.page} ${contentId.split('-').slice(-1)[0]}`
-                          : contentId}
-                      </button>
-                    ))}
+                    {selectedNode.semantic_unit_ids.map((unitId) => {
+                      const unit = unitById.get(unitId);
+                      const firstSourceBlockId = unit?.source_ranges[0]?.source_block_id;
+                      const firstBlock = firstSourceBlockId ? blockById.get(firstSourceBlockId) : null;
+                      return (
+                        <button
+                          key={unitId}
+                          type="button"
+                          className="evidence-chip"
+                          onClick={() =>
+                            firstSourceBlockId
+                              ? blockRefs.current.get(firstSourceBlockId)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                              : undefined
+                          }
+                        >
+                          {unit
+                            ? `${unit.role}${firstBlock ? ` · p.${firstBlock.page}` : ''}`
+                            : unitId}
+                        </button>
+                      );
+                    })}
                   </div>
                 </section>
               ) : null}
@@ -619,9 +702,9 @@ function App() {
                   Evidence
                   <select value={newNodeEvidenceId} onChange={(event) => setNewNodeEvidenceId(event.target.value)}>
                     <option value="">No evidence</option>
-                    {blocks.map((block) => (
-                      <option key={block.content_id} value={block.content_id}>
-                        p.{block.page} · {block.semantic_role} · {block.text.slice(0, 80)}
+                    {semanticUnits.map((unit) => (
+                      <option key={unit.semantic_unit_id} value={unit.semantic_unit_id}>
+                        {unit.role} · {unit.title}
                       </option>
                     ))}
                   </select>
@@ -666,9 +749,9 @@ function App() {
                   Evidence
                   <select value={newEdgeEvidenceId} onChange={(event) => setNewEdgeEvidenceId(event.target.value)}>
                     <option value="">No evidence</option>
-                    {blocks.map((block) => (
-                      <option key={block.content_id} value={block.content_id}>
-                        p.{block.page} · {block.semantic_role} · {block.text.slice(0, 80)}
+                    {semanticUnits.map((unit) => (
+                      <option key={unit.semantic_unit_id} value={unit.semantic_unit_id}>
+                        {unit.role} · {unit.title}
                       </option>
                     ))}
                   </select>
@@ -704,7 +787,15 @@ function App() {
                       <button type="button" className="edge-link" onClick={() => setSelectedNodeId(otherId)}>
                         {edge.source_node_id === selectedNode.id ? '→' : '←'} {nodeLabel(otherId)}
                       </button>
-                      {edge.evidence?.text ? <p>{edge.evidence.text.slice(0, 220)}</p> : null}
+                      {edge.semantic_unit_ids.length ? (
+                        <p>
+                          {edge.semantic_unit_ids
+                            .map((unitId) => unitById.get(unitId)?.text)
+                            .filter(Boolean)
+                            .join(' ')
+                            .slice(0, 220)}
+                        </p>
+                      ) : null}
                     </article>
                   );
                 }) : <p className="muted">No relations for this node.</p>}

@@ -268,7 +268,7 @@ export function GraphView({ graph, selectedNodeId, query, onSelectNode }: GraphV
         return (
           <g key={edge.id} className={`graph-edge ${dimmed ? 'dimmed' : ''}`}>
             <line x1={source.x} y1={source.y} x2={endX} y2={endY} markerEnd="url(#arrow)" />
-            <title>{`${edge.edge_type} (${Math.round(edge.confidence * 100)}%)${edge.evidence?.text ? `\n${edge.evidence.text.slice(0, 160)}` : ''}`}</title>
+            <title>{`${edge.edge_type} (${Math.round(edge.confidence * 100)}%)`}</title>
           </g>
         );
       })}

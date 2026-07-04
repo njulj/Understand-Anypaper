@@ -6,7 +6,7 @@ export type GraphNode = {
   summary: string;
   confidence: number;
   source_type: string;
-  evidence_ids: string[];
+  semantic_unit_ids: string[];
   page_ranges: [number, number][];
   properties: Record<string, unknown>;
   created_by: string;
@@ -20,12 +20,7 @@ export type GraphEdge = {
   target_node_id: string;
   edge_type: string;
   confidence: number;
-  evidence?: {
-    page?: number | null;
-    block_id?: string | null;
-    text?: string | null;
-    bbox?: number[] | null;
-  } | null;
+  semantic_unit_ids: string[];
   inference_type: string;
   properties: Record<string, unknown>;
 };
@@ -36,16 +31,33 @@ export type PaperArgumentGraph = {
   edges: GraphEdge[];
 };
 
-export type ContentBlock = {
-  content_id: string;
+export type SourceBlock = {
+  source_block_id: string;
   order: number;
   page: number;
   section?: string | null;
   bbox?: number[] | null;
   text: string;
   block_type: string;
-  semantic_role: string;
   citations: string[];
+};
+
+export type SourceRange = {
+  source_block_id: string;
+  start_char?: number | null;
+  end_char?: number | null;
+};
+
+export type SemanticUnit = {
+  semantic_unit_id: string;
+  paper_id: string;
+  role: string;
+  title: string;
+  text: string;
+  source_ranges: SourceRange[];
+  confidence: number;
+  created_by: string;
+  properties: Record<string, unknown>;
 };
 
 export type PaperSummary = {
@@ -96,12 +108,22 @@ export function listPapers(): Promise<PaperSummary[]> {
   return request<PaperSummary[]>('/api/papers');
 }
 
+export function deletePaper(paperId: string): Promise<{ deleted: string; papers: PaperSummary[] }> {
+  return request<{ deleted: string; papers: PaperSummary[] }>(`/api/papers/${paperId}`, {
+    method: 'DELETE',
+  });
+}
+
 export function fetchGraph(paperId: string): Promise<PaperArgumentGraph> {
   return request<PaperArgumentGraph>(`/api/papers/${paperId}/graph`);
 }
 
-export function fetchBlocks(paperId: string): Promise<ContentBlock[]> {
-  return request<ContentBlock[]>(`/api/papers/${paperId}/blocks`);
+export function fetchBlocks(paperId: string): Promise<SourceBlock[]> {
+  return request<SourceBlock[]>(`/api/papers/${paperId}/blocks`);
+}
+
+export function fetchSemanticUnits(paperId: string): Promise<SemanticUnit[]> {
+  return request<SemanticUnit[]>(`/api/papers/${paperId}/semantic-units`);
 }
 
 export function fetchDocumentInfo(paperId: string): Promise<PaperDocumentInfo> {
