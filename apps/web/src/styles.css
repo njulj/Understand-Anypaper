@@ -1,15 +1,59 @@
 :root {
-  color-scheme: dark;
-  --bg: #101418;
-  --panel: #171c22;
-  --panel-soft: #1e252d;
-  --border: #303944;
-  --text: #edf2f7;
-  --muted: #9aa8b5;
-  --accent: #4f8cff;
-  --accent-strong: #2f6eea;
-  --danger: #ff6b6b;
-  --success: #58c783;
+  color-scheme: light;
+  --bg: #f4f7fb;
+  --panel: #ffffff;
+  --panel-soft: #eef3f8;
+  --toolbar: #ffffff;
+  --border: #d6dee8;
+  --text: #17202a;
+  --muted: #627083;
+  --accent: #2f6eea;
+  --accent-strong: #255bd0;
+  --danger: #cf3c3c;
+  --danger-text: #8f2020;
+  --success: #268a51;
+  --graph-grid-dot: #dce5ef;
+  --graph-edge: #8fa0b3;
+  --graph-node-stroke: rgba(15, 23, 42, 0.24);
+  --graph-selected-stroke: #17202a;
+  --pdf-page-bg: #ffffff;
+  --pdf-page-shadow: rgba(20, 35, 55, 0.16);
+  --content-highlight-bg: #e8f1ff;
+  --bbox-border: rgba(47, 110, 234, 0.38);
+  --bbox-bg: rgba(47, 110, 234, 0.08);
+  --bbox-highlight-border: #c77912;
+  --bbox-highlight-bg: rgba(255, 202, 102, 0.36);
+  --bbox-highlight-shadow: rgba(255, 202, 102, 0.22);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #101418;
+    --panel: #171c22;
+    --panel-soft: #1e252d;
+    --toolbar: #131820;
+    --border: #303944;
+    --text: #edf2f7;
+    --muted: #9aa8b5;
+    --accent: #4f8cff;
+    --accent-strong: #2f6eea;
+    --danger: #ff6b6b;
+    --danger-text: #ffd2d2;
+    --success: #58c783;
+    --graph-grid-dot: #222b35;
+    --graph-edge: #5b6b7d;
+    --graph-node-stroke: rgba(0, 0, 0, 0.45);
+    --graph-selected-stroke: #ffffff;
+    --pdf-page-bg: #f7f8fb;
+    --pdf-page-shadow: rgba(0, 0, 0, 0.24);
+    --content-highlight-bg: #1c2c44;
+    --bbox-border: rgba(79, 140, 255, 0.35);
+    --bbox-bg: rgba(79, 140, 255, 0.08);
+    --bbox-highlight-border: #ffca66;
+    --bbox-highlight-bg: rgba(255, 202, 102, 0.28);
+    --bbox-highlight-shadow: rgba(255, 202, 102, 0.18);
+  }
 }
 
 * {
@@ -50,7 +94,7 @@ button:disabled {
   gap: 16px;
   padding: 12px 20px;
   border-bottom: 1px solid var(--border);
-  background: #131820;
+  background: var(--toolbar);
 }
 
 .brand,
@@ -208,7 +252,7 @@ button:disabled {
 }
 
 .status-line.error {
-  color: #ffd2d2;
+  color: var(--danger-text);
   border-color: color-mix(in srgb, var(--danger) 50%, var(--border));
 }
 
@@ -297,7 +341,7 @@ button:disabled {
   touch-action: none;
   cursor: grab;
   background:
-    radial-gradient(circle at 1px 1px, #222b35 1px, transparent 0) 0 0 / 26px 26px,
+    radial-gradient(circle at 1px 1px, var(--graph-grid-dot) 1px, transparent 0) 0 0 / 26px 26px,
     var(--panel);
 }
 
@@ -306,7 +350,7 @@ button:disabled {
 }
 
 .graph-edge line {
-  stroke: #5b6b7d;
+  stroke: var(--graph-edge);
   stroke-width: 1.4;
   opacity: 0.75;
 }
@@ -320,12 +364,12 @@ button:disabled {
 }
 
 .graph-node circle {
-  stroke: rgba(0, 0, 0, 0.45);
+  stroke: var(--graph-node-stroke);
   stroke-width: 1.5;
 }
 
 .graph-node.selected circle:first-of-type {
-  stroke: #fff;
+  stroke: var(--graph-selected-stroke);
   stroke-width: 2.5;
 }
 
@@ -393,8 +437,8 @@ button:disabled {
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 6px;
-  background: #f7f8fb;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.24);
+  background: var(--pdf-page-bg);
+  box-shadow: 0 10px 30px var(--pdf-page-shadow);
 }
 
 .pdf-page img {
@@ -417,16 +461,16 @@ button:disabled {
   min-width: 6px;
   min-height: 6px;
   padding: 0;
-  border: 1px solid rgba(79, 140, 255, 0.35);
+  border: 1px solid var(--bbox-border);
   border-radius: 2px;
-  background: rgba(79, 140, 255, 0.08);
+  background: var(--bbox-bg);
 }
 
 .bbox-highlight:hover,
 .bbox-highlight.highlighted {
-  border-color: #ffca66;
-  background: rgba(255, 202, 102, 0.28);
-  box-shadow: 0 0 0 2px rgba(255, 202, 102, 0.18);
+  border-color: var(--bbox-highlight-border);
+  background: var(--bbox-highlight-bg);
+  box-shadow: 0 0 0 2px var(--bbox-highlight-shadow);
 }
 
 .content-block {
@@ -439,7 +483,7 @@ button:disabled {
 
 .content-block.highlighted {
   border-color: var(--accent);
-  background: #1c2c44;
+  background: var(--content-highlight-bg);
 }
 
 .content-block:hover {
