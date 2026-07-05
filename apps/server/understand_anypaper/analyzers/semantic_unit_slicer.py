@@ -1,11 +1,10 @@
-import json
 import logging
 from typing import Literal
 from uuid import uuid4
 
-import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from understand_anypaper.analyzers.structured_agent import StructuredAgent, StructuredAgentError
 from understand_anypaper.config import Settings, settings
 from understand_anypaper.parser.models import ParsedPaper, SemanticUnit, SourceBlock, SourceRange
 
@@ -39,11 +38,10 @@ class SemanticUnitOutput(BaseModel):
 
     role: SemanticRole
     title: str = Field(description="Short graph-node title for this semantic unit.")
-    text: str = Field(
-        description="Concise faithful restatement of this unit, preserving key terms."
-    )
+    text: str = Field(description="Concise faithful restatement of this unit.")
     source_quotes: list[SemanticUnitSourceQuote] = Field(
-        min_length=1, description="One or more copied text spans that support this unit."
+        min_length=1,
+        description="One or more copied text spans that support this unit.",
     )
     confidence: float = Field(ge=0, le=1)
 
@@ -71,8 +69,7 @@ Role standards:
   it describes a method component or experimental finding. Do not label every
   implementation detail as a contribution outside such author-claimed contexts.
 - method: how the work implements a contribution: architecture, module design, training
-  procedure, algorithmic step, indexing strategy, inference pipeline, or mechanism. Method
-  units explain what is done internally, not the headline claim that it is novel or better.
+  procedure, algorithmic step, indexing strategy, inference pipeline, or mechanism.
 - motivation: why the work matters; demand, deployment pressure, practical need, or
   research objective.
 - gap: a limitation, failure, missing capability, or unresolved trade-off in prior work.
@@ -86,46 +83,10 @@ Role standards:
 - table: a table caption or prose whose primary purpose is to explain a table.
 - reference: bibliography entries or citation-centered content about another work.
 
-Example:
-- 'We propose ShiftLUT, a framework that improves the receptive-field/efficiency trade-off'
-  is contribution; 'LSS applies learnable channel-wise spatial shifts to feature maps' is method.
-- 'MuLUT enables cooperation of multiple LUTs to overcome single-LUT limits' is contribution;
-  'complementary indexing and hierarchical re-indexing connect multiple LUTs' is method.
-
 Return a JSON object with a semantic_units array. Each item must contain role, title, text,
 source_quotes, and confidence. Each source_quotes item must contain source_block_id and quote.
 For source_quotes, copy short exact spans from the provided source block text. Do not invent
 character offsets; the server will match quoted spans back to start_char/end_char.
-
-Example output:
-{
-  "semantic_units": [
-    {
-      "role": "contribution",
-      "title": "ShiftLUT expands receptive field efficiently",
-      "text": "The paper proposes ShiftLUT to expand the receptive field while preserving efficiency.",
-      "source_quotes": [
-        {
-          "source_block_id": "paper-block12",
-          "quote": "we propose ShiftLUT, a novel framework that attains the largest receptive field among all LUT-based methods while maintaining high efficiency"
-        }
-      ],
-      "confidence": 0.92
-    },
-    {
-      "role": "method",
-      "title": "Learnable Spatial Shift module",
-      "text": "LSS expands the effective receptive field by applying learnable channel-wise spatial offsets.",
-      "source_quotes": [
-        {
-          "source_block_id": "paper-block13",
-          "quote": "LSS introduces channel-wise spatial diversity into the LUT by learning a distinct spatial offset for each feature channel"
-        }
-      ],
-      "confidence": 0.9
-    }
-  ]
-}
 """
 
 _CONTRIBUTION_REQUIRED_RETRY_PROMPT = """\
@@ -138,49 +99,84 @@ not only method or result units.
 """
 
 
-class LLMAnalyzer:
-    """OpenAI-compatible analyzer that performs semantic slicing.
+class SemanticUnitSlicer:
+    """Agent-backed semantic unit slicer."""
 
-    The PAG builder intentionally depends on this output instead of assigning
-    semantic roles to parser blocks with rules.
-    """
-
-    def __init__(self, config: Settings = settings) -> None:
+    def __init__(
+        self,
+        config: Settings = settings,
+        agent: StructuredAgent | None = None,
+    ) -> None:
         self._config = config
+        self._agent_injected = agent is not None
+        self._agent = agent or StructuredAgent(
+            name="SemanticUnitSlicer",
+            instructions=_SEMANTIC_UNIT_SYSTEM_PROMPT,
+            config=config,
+        )
 
     @property
     def available(self) -> bool:
-        return bool(self._config.openai_api_key)
+        return self._agent_injected or bool(self._config.openai_api_key)
 
     def slice_semantic_units(self, parsed: ParsedPaper) -> list[SemanticUnit] | None:
         if not self.available or not parsed.source_blocks:
             return None
+
+        prompt = self._prompt(parsed)
+        try:
+            output = self._agent.run(
+                prompt,
+                SemanticSliceOutput,
+                prompt_cache_key=f"semantic-slice:{parsed.paper_id}",
+            )
+        except StructuredAgentError as exc:
+            logger.warning("LLM semantic slicing failed: %s", exc)
+            return None
+
+        if not self._has_contribution(output):
+            output = self._retry_with_required_contribution(parsed, prompt)
+            if output is None:
+                return None
+
+        return self._semantic_units_from_output(parsed, output)
+
+    def _retry_with_required_contribution(
+        self,
+        parsed: ParsedPaper,
+        prompt: str,
+    ) -> SemanticSliceOutput | None:
+        logger.error("LLM semantic slicing returned no contribution units; retrying once")
+        retry_agent = StructuredAgent(
+            name="SemanticUnitSlicer",
+            instructions=f"{_SEMANTIC_UNIT_SYSTEM_PROMPT}\n\n{_CONTRIBUTION_REQUIRED_RETRY_PROMPT}",
+            config=self._config,
+        )
+        try:
+            output = retry_agent.run(
+                prompt,
+                SemanticSliceOutput,
+                prompt_cache_key=f"semantic-slice-retry:{parsed.paper_id}",
+            )
+        except StructuredAgentError as exc:
+            logger.warning("LLM semantic slicing failed: %s", exc)
+            return None
+        return output if self._has_contribution(output) else None
+
+    @staticmethod
+    def _prompt(parsed: ParsedPaper) -> str:
         blocks = "\n\n".join(
             f"[{block.source_block_id}] page={block.page} section={block.section or 'none'} "
             f"type={block.block_type}\n{block.text[:1600]}"
             for block in parsed.source_blocks[:120]
         )
-        user_prompt = (
-            f"Title: {parsed.title}\nAbstract: {parsed.abstract[:1600]}\n\nSource blocks:\n{blocks}"
-        )
-        payload = self._chat_json(
-            _SEMANTIC_UNIT_SYSTEM_PROMPT,
-            user_prompt,
-        )
-        output = self._validated_output(payload)
-        if output is None:
-            return None
-        if not self._has_contribution(output):
-            logger.error("LLM semantic slicing returned no contribution units; retrying once")
-            retry_payload = self._chat_json(
-                f"{_SEMANTIC_UNIT_SYSTEM_PROMPT}\n\n{_CONTRIBUTION_REQUIRED_RETRY_PROMPT}",
-                user_prompt,
-            )
-            retry_output = self._validated_output(retry_payload)
-            if retry_output is None or not self._has_contribution(retry_output):
-                return None
-            output = retry_output
+        return f"Title: {parsed.title}\nAbstract: {parsed.abstract[:1600]}\n\nSource blocks:\n{blocks}"
 
+    def _semantic_units_from_output(
+        self,
+        parsed: ParsedPaper,
+        output: SemanticSliceOutput,
+    ) -> list[SemanticUnit] | None:
         known_blocks = {block.source_block_id: block for block in parsed.source_blocks}
         units: list[SemanticUnit] = []
         prefix = parsed.paper_id[:8]
@@ -197,7 +193,7 @@ class LLMAnalyzer:
                     text=item.text.strip(),
                     source_ranges=ranges,
                     confidence=max(0.0, min(item.confidence, 1.0)),
-                    created_by="llm-semantic-slicer",
+                    created_by="semantic-unit-slicer-agent",
                 )
             )
         return units or None
@@ -227,7 +223,7 @@ class LLMAnalyzer:
             block = known_blocks.get(source_quote.source_block_id)
             if block is None:
                 continue
-            start, end = LLMAnalyzer._find_quote_span(block.text, source_quote.quote)
+            start, end = SemanticUnitSlicer._find_quote_span(block.text, source_quote.quote)
             key = (source_quote.source_block_id, start, end)
             if key in seen:
                 continue
@@ -255,8 +251,8 @@ class LLMAnalyzer:
         if start >= 0:
             return (start, start + len(quote))
 
-        normalized_source, source_map = LLMAnalyzer._normalize_with_index_map(source_text)
-        normalized_quote, _ = LLMAnalyzer._normalize_with_index_map(quote)
+        normalized_source, source_map = SemanticUnitSlicer._normalize_with_index_map(source_text)
+        normalized_quote, _ = SemanticUnitSlicer._normalize_with_index_map(quote)
         if not normalized_quote:
             return (None, None)
 
@@ -286,68 +282,3 @@ class LLMAnalyzer:
             normalized_chars.pop()
             index_map.pop()
         return ("".join(normalized_chars), index_map)
-
-    @staticmethod
-    def _structured_response_format() -> dict:
-        return {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "semantic_slice_output",
-                "schema": SemanticSliceOutput.model_json_schema(),
-                "strict": True,
-            },
-        }
-
-    @staticmethod
-    def _json_object_response_format() -> dict:
-        return {"type": "json_object"}
-
-    def _post_chat_completion(
-        self, system: str, user: str, response_format: dict
-    ) -> httpx.Response:
-        return httpx.post(
-            f"{self._config.openai_base_url.rstrip('/')}/chat/completions",
-            headers={"Authorization": f"Bearer {self._config.openai_api_key}"},
-            json={
-                "model": self._config.openai_model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "response_format": response_format,
-                "temperature": 0,
-            },
-            timeout=90,
-        )
-
-    def _chat_json(self, system: str, user: str) -> dict | None:
-        try:
-            response = self._post_chat_completion(system, user, self._structured_response_format())
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code not in {400, 422}:
-                logger.warning("LLM semantic slicing failed: %s", exc)
-                return None
-            logger.warning(
-                "Structured output was rejected by the configured OpenAI-compatible endpoint; "
-                "falling back to JSON object mode: %s",
-                exc,
-            )
-            try:
-                response = self._post_chat_completion(
-                    system, user, self._json_object_response_format()
-                )
-                response.raise_for_status()
-            except httpx.HTTPError as fallback_exc:
-                logger.warning("LLM semantic slicing failed: %s", fallback_exc)
-                return None
-        except httpx.HTTPError as exc:
-            logger.warning("LLM semantic slicing failed: %s", exc)
-            return None
-
-        try:
-            content = response.json()["choices"][0]["message"]["content"]
-            return json.loads(content)
-        except (KeyError, IndexError, json.JSONDecodeError) as exc:
-            logger.warning("LLM semantic slicing failed: %s", exc)
-            return None

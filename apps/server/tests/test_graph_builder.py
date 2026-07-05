@@ -10,7 +10,13 @@ from understand_anypaper.parser.models import (
 )
 
 
-def _unit(unit_id: str, role: str, title: str, block_id: str) -> SemanticUnit:
+def _unit(
+    unit_id: str,
+    role: str,
+    title: str,
+    block_id: str,
+    contribution_unit_ids: list[str] | None = None,
+) -> SemanticUnit:
     return SemanticUnit(
         semantic_unit_id=unit_id,
         paper_id="paper-12345678",
@@ -19,6 +25,9 @@ def _unit(unit_id: str, role: str, title: str, block_id: str) -> SemanticUnit:
         text=title,
         source_ranges=[SourceRange(source_block_id=block_id)],
         confidence=0.9,
+        properties={}
+        if contribution_unit_ids is None
+        else {"contribution_unit_ids": contribution_unit_ids},
     )
 
 
@@ -35,9 +44,9 @@ def test_builds_prd_tree_with_facets_and_evidence():
         ],
         semantic_units=[
             _unit("unit-contribution", "contribution", "TinyLUT contribution", "paper-block1"),
-            _unit("unit-motivation", "motivation", "Mobile demand", "paper-block2"),
-            _unit("unit-method", "method", "Separable mapping", "paper-block3"),
-            _unit("unit-result", "result", "Storage improvement", "paper-block4"),
+            _unit("unit-motivation", "motivation", "Mobile demand", "paper-block2", ["unit-contribution"]),
+            _unit("unit-method", "method", "Separable mapping", "paper-block3", ["unit-contribution"]),
+            _unit("unit-result", "result", "Storage improvement", "paper-block4", ["unit-contribution"]),
         ],
         references=[
             PaperReference(reference_id="ref-1", marker="[1]", raw_text="[1] Prior LUT work."),
@@ -72,3 +81,25 @@ def test_builds_prd_tree_with_facets_and_evidence():
     assert any(edge.source_node_id == how_id and edge.target_node_id == "unit-method" for edge in graph.edges)
     assert any(edge.source_node_id == proof_id and edge.target_node_id == "unit-result" for edge in graph.edges)
     assert any(edge.source_node_id == why_id and edge.target_node_id == "ref-1" for edge in graph.edges)
+
+
+def test_evidence_assignment_is_required():
+    parsed = ParsedPaper(
+        paper_id="paper-12345678",
+        title="TinyLUT",
+        source_blocks=[
+            SourceBlock(source_block_id="paper-block1", order=1, page=1, text="We contribute TinyLUT."),
+            SourceBlock(source_block_id="paper-block2", order=2, page=1, text="The method uses mapping."),
+        ],
+        semantic_units=[
+            _unit("unit-contribution", "contribution", "TinyLUT contribution", "paper-block1"),
+            _unit("unit-method", "method", "Separable mapping", "paper-block2"),
+        ],
+    )
+
+    try:
+        PaperArgumentGraphBuilder().build(parsed)
+    except Exception as exc:  # noqa: BLE001
+        assert "missing LLM contribution assignment" in str(exc)
+    else:
+        raise AssertionError("Graph builder should reject unassigned evidence")

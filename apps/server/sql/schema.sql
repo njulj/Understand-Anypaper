@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   source_type TEXT NOT NULL,
   created_by TEXT NOT NULL,
   verified BOOLEAN NOT NULL DEFAULT false,
-  embedding vector(1536),
+  embedding vector,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS source_blocks (
   block_type TEXT NOT NULL,
   bbox JSONB,
   text TEXT NOT NULL,
-  embedding vector(1536)
+  embedding vector
 );
 
 CREATE TABLE IF NOT EXISTS semantic_units (
@@ -101,3 +101,6 @@ CREATE TABLE IF NOT EXISTS graph_patches (
   operations_json JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE nodes ALTER COLUMN embedding TYPE vector;
+ALTER TABLE source_blocks ALTER COLUMN embedding TYPE vector;

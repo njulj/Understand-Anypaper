@@ -1,7 +1,6 @@
 from collections import defaultdict
 from uuid import uuid4
 
-from understand_anypaper.analyzers.llm_analyzer import LLMAnalyzer
 from understand_anypaper.graph.schema import EdgeType, GraphEdge, GraphNode, NodeType, PaperArgumentGraph
 from understand_anypaper.parser.models import ParsedPaper, SemanticUnit, SourceBlock
 
@@ -16,9 +15,6 @@ class PaperArgumentGraphBuilder:
     The parser only provides source blocks for location and citation extraction.
     Semantic roles belong to SemanticUnit objects produced by the LLM analyzer.
     """
-
-    def __init__(self, analyzer: LLMAnalyzer | None = None) -> None:
-        self._analyzer = analyzer if analyzer is not None else LLMAnalyzer()
 
     def build(self, parsed: ParsedPaper) -> PaperArgumentGraph:
         semantic_units = self._semantic_units(parsed)
@@ -125,7 +121,7 @@ class PaperArgumentGraphBuilder:
                 )
             )
             facet = self._facet_for_role(unit.role)
-            for contribution_id in self._target_contributions(unit, contributions, contribution_ids):
+            for contribution_id in self._target_contributions(unit, contribution_ids):
                 for source_block_id in self._unit_source_block_ids(unit):
                     source_block_assignments[source_block_id].add(contribution_id)
                 facet_id = facet_ids[contribution_id][facet]
@@ -149,10 +145,7 @@ class PaperArgumentGraphBuilder:
     def _semantic_units(self, parsed: ParsedPaper) -> list[SemanticUnit]:
         if parsed.semantic_units:
             return parsed.semantic_units
-        units = self._analyzer.slice_semantic_units(parsed) if self._analyzer.available else None
-        if not units:
-            raise GraphBuildError("LLM semantic slicing is required to build a Paper Argument Graph")
-        return units
+        raise GraphBuildError("Semantic units are required to build a Paper Argument Graph")
 
     def _node_from_unit(
         self,
@@ -184,34 +177,23 @@ class PaperArgumentGraphBuilder:
     def _target_contributions(
         self,
         unit: SemanticUnit,
-        contributions: list[SemanticUnit],
         contribution_ids: dict[str, str],
     ) -> list[str]:
         explicit_ids = unit.properties.get("contribution_unit_ids")
-        if isinstance(explicit_ids, list):
-            targets = [
-                contribution_ids[item]
-                for item in explicit_ids
-                if isinstance(item, str) and item in contribution_ids
-            ]
-            if targets:
-                return targets
-
-        unit_blocks = self._unit_source_block_ids(unit)
-        overlapping = [
-            contribution_ids[contribution.semantic_unit_id]
-            for contribution in contributions
-            if unit_blocks & self._unit_source_block_ids(contribution)
+        if not isinstance(explicit_ids, list):
+            raise GraphBuildError(
+                f"Semantic unit {unit.semantic_unit_id} is missing LLM contribution assignment"
+            )
+        targets = [
+            contribution_ids[item]
+            for item in explicit_ids
+            if isinstance(item, str) and item in contribution_ids
         ]
-        if overlapping:
-            return overlapping
-
-        return [
-            contribution_ids[min(
-                contributions,
-                key=lambda contribution: abs(self._first_source_order(unit) - self._first_source_order(contribution)),
-            ).semantic_unit_id]
-        ]
+        if len(targets) != len([item for item in explicit_ids if isinstance(item, str)]):
+            raise GraphBuildError(
+                f"Semantic unit {unit.semantic_unit_id} references an unknown contribution"
+            )
+        return targets
 
     def _attach_sequence_edges(
         self,
@@ -332,14 +314,6 @@ class PaperArgumentGraphBuilder:
     @staticmethod
     def _unit_source_block_ids(unit: SemanticUnit) -> set[str]:
         return {source_range.source_block_id for source_range in unit.source_ranges}
-
-    @staticmethod
-    def _first_source_order(unit: SemanticUnit) -> int:
-        for source_range in unit.source_ranges:
-            tail = source_range.source_block_id.rsplit("block", 1)[-1]
-            if tail.isdigit():
-                return int(tail)
-        return 10**9
 
     @staticmethod
     def _page_ranges_for_units(

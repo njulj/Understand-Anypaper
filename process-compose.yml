@@ -23,7 +23,7 @@ processes:
   server:
     command: |
       cd apps/server
-      exec env DATABASE_URL="postgresql+psycopg://understand:understand@localhost:$PGPORT/understand_anypaper" uv run uvicorn understand_anypaper.main:app --host 0.0.0.0 --port $API_PORT
+      exec env DATABASE_URL="postgresql+psycopg://understand:understand@localhost:$PGPORT/understand_anypaper" uv run uvicorn understand_anypaper.main:app --host 0.0.0.0 --port $API_PORT --reload
     depends_on:
       init-db:
         condition: process_completed_successfully

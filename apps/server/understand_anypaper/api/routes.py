@@ -10,11 +10,16 @@ import httpx
 from fastapi import APIRouter, File, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 
+from understand_anypaper.analyzers.contribution_evidence_assigner import (
+    ContributionEvidenceAssigner,
+    ContributionEvidenceAssignmentError,
+)
+from understand_anypaper.analyzers.semantic_unit_slicer import SemanticUnitSlicer
 from understand_anypaper.config import settings
 from understand_anypaper.graph.graph_builder import GraphBuildError, PaperArgumentGraphBuilder
 from understand_anypaper.graph.graph_validator import GraphValidator
 from understand_anypaper.graph.schema import GraphEdge, GraphNode, PaperArgumentGraph
-from understand_anypaper.parser.models import PaperReference, SemanticUnit, SourceBlock
+from understand_anypaper.parser.models import PaperReference, ParsedPaper, SemanticUnit, SourceBlock
 from understand_anypaper.parser.pdf_parser import PdfParser
 from understand_anypaper.recursive.traversal_policy import TraversalPolicy
 from understand_anypaper.storage import GraphStore, create_graph_store
@@ -69,6 +74,14 @@ class GraphPatchRequest(BaseModel):
     operations: list[PatchOperation]
 
 
+def _analyze_and_build_graph(parsed: ParsedPaper) -> PaperArgumentGraph:
+    units = SemanticUnitSlicer().slice_semantic_units(parsed)
+    if not units:
+        raise GraphBuildError("LLM semantic slicing is required to build a Paper Argument Graph")
+    parsed.semantic_units = ContributionEvidenceAssigner().assign(parsed, units)
+    return PaperArgumentGraphBuilder().build(parsed)
+
+
 @router.post("/papers", response_model=PaperArgumentGraph)
 async def upload_paper(file: Annotated[UploadFile, File(...)]) -> PaperArgumentGraph:
     suffix = Path(file.filename or "paper.pdf").suffix
@@ -90,8 +103,8 @@ async def upload_paper(file: Annotated[UploadFile, File(...)]) -> PaperArgumentG
         }
     )
     try:
-        graph = PaperArgumentGraphBuilder().build(parsed)
-    except GraphBuildError as exc:
+        graph = _analyze_and_build_graph(parsed)
+    except (ContributionEvidenceAssignmentError, GraphBuildError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     store = get_store()
     store.save_paper(parsed, graph)
@@ -535,7 +548,10 @@ def _expand_reference(reference: PaperReference, store: GraphStore) -> dict:
             "source_media_type": "application/pdf",
         }
     )
-    graph = PaperArgumentGraphBuilder().build(parsed)
+    try:
+        graph = _analyze_and_build_graph(parsed)
+    except (ContributionEvidenceAssignmentError, GraphBuildError) as exc:
+        return {"status": "failed", "reason": str(exc)}
     store.save_paper(parsed, graph)
     store.save_source_document(parsed.paper_id, f"{reference.arxiv_id}.pdf", "application/pdf", data)
     return {
