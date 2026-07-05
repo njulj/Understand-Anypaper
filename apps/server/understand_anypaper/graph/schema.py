@@ -6,6 +6,9 @@ from pydantic import BaseModel, Field
 class NodeType(StrEnum):
     PAPER = "Paper"
     CONTRIBUTION = "Contribution"
+    WHY = "Why"
+    HOW = "How"
+    PROOF = "Proof"
     MOTIVATION = "Motivation"
     RESEARCH_GAP = "ResearchGap"
     CLAIM = "Claim"

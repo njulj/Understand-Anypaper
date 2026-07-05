@@ -128,14 +128,14 @@ Example output:
 }
 """
 
-# _CONTRIBUTION_REQUIRED_RETRY_PROMPT = """\
-# Your previous semantic slicing did not include any contribution role. Re-slice the same
-# paper and include at least one contribution unit when the paper contains author-claimed
-# contribution evidence, especially explicit contribution lists introduced by phrases such
-# as "the main contributions are", "our contributions", "we propose", or "we introduce".
-# The bullets following an explicit contribution-list header should be contribution units,
-# not only method or result units.
-# """
+_CONTRIBUTION_REQUIRED_RETRY_PROMPT = """\
+Your previous semantic slicing did not include any contribution role. Re-slice the same
+paper and include at least one contribution unit when the paper contains author-claimed
+contribution evidence, especially explicit contribution lists introduced by phrases such
+as "the main contributions are", "our contributions", "we propose", or "we introduce".
+The bullets following an explicit contribution-list header should be contribution units,
+not only method or result units.
+"""
 
 
 class LLMAnalyzer:
@@ -172,14 +172,14 @@ class LLMAnalyzer:
             return None
         if not self._has_contribution(output):
             logger.error("LLM semantic slicing returned no contribution units; retrying once")
-            return None
-            # retry_payload = self._chat_json(
-            #     f"{_SEMANTIC_UNIT_SYSTEM_PROMPT}\n\n{_CONTRIBUTION_REQUIRED_RETRY_PROMPT}",
-            #     user_prompt,
-            # )
-            # retry_output = self._validated_output(retry_payload)
-            # if retry_output is not None:
-            #     output = retry_output
+            retry_payload = self._chat_json(
+                f"{_SEMANTIC_UNIT_SYSTEM_PROMPT}\n\n{_CONTRIBUTION_REQUIRED_RETRY_PROMPT}",
+                user_prompt,
+            )
+            retry_output = self._validated_output(retry_payload)
+            if retry_output is None or not self._has_contribution(retry_output):
+                return None
+            output = retry_output
 
         known_blocks = {block.source_block_id: block for block in parsed.source_blocks}
         units: list[SemanticUnit] = []

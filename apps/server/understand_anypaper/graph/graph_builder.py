@@ -49,10 +49,12 @@ class PaperArgumentGraphBuilder:
             raise GraphBuildError("LLM semantic slicing produced no contribution units")
 
         contribution_ids: dict[str, str] = {}
+        facet_ids: dict[str, dict[str, str]] = {}
         source_block_assignments: dict[str, set[str]] = defaultdict(set)
         for index, unit in enumerate(contributions, start=1):
             contribution_id = f"contribution-{parsed.paper_id[:8]}-{index}"
             contribution_ids[unit.semantic_unit_id] = contribution_id
+            facet_ids[contribution_id] = {}
             for source_block_id in self._unit_source_block_ids(unit):
                 source_block_assignments[source_block_id].add(contribution_id)
             graph.nodes.append(
@@ -77,6 +79,37 @@ class PaperArgumentGraphBuilder:
                     inference_type="llm_semantic_unit",
                 )
             )
+            for facet in ("why", "how", "proof"):
+                facet_id = self._facet_node_id(contribution_id, facet)
+                facet_ids[contribution_id][facet] = facet_id
+                graph.nodes.append(
+                    GraphNode(
+                        id=facet_id,
+                        paper_id=parsed.paper_id,
+                        node_type=self._node_type_for_facet(facet),
+                        title=self._facet_title(facet),
+                        summary=self._facet_summary(facet),
+                        confidence=unit.confidence,
+                        source_type="system_inferred",
+                        semantic_unit_ids=[unit.semantic_unit_id],
+                        page_ranges=self._page_ranges_for_units([unit], source_blocks),
+                        properties={"argument_facet": facet, "parent_contribution_id": contribution_id},
+                        created_by="pag-builder",
+                    )
+                )
+                graph.edges.append(
+                    GraphEdge(
+                        id=f"edge-{uuid4()}",
+                        paper_id=parsed.paper_id,
+                        source_node_id=contribution_id,
+                        target_node_id=facet_id,
+                        edge_type=EdgeType.CONTAINS,
+                        confidence=unit.confidence,
+                        semantic_unit_ids=[unit.semantic_unit_id],
+                        inference_type="argument_facet",
+                        properties={"argument_facet": facet},
+                    )
+                )
 
         evidence_units = [unit for unit in semantic_units if unit.role != "contribution"]
         for unit in evidence_units:
@@ -91,25 +124,26 @@ class PaperArgumentGraphBuilder:
                     created_by=unit.created_by,
                 )
             )
+            facet = self._facet_for_role(unit.role)
             for contribution_id in self._target_contributions(unit, contributions, contribution_ids):
                 for source_block_id in self._unit_source_block_ids(unit):
                     source_block_assignments[source_block_id].add(contribution_id)
+                facet_id = facet_ids[contribution_id][facet]
                 graph.edges.append(
                     GraphEdge(
                         id=f"edge-{uuid4()}",
                         paper_id=parsed.paper_id,
-                        source_node_id=node_id,
-                        target_node_id=contribution_id,
+                        source_node_id=facet_id,
+                        target_node_id=node_id,
                         edge_type=self._edge_type_for_role(unit.role),
                         confidence=unit.confidence,
                         semantic_unit_ids=[unit.semantic_unit_id],
                         inference_type="llm_semantic_unit",
-                        properties={"semantic_role": unit.role, "argument_facet": self._facet_for_role(unit.role)},
+                        properties={"semantic_role": unit.role, "argument_facet": facet},
                     )
                 )
 
-        self._attach_sequence_edges(graph, semantic_units, source_blocks)
-        self._attach_references(graph, parsed, paper_node, semantic_units, source_block_assignments)
+        self._attach_references(graph, parsed, semantic_units, source_block_assignments, facet_ids)
         return graph
 
     def _semantic_units(self, parsed: ParsedPaper) -> list[SemanticUnit]:
@@ -226,9 +260,9 @@ class PaperArgumentGraphBuilder:
         self,
         graph: PaperArgumentGraph,
         parsed: ParsedPaper,
-        paper_node: GraphNode,
         semantic_units: list[SemanticUnit],
         source_block_assignments: dict[str, set[str]],
+        facet_ids: dict[str, dict[str, str]],
     ) -> None:
         unit_ids_by_source_block: dict[str, list[str]] = defaultdict(list)
         for unit in semantic_units:
@@ -241,6 +275,14 @@ class PaperArgumentGraphBuilder:
 
         for reference in parsed.references:
             mentions = mentions_by_reference.get(reference.reference_id, [])
+            linked_contributions = sorted({
+                contribution_id
+                for mention in mentions
+                for contribution_id in source_block_assignments.get(mention.source_block_id, set())
+            })
+            if not linked_contributions:
+                continue
+
             semantic_unit_ids = sorted({
                 unit_id
                 for mention in mentions
@@ -265,18 +307,6 @@ class PaperArgumentGraphBuilder:
                 created_by="reference-extractor",
             )
             graph.nodes.append(node)
-            graph.edges.append(
-                GraphEdge(
-                    id=f"edge-{uuid4()}",
-                    paper_id=parsed.paper_id,
-                    source_node_id=paper_node.id,
-                    target_node_id=reference.reference_id,
-                    edge_type=EdgeType.CITES,
-                    confidence=0.9,
-                    semantic_unit_ids=semantic_unit_ids,
-                    properties={"mention_count": len(mentions)},
-                )
-            )
 
             linked: set[tuple[str, str]] = set()
             for mention in mentions:
@@ -289,8 +319,8 @@ class PaperArgumentGraphBuilder:
                         GraphEdge(
                             id=f"edge-{uuid4()}",
                             paper_id=parsed.paper_id,
-                            source_node_id=reference.reference_id,
-                            target_node_id=contribution_id,
+                            source_node_id=facet_ids[contribution_id][self._facet_for_intent(mention.intent)],
+                            target_node_id=reference.reference_id,
                             edge_type=edge_type,
                             confidence=mention.confidence,
                             semantic_unit_ids=unit_ids_by_source_block.get(mention.source_block_id, []),
@@ -329,7 +359,8 @@ class PaperArgumentGraphBuilder:
         return {
             "gap": "why",
             "motivation": "why",
-            "background": "context",
+            "background": "why",
+            "reference": "why",
             "method": "how",
             "equation": "how",
             "figure": "how",
@@ -337,7 +368,42 @@ class PaperArgumentGraphBuilder:
             "experiment": "proof",
             "result": "proof",
             "conclusion": "proof",
-        }.get(role, "context")
+        }.get(role, "why")
+
+    @staticmethod
+    def _facet_for_intent(intent: str) -> str:
+        return {
+            "USES_METHOD": "how",
+            "SUPPORTS_CLAIM": "proof",
+        }.get(intent, "why")
+
+    @staticmethod
+    def _facet_node_id(contribution_id: str, facet: str) -> str:
+        return f"{contribution_id}-{facet}"
+
+    @staticmethod
+    def _node_type_for_facet(facet: str) -> NodeType:
+        return {
+            "why": NodeType.WHY,
+            "how": NodeType.HOW,
+            "proof": NodeType.PROOF,
+        }[facet]
+
+    @staticmethod
+    def _facet_title(facet: str) -> str:
+        return {
+            "why": "WHY / 为什么",
+            "how": "HOW / 怎么做",
+            "proof": "PROOF / 如何证明",
+        }[facet]
+
+    @staticmethod
+    def _facet_summary(facet: str) -> str:
+        return {
+            "why": "Motivation, research gaps, limitations, prior work, and references.",
+            "how": "Methods, modules, equations, figures, and algorithms.",
+            "proof": "Experiments, tables, results, evidence, and conclusions.",
+        }[facet]
 
     @staticmethod
     def _node_type_for_role(role: str) -> NodeType:

@@ -22,11 +22,21 @@ class GraphValidator:
         scores: list[CompletenessScore] = []
         by_id = {node.id: node for node in graph.nodes}
         for contribution in [n for n in graph.nodes if n.node_type == NodeType.CONTRIBUTION]:
+            facet_ids = {
+                edge.target_node_id
+                for edge in graph.edges
+                if edge.source_node_id == contribution.id and edge.target_node_id in by_id
+            }
             neighbors = [
-                by_id[e.source_node_id]
-                for e in graph.edges
-                if e.target_node_id == contribution.id and e.source_node_id in by_id
+                by_id[edge.target_node_id]
+                for edge in graph.edges
+                if edge.source_node_id in facet_ids and edge.target_node_id in by_id
             ]
+            neighbors.extend(
+                by_id[edge.source_node_id]
+                for edge in graph.edges
+                if edge.target_node_id == contribution.id and edge.source_node_id in by_id
+            )
             types = {node.node_type for node in neighbors}
             scores.append(
                 CompletenessScore(

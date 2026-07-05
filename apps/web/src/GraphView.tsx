@@ -1,25 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  Simulation,
-  SimulationNodeDatum,
-  forceCollide,
-  forceLink,
-  forceManyBody,
-  forceRadial,
-  forceSimulation,
-  forceX,
-  forceY,
-} from 'd3-force';
 import { GraphEdge, GraphNode, PaperArgumentGraph } from './api';
 
 type Point = { x: number; y: number };
 type ViewBox = { x: number; y: number; w: number; h: number };
 
-type SimNode = SimulationNodeDatum & { id: string; nodeType: string };
-
 export const NODE_COLORS: Record<string, string> = {
   Paper: '#4f8cff',
   Contribution: '#58c783',
+  Why: '#e5a34f',
+  How: '#c9a227',
+  Proof: '#ff7ba9',
   ResearchGap: '#e5734f',
   Motivation: '#e5a34f',
   Method: '#c9a227',
@@ -35,29 +25,115 @@ export const NODE_COLORS: Record<string, string> = {
   TextBlock: '#67788a',
 };
 
-const LAYOUT_SIZE = 900;
-const CENTER = LAYOUT_SIZE / 2;
+const MIN_WIDTH = 900;
+const TOP_PADDING = 80;
+const CONTRIBUTION_Y = 230;
+const FACET_Y = 390;
+const EVIDENCE_Y = 545;
+const EVIDENCE_ROW_GAP = 96;
+const COLUMN_WIDTH = 430;
 
 function nodeRadius(node: Pick<GraphNode, 'node_type'>): number {
   if (node.node_type === 'Paper') return 26;
   if (node.node_type === 'Contribution') return 19;
+  if (node.node_type === 'Why' || node.node_type === 'How' || node.node_type === 'Proof') return 15;
   if (node.node_type === 'Reference') return 11;
   return 13;
 }
 
-function linkDistance(edge: GraphEdge, typeById: Map<string, string>): number {
-  const source = typeById.get(edge.source_node_id);
-  const target = typeById.get(edge.target_node_id);
-  if (source === 'Paper' || target === 'Paper') return 230;
-  if (source === 'Reference' || target === 'Reference') return 120;
-  return 150;
+function isStructuralEdge(edge: GraphEdge): boolean {
+  return edge.edge_type !== 'NEXT' && edge.edge_type !== 'PREVIOUS';
 }
 
-function seedPosition(node: GraphNode, index: number, total: number): Point {
-  if (node.node_type === 'Paper') return { x: CENTER, y: CENTER };
-  const ring = node.node_type === 'Contribution' ? 170 : 320;
-  const angle = (2 * Math.PI * index) / Math.max(total, 1) + (node.node_type === 'Contribution' ? 0 : 0.4);
-  return { x: CENTER + ring * Math.cos(angle), y: CENTER + ring * Math.sin(angle) };
+function outgoing(edges: GraphEdge[], nodeId: string): GraphEdge[] {
+  return edges.filter((edge) => edge.source_node_id === nodeId);
+}
+
+function uniqueNodes(ids: string[], nodesById: Map<string, GraphNode>): GraphNode[] {
+  const seen = new Set<string>();
+  return ids.flatMap((id) => {
+    if (seen.has(id)) return [];
+    const node = nodesById.get(id);
+    if (!node) return [];
+    seen.add(id);
+    return [node];
+  });
+}
+
+function layoutGraph(graph: PaperArgumentGraph): { positions: Map<string, Point>; viewBox: ViewBox } {
+  const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const edges = graph.edges.filter(isStructuralEdge);
+  const paper = graph.nodes.find((node) => node.node_type === 'Paper') ?? graph.nodes[0];
+  const positions = new Map<string, Point>();
+  if (!paper) return { positions, viewBox: { x: 0, y: 0, w: MIN_WIDTH, h: MIN_WIDTH } };
+
+  const contributionIds = outgoing(edges, paper.id)
+    .filter((edge) => edge.edge_type === 'HAS_CONTRIBUTION')
+    .map((edge) => edge.target_node_id);
+  const contributions = uniqueNodes(contributionIds, nodesById);
+  const orderedContributions =
+    contributions.length > 0
+      ? contributions
+      : graph.nodes.filter((node) => node.node_type === 'Contribution');
+
+  const columnCount = Math.max(orderedContributions.length, 1);
+  const width = Math.max(MIN_WIDTH, columnCount * COLUMN_WIDTH);
+  const centerX = width / 2;
+  positions.set(paper.id, { x: centerX, y: TOP_PADDING });
+
+  let maxEvidenceRows = 1;
+  orderedContributions.forEach((contribution, index) => {
+    const columnCenter = ((index + 0.5) * width) / columnCount;
+    positions.set(contribution.id, { x: columnCenter, y: CONTRIBUTION_Y });
+
+    const facetIds = outgoing(edges, contribution.id)
+      .filter((edge) => edge.edge_type === 'CONTAINS')
+      .map((edge) => edge.target_node_id);
+    const facets = uniqueNodes(facetIds, nodesById).sort((a, b) => {
+      const order = ['Why', 'How', 'Proof'];
+      return order.indexOf(a.node_type) - order.indexOf(b.node_type);
+    });
+    const facetSlots = facets.length || 1;
+
+    facets.forEach((facet, facetIndex) => {
+      const spread = Math.min(COLUMN_WIDTH * 0.68, 300);
+      const offset = facetSlots === 1 ? 0 : -spread / 2 + (spread * facetIndex) / (facetSlots - 1);
+      const facetX = columnCenter + offset;
+      positions.set(facet.id, { x: facetX, y: FACET_Y });
+
+      const childIds = outgoing(edges, facet.id).map((edge) => edge.target_node_id);
+      const children = uniqueNodes(childIds, nodesById);
+      maxEvidenceRows = Math.max(maxEvidenceRows, children.length);
+      children.forEach((child, childIndex) => {
+        positions.set(child.id, {
+          x: facetX,
+          y: EVIDENCE_Y + childIndex * EVIDENCE_ROW_GAP,
+        });
+      });
+    });
+  });
+
+  const positioned = new Set(positions.keys());
+  const leftovers = graph.nodes.filter((node) => !positioned.has(node.id));
+  leftovers.forEach((node, index) => {
+    const columns = Math.max(Math.floor(width / 180), 1);
+    positions.set(node.id, {
+      x: 90 + (index % columns) * 180,
+      y: EVIDENCE_Y + (maxEvidenceRows + 1 + Math.floor(index / columns)) * EVIDENCE_ROW_GAP,
+    });
+  });
+
+  const xs = [...positions.values()].map((point) => point.x);
+  const ys = [...positions.values()].map((point) => point.y);
+  const pad = 90;
+  const minX = Math.min(...xs) - pad;
+  const maxX = Math.max(...xs) + pad;
+  const minY = Math.min(...ys) - pad;
+  const maxY = Math.max(...ys) + pad;
+  return {
+    positions,
+    viewBox: { x: minX, y: minY, w: Math.max(maxX - minX, MIN_WIDTH), h: Math.max(maxY - minY, 520) },
+  };
 }
 
 type GraphViewProps = {
@@ -68,88 +144,23 @@ type GraphViewProps = {
 };
 
 export function GraphView({ graph, selectedNodeId, query, onSelectNode }: GraphViewProps) {
-  const [positions, setPositions] = useState<Map<string, Point>>(new Map());
-  const [viewBox, setViewBox] = useState<ViewBox>({ x: 0, y: 0, w: LAYOUT_SIZE, h: LAYOUT_SIZE });
+  const initialLayout = useMemo(() => layoutGraph(graph), [graph]);
+  const [positions, setPositions] = useState<Map<string, Point>>(initialLayout.positions);
+  const [viewBox, setViewBox] = useState<ViewBox>(initialLayout.viewBox);
   const svgRef = useRef<SVGSVGElement | null>(null);
-  const simulationRef = useRef<Simulation<SimNode, undefined> | null>(null);
-  const simNodesRef = useRef<Map<string, SimNode>>(new Map());
   const dragState = useRef<
     | { kind: 'node'; id: string }
     | { kind: 'pan'; startX: number; startY: number; box: ViewBox }
     | null
   >(null);
-  const userAdjustedView = useRef(false);
 
   useEffect(() => {
-    const typeById = new Map(graph.nodes.map((node) => [node.id, node.node_type]));
-    const grouped = new Map<string, number>();
-    const simNodes: SimNode[] = graph.nodes.map((node) => {
-      const siblings = graph.nodes.filter((n) => n.node_type === node.node_type).length;
-      const index = grouped.get(node.node_type) ?? 0;
-      grouped.set(node.node_type, index + 1);
-      const seed = seedPosition(node, index, siblings);
-      return { id: node.id, nodeType: node.node_type, x: seed.x, y: seed.y };
-    });
-    simNodesRef.current = new Map(simNodes.map((n) => [n.id, n]));
-
-    const links = graph.edges
-      .filter((e) => typeById.has(e.source_node_id) && typeById.has(e.target_node_id))
-      .map((e) => ({ source: e.source_node_id, target: e.target_node_id, distance: linkDistance(e, typeById) }));
-
-    const simulation = forceSimulation<SimNode>(simNodes)
-      .force(
-        'link',
-        forceLink<SimNode, { source: string; target: string; distance: number }>(links)
-          .id((n) => n.id)
-          .distance((l) => l.distance)
-          .strength(0.6),
-      )
-      .force('charge', forceManyBody<SimNode>().strength(-560).distanceMax(560))
-      .force(
-        'collide',
-        forceCollide<SimNode>()
-          .radius((n) => nodeRadius({ node_type: n.nodeType }) + 28)
-          .strength(0.95),
-      )
-      .force('x', forceX<SimNode>(CENTER).strength(0.03))
-      .force('y', forceY<SimNode>(CENTER).strength(0.03))
-      .force(
-        'radial',
-        forceRadial<SimNode>(380, CENTER, CENTER).strength((n) => (n.nodeType === 'Reference' ? 0.12 : 0)),
-      )
-      .alpha(1)
-      .alphaDecay(0.028)
-      .on('tick', () => {
-        setPositions(new Map(simNodes.map((n) => [n.id, { x: n.x ?? CENTER, y: n.y ?? CENTER }])));
-      })
-      .on('end', () => {
-        if (!simNodes.length || userAdjustedView.current) return;
-        const xs = simNodes.map((n) => n.x ?? CENTER);
-        const ys = simNodes.map((n) => n.y ?? CENTER);
-        const pad = 90;
-        const minX = Math.min(...xs) - pad;
-        const maxX = Math.max(...xs) + pad;
-        const minY = Math.min(...ys) - pad;
-        const maxY = Math.max(...ys) + pad;
-        const size = Math.max(maxX - minX, maxY - minY, 320);
-        setViewBox({
-          x: (minX + maxX) / 2 - size / 2,
-          y: (minY + maxY) / 2 - size / 2,
-          w: size,
-          h: size,
-        });
-      });
-
-    simulationRef.current = simulation;
-    userAdjustedView.current = false;
-    setPositions(new Map(simNodes.map((n) => [n.id, { x: n.x ?? CENTER, y: n.y ?? CENTER }])));
-    setViewBox({ x: 0, y: 0, w: LAYOUT_SIZE, h: LAYOUT_SIZE });
-    return () => {
-      simulation.stop();
-      simulationRef.current = null;
-    };
+    const nextLayout = layoutGraph(graph);
+    setPositions(nextLayout.positions);
+    setViewBox(nextLayout.viewBox);
   }, [graph]);
 
+  const visibleEdges = useMemo(() => graph.edges.filter(isStructuralEdge), [graph]);
   const matchedIds = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     if (!normalized) return null;
@@ -172,11 +183,10 @@ export function GraphView({ graph, selectedNodeId, query, onSelectNode }: GraphV
   }
 
   function handleWheel(event: React.WheelEvent<SVGSVGElement>) {
-    userAdjustedView.current = true;
     const scale = event.deltaY > 0 ? 1.12 : 1 / 1.12;
     const focus = toGraphCoords(event);
     setViewBox((box) => {
-      const w = Math.min(Math.max(box.w * scale, 160), LAYOUT_SIZE * 4);
+      const w = Math.min(Math.max(box.w * scale, 180), MIN_WIDTH * 4);
       const h = (w / box.w) * box.h;
       return {
         x: focus.x - ((focus.x - box.x) / box.w) * w,
@@ -197,31 +207,21 @@ export function GraphView({ graph, selectedNodeId, query, onSelectNode }: GraphV
     const state = dragState.current;
     if (!state) return;
     if (state.kind === 'pan') {
-      userAdjustedView.current = true;
       const rect = svgRef.current!.getBoundingClientRect();
       const dx = ((event.clientX - state.startX) / rect.width) * state.box.w;
       const dy = ((event.clientY - state.startY) / rect.height) * state.box.h;
       setViewBox({ ...state.box, x: state.box.x - dx, y: state.box.y - dy });
     } else {
       const point = toGraphCoords(event);
-      const simNode = simNodesRef.current.get(state.id);
-      if (simNode) {
-        simNode.fx = point.x;
-        simNode.fy = point.y;
-      }
+      setPositions((current) => {
+        const next = new Map(current);
+        next.set(state.id, point);
+        return next;
+      });
     }
   }
 
   function handlePointerUp() {
-    const state = dragState.current;
-    if (state?.kind === 'node') {
-      const simNode = simNodesRef.current.get(state.id);
-      if (simNode) {
-        simNode.fx = null;
-        simNode.fy = null;
-      }
-      simulationRef.current?.alphaTarget(0);
-    }
     dragState.current = null;
   }
 
@@ -229,12 +229,6 @@ export function GraphView({ graph, selectedNodeId, query, onSelectNode }: GraphV
     event.stopPropagation();
     dragState.current = { kind: 'node', id: nodeId };
     (event.currentTarget as Element).setPointerCapture?.(event.pointerId);
-    const simNode = simNodesRef.current.get(nodeId);
-    if (simNode) {
-      simNode.fx = simNode.x;
-      simNode.fy = simNode.y;
-    }
-    simulationRef.current?.alphaTarget(0.3).restart();
   }
 
   return (
@@ -253,7 +247,7 @@ export function GraphView({ graph, selectedNodeId, query, onSelectNode }: GraphV
           <path d="M 0 0 L 10 5 L 0 10 z" fill="#5b6b7d" />
         </marker>
       </defs>
-      {graph.edges.map((edge) => {
+      {visibleEdges.map((edge) => {
         const source = positions.get(edge.source_node_id);
         const target = positions.get(edge.target_node_id);
         const targetNode = nodesById.get(edge.target_node_id);
@@ -291,7 +285,7 @@ export function GraphView({ graph, selectedNodeId, query, onSelectNode }: GraphV
           >
             <circle r={radius} fill={NODE_COLORS[node.node_type] ?? '#67788a'} />
             {node.verified ? <circle r={radius + 3.5} className="verified-ring" /> : null}
-            <text y={radius + 13}>{node.title.length > 26 ? `${node.title.slice(0, 24)}…` : node.title}</text>
+            <text y={radius + 13}>{node.title.length > 26 ? `${node.title.slice(0, 24)}...` : node.title}</text>
             <title>{`${node.node_type}: ${node.title}\n${node.summary.slice(0, 200)}`}</title>
           </g>
         );

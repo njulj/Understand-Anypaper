@@ -72,3 +72,10 @@ docker-compose.yml
 - `src/main.tsx`：当前 React 单页壳。展示顶部工具栏、PDF Reader、Graph Pane、Node Inspector 三个主要区域。
 - `src/styles.css`：前端页面样式。
 - `src/vite-env.d.ts`：Vite 类型声明。
+
+---
+
+# 开发提示
+
+- 我们仍处于早期阶段，如果要修改数据库格式，直接把旧的库删了就行，不用考虑migration
+-
