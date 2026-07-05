@@ -5,24 +5,42 @@ Understand Anypaper turns research papers into an interactive **Paper Argument G
 
 ## Quick start
 
+Devbox is the recommended local development path. It installs Node.js, uv, and
+PostgreSQL 16 with pgvector, then runs the database, API server, and web server
+with `devbox services`.
+
 ```bash
 cp .env.example .env
-docker compose up --build
+devbox services up
 ```
 
 Server API: <http://localhost:8000/docs>
 
 Web client: <http://localhost:5173>
 
+If Docker or OrbStack is already holding the default ports, either stop those
+containers or run Devbox on alternate ports:
+
+```bash
+devbox services up \
+  --env PGPORT=15432 \
+  --env API_PORT=18000 \
+  --env WEB_PORT=15173
+```
+
+Docker is still available if you need an isolated container run:
+
+```bash
+docker compose up --build
+```
 
 ## Development
 
 ```bash
+devbox shell
+
 cd apps/server
-python -m venv .venv
-. .venv/bin/activate
-pip install -e .[dev]
-pytest
+uv run --extra dev pytest
 
 cd ../web
 npm install

@@ -1,0 +1,48 @@
+version: "0.5"
+
+processes:
+  postgresql:
+    command: |
+      mkdir -p .devbox/postgres/run
+      test -s .devbox/postgres/data/PG_VERSION || initdb --auth=trust --encoding=UTF8 --locale=C -D .devbox/postgres/data
+      exec postgres -D .devbox/postgres/data -p $PGPORT -k "$PWD/.devbox/postgres/run" -c listen_addresses=127.0.0.1
+    readiness_probe:
+      exec:
+        command: pg_isready -h 127.0.0.1 -p $PGPORT -d postgres
+      period_seconds: 1
+      failure_threshold: 30
+    availability:
+      restart: "always"
+
+  init-db:
+    command: scripts/devbox/init-db.sh
+    depends_on:
+      postgresql:
+        condition: process_healthy
+
+  server:
+    command: |
+      cd apps/server
+      exec env DATABASE_URL="postgresql+psycopg://understand:understand@localhost:$PGPORT/understand_anypaper" uv run uvicorn understand_anypaper.main:app --host 0.0.0.0 --port $API_PORT
+    depends_on:
+      init-db:
+        condition: process_completed_successfully
+    readiness_probe:
+      exec:
+        command: curl -fsS http://127.0.0.1:$API_PORT/health >/dev/null
+      initial_delay_seconds: 1
+      period_seconds: 2
+      failure_threshold: 30
+    availability:
+      restart: "always"
+
+  web:
+    command: |
+      cd apps/web
+      test -d node_modules || npm install
+      exec env VITE_API_BASE_URL="http://localhost:$API_PORT" npm run dev -- --port $WEB_PORT
+    depends_on:
+      server:
+        condition: process_healthy
+    availability:
+      restart: "always"

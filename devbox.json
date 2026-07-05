@@ -1,0 +1,15 @@
+{
+  "packages": [
+    "nodejs@22",
+    "uv@latest",
+    "process-compose@1.110.0",
+    "path:.#postgresql-pgvector"
+  ],
+  "env_from": ".env",
+  "env": {
+    "PGPORT": "5432",
+    "API_PORT": "8000",
+    "WEB_PORT": "5173",
+    "PAG_DOCUMENT_STORE_DIR": "$PWD/data/documents"
+  }
+}
