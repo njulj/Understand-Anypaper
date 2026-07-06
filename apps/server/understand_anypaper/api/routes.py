@@ -86,6 +86,7 @@ def _analyze_and_build_graph(parsed: ParsedPaper) -> PaperArgumentGraph:
 
 
 def _upload_progress_line(event: str, progress: int, message: str, **payload: object) -> str:
+    logger.info("Processing uploaded paper, msg=%s", message)
     return json.dumps(
         {
             "event": event,
