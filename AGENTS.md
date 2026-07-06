@@ -29,8 +29,9 @@ docker-compose.yml
 2. `apps/server/understand_anypaper/api/routes.py` 把上传文件写到临时文件。
 3. `PdfParser` 产出 `ParsedPaper`，对 PDF 渲染页面图片，并保留原始 PDF bytes 供后续 bbox 文本提取。
 4. `SemanticUnitSlicer` 把页面图片发给多模态 LLM，切分一组 `SemanticUnit`，每个 unit 只有一个 semantic role，并记录 `page + bbox` 形式的 evidence。bbox 采用归一化 `[ymin, xmin, ymax, xmax]`。
-5. `PaperArgumentGraphBuilder` 从 contribution `SemanticUnit` 出发构建 `PaperArgumentGraph`，节点和边统一引用 `semantic_unit_ids` 作为证据。
-6. 图通过 `GraphStore` 保存；数据库可用时写入 PostgreSQL，否则回退到进程内内存 store。
+5. `ContributionEvidenceAssigner` 再调一次 LLM，把每个 evidence unit 分配给它支撑的 contribution（写入 `properties.contribution_unit_ids`）。
+6. `PaperArgumentGraphBuilder` 构建 `PaperArgumentGraph`：paper 节点 → contribution 节点 → why/how/proof facet 节点 → evidence 节点，节点和边统一引用 `semantic_unit_ids` 作为证据。
+7. 图通过 `GraphStore` 保存；数据库可用时写入 PostgreSQL，否则回退到进程内内存 store。
 
 ## 目录和文件职责
 
@@ -46,22 +47,25 @@ docker-compose.yml
 
 - `Dockerfile`：构建 FastAPI 服务镜像，安装 Python 包并启动 uvicorn。
 - `pyproject.toml`：Python 项目元数据、依赖、dev 依赖和 ruff 配置。
-- `sql/schema.sql`：PostgreSQL/pgvector schema。核心表包括 `papers`、`nodes`、`edges`、`semantic_units`、`paper_references`、`analysis_tasks`、`graph_patches`。
+- `sql/schema.sql`：PostgreSQL/pgvector schema。核心表包括 `papers`、`nodes`、`edges`、`semantic_units`、`paper_references`、`graph_patches`。
 - `tests/test_graph_builder.py`：覆盖当前 PAG builder 的核心行为：能创建 contribution 节点，并保证节点/边带 evidence。
 
 ### 后端包：`apps/server/understand_anypaper`
 
 - `main.py`：FastAPI 应用入口，配置 CORS、挂载 API router，并提供 `/health`。
-- `config.py`：`pydantic-settings` 配置入口。默认值包括数据库 URL、递归深度/数量限制和 `codex_cli`。
-- `api/routes.py`：当前所有 REST API。注意图数据暂存在模块级 `_PAPERS` 内存字典中，重启会丢失。
-- `parser/models.py`：解析和语义切分数据模型。`DocumentPage` 表示渲染后的页面图片元数据，`PageEvidence` 表示 semantic unit 的 `page + bbox + extracted_text`，`SemanticUnit` 表示 LLM 切出的论证语义单元。
+- `config.py`：`pydantic-settings` 配置入口。默认值包括数据库 URL、递归深度/数量限制和 OpenAI/embedding 配置。
+- `api/routes.py`：当前所有 REST API。上传接口以 NDJSON 流返回处理进度，图数据通过 `GraphStore` 持久化。
+- `parser/models.py`：解析和语义切分数据模型。`DocumentPage` 表示渲染后的页面图片元数据，`PageSourceLocation` 表示 semantic unit 的 `page + bbox + extracted_text`，`SemanticUnit` 表示 LLM 切出的论证语义单元。
 - `parser/pdf_parser.py`：parser facade。对 PDF 用 PyMuPDF 渲染页面图片，并提取 title/abstract/reference 元数据；semantic role 和 evidence bbox 由多模态 LLM 负责。`.txt`/`.md` 仍作为文本 fallback。
 - `graph/schema.py`：Paper Argument Graph 的 Pydantic 模型和枚举，包括 `NodeType`、`EdgeType`、`GraphNode`、`GraphEdge`、`PaperArgumentGraph`。节点和边通过 `semantic_unit_ids` 溯源。
-- `graph/graph_builder.py`：从 `ParsedPaper.semantic_units` 构建 PAG。当前策略是找 `role == "contribution"` 的 semantic units 生成 contribution 节点，再把其他 semantic units 按 role 连接到最近或显式指定的 contribution。
+- `graph/graph_builder.py`：从 `ParsedPaper.semantic_units` 构建 PAG。为每个 contribution 生成节点和 why/how/proof facet 节点，再按 `properties.contribution_unit_ids` 把 evidence 节点挂到对应 facet 下。
 - `graph/graph_validator.py`：贡献完整度评分，检查每个 contribution 是否有 motivation/gap、method/module、equation、experiment/result、reference 类型邻居。
-- `analyzers/citation_intent_classifier.py`：规则版引用意图分类器，输出 BACKGROUND、USES_METHOD、EXTENDS、COMPARES_WITH 等枚举。
+- `analyzers/structured_agent.py`：LLM 结构化输出的薄封装，返回类型化的 Pydantic 模型。
+- `analyzers/semantic_unit_slicer.py`：多模态语义切分器，把页面图片发给 LLM 并把返回的 text/bbox locator 解析成 `PageSourceLocation`。
+- `analyzers/contribution_evidence_assigner.py`：LLM evidence→contribution 分配器，按 contribution 并行调用。
+- `storage/graph_store.py`：`GraphStore` 抽象及 PostgreSQL/内存两个实现，负责论文、图、semantic units、references 和源 PDF 的持久化。
 - `recursive/traversal_policy.py`：参考文献递归分析的边界策略，限制最大深度、最大论文数和重复访问。
-- `retrieval/`：向量检索和图检索的预留包，目前只有包入口。
+- `retrieval/embeddings.py`：OpenAI 兼容 embedding 客户端，供 Postgres store 的向量检索使用。
 
 ### 前端：`apps/web`
 
@@ -70,6 +74,8 @@ docker-compose.yml
 - `index.html`：Vite HTML 入口，挂载 `src/main.tsx`。
 - `tsconfig.json`：TypeScript 配置。
 - `src/main.tsx`：当前 React 单页壳。展示顶部工具栏、PDF Reader、Graph Pane、Node Inspector 三个主要区域。
+- `src/api.ts`：后端 REST API 的类型定义和 fetch 封装，含带进度流的上传实现。
+- `src/GraphView.tsx`：基于 jsMind 的思维导图式图谱渲染组件。
 - `src/styles.css`：前端页面样式。
 - `src/vite-env.d.ts`：Vite 类型声明。
 

@@ -10,7 +10,6 @@ class Settings(BaseSettings):
     recursion_max_depth: int = 1
     recursion_max_papers: int = 5
     document_store_dir: str = "data/documents"
-    codex_cli: str = "codex"
 
     # LLM / embeddings. Empty api key disables semantic slicing and vector search;
     # graph building requires semantic units from the LLM analyzer.

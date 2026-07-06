@@ -185,48 +185,6 @@ class PaperArgumentGraphBuilder:
             )
         return targets
 
-    def _attach_sequence_edges(
-        self,
-        graph: PaperArgumentGraph,
-        semantic_units: list[SemanticUnit],
-    ) -> None:
-        ordered_units = sorted(
-            semantic_units,
-            key=lambda unit: (
-                unit.source_location.page,
-                unit.source_location.bbox[0],
-                unit.source_location.bbox[1],
-            ),
-        )
-        node_ids = {node.id for node in graph.nodes}
-        for current, following in zip(ordered_units, ordered_units[1:]):
-            source_id = self._node_id_for_unit(graph, current)
-            target_id = self._node_id_for_unit(graph, following)
-            if not source_id or not target_id or source_id == target_id:
-                continue
-            if source_id not in node_ids or target_id not in node_ids:
-                continue
-            graph.edges.append(
-                GraphEdge(
-                    id=f"edge-{uuid4()}",
-                    paper_id=graph.paper_id,
-                    source_node_id=source_id,
-                    target_node_id=target_id,
-                    edge_type=EdgeType.NEXT,
-                    confidence=0.7,
-                    semantic_unit_ids=[current.semantic_unit_id, following.semantic_unit_id],
-                    inference_type="document_order",
-                    properties={"argument_facet": "context"},
-                )
-            )
-
-    @staticmethod
-    def _node_id_for_unit(graph: PaperArgumentGraph, unit: SemanticUnit) -> str | None:
-        for node in graph.nodes:
-            if unit.semantic_unit_id in node.semantic_unit_ids:
-                return node.id
-        return None
-
     @staticmethod
     def _page_ranges_for_units(
         units: list[SemanticUnit],
@@ -252,13 +210,6 @@ class PaperArgumentGraphBuilder:
             "result": "proof",
             "conclusion": "proof",
         }.get(role, "why")
-
-    @staticmethod
-    def _facet_for_intent(intent: str) -> str:
-        return {
-            "USES_METHOD": "how",
-            "SUPPORTS_CLAIM": "proof",
-        }.get(intent, "why")
 
     @staticmethod
     def _facet_node_id(contribution_id: str, facet: str) -> str:
@@ -316,13 +267,3 @@ class PaperArgumentGraphBuilder:
             "figure": EdgeType.ILLUSTRATES,
             "table": EdgeType.REPORTS,
         }.get(role, EdgeType.DESCRIBES)
-
-    @staticmethod
-    def _edge_type_for_intent(intent: str) -> EdgeType:
-        return {
-            "EXTENDS": EdgeType.EXTENDS,
-            "COMPARES_WITH": EdgeType.CONTRASTS_WITH,
-            "CONTRADICTS": EdgeType.CONTRASTS_WITH,
-            "IDENTIFIES_LIMITATION": EdgeType.MOTIVATES,
-            "SUPPORTS_CLAIM": EdgeType.SUPPORTED_BY,
-        }.get(intent, EdgeType.BUILDS_ON)

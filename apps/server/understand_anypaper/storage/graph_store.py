@@ -11,7 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from understand_anypaper.config import settings
 from understand_anypaper.graph.schema import GraphEdge, GraphNode, PaperArgumentGraph
-from understand_anypaper.parser.models import CitationMention, PageSourceLocation, PaperReference, ParsedPaper, SemanticUnit
+from understand_anypaper.parser.models import PageSourceLocation, PaperReference, ParsedPaper, SemanticUnit
 from understand_anypaper.retrieval.embeddings import EmbeddingClient
 
 logger = logging.getLogger(__name__)
@@ -59,9 +59,6 @@ class GraphStore(ABC):
 
     @abstractmethod
     def update_reference(self, reference: PaperReference) -> None: ...
-
-    @abstractmethod
-    def get_mentions(self, reference_id: str) -> list[CitationMention]: ...
 
     @abstractmethod
     def record_patch(self, paper_id: str, operations: list[dict]) -> str: ...
@@ -140,13 +137,6 @@ class InMemoryGraphStore(GraphStore):
                 if existing.reference_id == reference.reference_id:
                     paper.references[index] = reference
                     return
-
-    def get_mentions(self, reference_id: str) -> list[CitationMention]:
-        for paper in self._papers.values():
-            mentions = [m for m in paper.mentions if m.reference_id == reference_id]
-            if mentions:
-                return mentions
-        return []
 
     def record_patch(self, paper_id: str, operations: list[dict]) -> str:
         patch_id = str(uuid4())
@@ -386,11 +376,6 @@ class PostgresGraphStore(GraphStore):
                 for row in rows
             ]
 
-    @staticmethod
-    def _block_number(content_id: str) -> int:
-        tail = content_id.rsplit("block", 1)[-1]
-        return int(tail) if tail.isdigit() else 0
-
     def get_references(self, paper_id: str) -> list[PaperReference]:
         with self._engine.connect() as conn:
             rows = conn.execute(
@@ -442,9 +427,6 @@ class PostgresGraphStore(GraphStore):
                     "arxiv_id": reference.arxiv_id,
                 },
             )
-
-    def get_mentions(self, reference_id: str) -> list[CitationMention]:
-        return []
 
     def record_patch(self, paper_id: str, operations: list[dict]) -> str:
         patch_id = str(uuid4())

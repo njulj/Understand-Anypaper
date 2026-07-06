@@ -112,20 +112,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
-export function uploadPaper(
-  file: File,
-  options?: UploadPaperOptions | ((progress: UploadProgress) => void),
-): Promise<PaperArgumentGraph> {
+export function uploadPaper(file: File, options?: UploadPaperOptions): Promise<PaperArgumentGraph> {
   const formData = new FormData();
   formData.append('file', file);
-  const onUploadProgress = typeof options === 'function' ? options : options?.onUploadProgress;
-  const onStageProgress = typeof options === 'function' ? undefined : options?.onStageProgress;
+  const { onUploadProgress, onStageProgress } = options ?? {};
 
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     let processedLength = 0;
     let settled = false;
-    let finalGraph: PaperArgumentGraph | null = null;
 
     function settleWithGraph(graph: PaperArgumentGraph) {
       if (settled) return;
@@ -156,7 +151,6 @@ export function uploadPaper(
         return;
       }
       if (progress.event === 'complete' && progress.graph) {
-        finalGraph = progress.graph;
         settleWithGraph(progress.graph);
       }
     }
@@ -186,8 +180,7 @@ export function uploadPaper(
       processProgressLines(true);
       if (settled) return;
       if (xhr.status >= 200 && xhr.status < 300) {
-        if (finalGraph) settleWithGraph(finalGraph);
-        else settleWithError(new Error('Upload finished without a graph result.'));
+        settleWithError(new Error('Upload finished without a graph result.'));
         return;
       }
       settleWithError(new Error(xhr.responseText || xhr.statusText || `Request failed with HTTP ${xhr.status}`));

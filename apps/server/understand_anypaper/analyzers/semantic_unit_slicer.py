@@ -191,22 +191,13 @@ class SemanticUnitSlicer:
         return self._semantic_units_from_output(parsed, output)
 
     def _run(self, parsed: ParsedPaper, retry_instruction: str = "") -> SemanticSliceOutput:
-        if self._agent_injected:
-            return self._agent.run(
-                self._text_prompt(parsed, retry_instruction),
-                SemanticSliceOutput,
-                prompt_cache_key=f"semantic-slice:{parsed.paper_id}:{bool(retry_instruction)}",
-            )
-        if any(page.image_data for page in parsed.pages):
+        if not self._agent_injected and any(page.image_data for page in parsed.pages):
             return self._run_multimodal(parsed, retry_instruction)
-        try:
-            return self._agent.run(
-                self._text_prompt(parsed, retry_instruction),
-                SemanticSliceOutput,
-                prompt_cache_key=f"semantic-slice:{parsed.paper_id}:{bool(retry_instruction)}",
-            )
-        except StructuredAgentError:
-            raise
+        return self._agent.run(
+            self._text_prompt(parsed, retry_instruction),
+            SemanticSliceOutput,
+            prompt_cache_key=f"semantic-slice:{parsed.paper_id}:{bool(retry_instruction)}",
+        )
 
     def _run_multimodal(self, parsed: ParsedPaper, retry_instruction: str = "") -> SemanticSliceOutput:
         content: list[dict] = [{"type": "text", "text": self._text_prompt(parsed, retry_instruction)}]

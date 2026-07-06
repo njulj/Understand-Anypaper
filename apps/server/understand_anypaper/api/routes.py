@@ -77,12 +77,36 @@ class GraphPatchRequest(BaseModel):
     operations: list[PatchOperation]
 
 
-def _analyze_and_build_graph(parsed: ParsedPaper) -> PaperArgumentGraph:
+def _no_progress(event: str, progress: int, message: str, **payload: object) -> None:
+    pass
+
+
+def _analyze_and_build_graph(parsed: ParsedPaper, emit=_no_progress) -> PaperArgumentGraph:
     units = SemanticUnitSlicer().slice_semantic_units(parsed)
     if not units:
         raise GraphBuildError("LLM semantic slicing is required to build a Paper Argument Graph")
+    emit(
+        "generated_semantic_units",
+        78,
+        "Generated semantic units.",
+        semantic_unit_count=len(units),
+    )
     parsed.semantic_units = ContributionEvidenceAssigner().assign(parsed, units)
-    return PaperArgumentGraphBuilder().build(parsed)
+    emit(
+        "assigned_contribution_evidence",
+        86,
+        "Connected evidence to contributions.",
+        semantic_unit_count=len(parsed.semantic_units),
+    )
+    graph = PaperArgumentGraphBuilder().build(parsed)
+    emit(
+        "built_argument_graph",
+        94,
+        "Built the argument graph.",
+        node_count=len(graph.nodes),
+        edge_count=len(graph.edges),
+    )
+    return graph
 
 
 def _upload_progress_line(event: str, progress: int, message: str, **payload: object) -> str:
@@ -148,32 +172,7 @@ async def upload_paper(file: Annotated[UploadFile, File(...)]) -> StreamingRespo
                     page_count=len(parsed.pages),
                 )
 
-                units = SemanticUnitSlicer().slice_semantic_units(parsed)
-                if not units:
-                    raise GraphBuildError("LLM semantic slicing is required to build a Paper Argument Graph")
-                emit(
-                    "generated_semantic_units",
-                    78,
-                    "Generated semantic units.",
-                    semantic_unit_count=len(units),
-                )
-
-                parsed.semantic_units = ContributionEvidenceAssigner().assign(parsed, units)
-                emit(
-                    "assigned_contribution_evidence",
-                    86,
-                    "Connected evidence to contributions.",
-                    semantic_unit_count=len(parsed.semantic_units),
-                )
-
-                graph = PaperArgumentGraphBuilder().build(parsed)
-                emit(
-                    "built_argument_graph",
-                    94,
-                    "Built the argument graph.",
-                    node_count=len(graph.nodes),
-                    edge_count=len(graph.edges),
-                )
+                graph = _analyze_and_build_graph(parsed, emit)
 
                 store = get_store()
                 store.save_paper(parsed, graph)
@@ -317,21 +316,19 @@ def get_node_evidence(node_id: str, paper_id: str | None = None) -> dict:
         node = next((n for n in graph.nodes if n.id == node_id), None)
         if node is None:
             continue
-        semantic_units = {unit.semantic_unit_id: unit for unit in store.get_semantic_units(pid)}
-        evidence = [
-            {
-                "semantic_unit_id": semantic_unit_id,
-                "role": semantic_units[semantic_unit_id].role if semantic_unit_id in semantic_units else None,
-                "title": semantic_units[semantic_unit_id].title if semantic_unit_id in semantic_units else None,
-                "text": semantic_units[semantic_unit_id].text if semantic_unit_id in semantic_units else None,
-                "source_location": (
-                    semantic_units[semantic_unit_id].source_location.model_dump()
-                    if semantic_unit_id in semantic_units
-                    else None
-                ),
-            }
-            for semantic_unit_id in node.semantic_unit_ids
-        ]
+        units_by_id = {unit.semantic_unit_id: unit for unit in store.get_semantic_units(pid)}
+        evidence = []
+        for semantic_unit_id in node.semantic_unit_ids:
+            unit = units_by_id.get(semantic_unit_id)
+            evidence.append(
+                {
+                    "semantic_unit_id": semantic_unit_id,
+                    "role": unit.role if unit else None,
+                    "title": unit.title if unit else None,
+                    "text": unit.text if unit else None,
+                    "source_location": unit.source_location.model_dump() if unit else None,
+                }
+            )
         return {
             "node_id": node_id,
             "paper_id": pid,
@@ -384,18 +381,12 @@ def analyze_reference(reference_id: str, request: ReferenceAnalyzeRequest) -> di
     if reference is None:
         raise HTTPException(status_code=404, detail="Reference not found")
     policy = TraversalPolicy(max_depth=min(request.depth, settings.recursion_max_depth), max_papers=settings.recursion_max_papers)
-    mentions = store.get_mentions(reference_id)
-    intent_counts: dict[str, int] = {}
-    for mention in mentions:
-        intent_counts[mention.intent] = intent_counts.get(mention.intent, 0) + 1
     can_expand = policy.can_expand(reference_id, request.depth)
     expansion = _expand_reference(reference, store) if request.expand and can_expand else None
     return {
         "reference_id": reference_id,
         "reference": reference.model_dump(),
         "focus": request.focus,
-        "mentions": [mention.model_dump() for mention in mentions],
-        "intent_summary": intent_counts,
         "can_expand": can_expand,
         "expansion": expansion,
         "expand_hint": "Upload the referenced paper to build its own argument graph."

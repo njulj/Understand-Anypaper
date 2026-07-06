@@ -67,17 +67,6 @@ const EDGE_TYPE_OPTIONS = [
   'DESCRIBES',
 ];
 
-type SourceLocationRegion = {
-  id: string;
-  unitId: string;
-  role: string;
-  title: string;
-  text: string;
-  page: number;
-  bbox: number[];
-  extractedText: string;
-};
-
 function isNavigationEdge(edge: GraphEdge): boolean {
   return edge.edge_type !== 'NEXT' && edge.edge_type !== 'PREVIOUS';
 }
@@ -135,10 +124,6 @@ function owningContributionId(graph: PaperArgumentGraph, nodeId: string): string
     frontier = next;
   }
   return null;
-}
-
-function sourceLocationKey(unitId: string, index: number): string {
-  return `${unitId}:${index}`;
 }
 
 function App() {
@@ -204,43 +189,23 @@ function App() {
     () => new Map(semanticUnits.map((unit) => [unit.semantic_unit_id, unit])),
     [semanticUnits],
   );
-  const sourceLocationRegion = useMemo(() => {
-    const regions: SourceLocationRegion[] = [];
+  const unitsByPage = useMemo(() => {
+    const grouped = new Map<number, SemanticUnit[]>();
     for (const unit of semanticUnits) {
-      const sourceLocation = unit.source_location;
-      regions.push({
-        id: sourceLocationKey(unit.semantic_unit_id, 0),
-        unitId: unit.semantic_unit_id,
-        role: unit.role,
-        title: unit.title,
-        text: unit.text,
-        page: sourceLocation.page,
-        bbox: sourceLocation.bbox,
-        extractedText: sourceLocation.extracted_text,
-      });
-    }
-    return regions;
-  }, [semanticUnits]);
-  const sourceLocationByPage = useMemo(() => {
-    const grouped = new Map<number, SourceLocationRegion[]>();
-    for (const region of sourceLocationRegion) {
-      grouped.set(region.page, [...(grouped.get(region.page) ?? []), region]);
+      const page = unit.source_location.page;
+      grouped.set(page, [...(grouped.get(page) ?? []), unit]);
     }
     return grouped;
-  }, [sourceLocationRegion]);
-  const firstNodeBySourceLocation = useMemo(() => {
-    const bySourceLocation = new Map<string, string>();
-    if (!graph) return bySourceLocation;
+  }, [semanticUnits]);
+  const firstNodeByUnitId = useMemo(() => {
+    const byUnitId = new Map<string, string>();
+    if (!graph) return byUnitId;
     for (const node of graph.nodes) {
       for (const unitId of node.semantic_unit_ids) {
-        const unit = unitById.get(unitId);
-        if (unit) {
-          const key = sourceLocationKey(unitId, 0);
-          if (!bySourceLocation.has(key)) bySourceLocation.set(key, node.id);
-        }
+        if (unitById.has(unitId) && !byUnitId.has(unitId)) byUnitId.set(unitId, node.id);
       }
     }
-    return bySourceLocation;
+    return byUnitId;
   }, [graph, unitById]);
   const incidentEdges = useMemo(() => {
     if (!graph || !selectedNode) return [];
@@ -249,13 +214,10 @@ function App() {
     );
   }, [graph, selectedNode]);
 
-  const sourceLocationIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const unitId of selectedNode?.semantic_unit_ids ?? []) {
-      if (unitById.has(unitId)) ids.add(sourceLocationKey(unitId, 0));
-    }
-    return ids;
-  }, [selectedNode, unitById]);
+  const selectedUnitIds = useMemo(
+    () => new Set(selectedNode?.semantic_unit_ids ?? []),
+    [selectedNode],
+  );
 
   useEffect(() => {
     listPapers()
@@ -273,19 +235,15 @@ function App() {
     setEditTitle(selectedNode.title);
     setEditSummary(selectedNode.summary);
     setEditVerified(selectedNode.verified);
-    const first = selectedNode.semantic_unit_ids
-      .map((id) => unitById.has(id) ? sourceLocationKey(id, 0) : '')
-      .find((id) => blockRefs.current.has(id));
+    const first = selectedNode.semantic_unit_ids.find((id) => blockRefs.current.has(id));
     if (first) {
-      scrollToSourceLocation(first);
+      scrollToUnit(first);
     }
   }, [selectedNodeId, graph, unitById]);
 
   useEffect(() => {
-    const first = selectedNode?.semantic_unit_ids
-      .map((id) => unitById.has(id) ? sourceLocationKey(id, 0) : '')
-      .find((id) => blockRefs.current.has(id));
-    if (first) window.requestAnimationFrame(() => scrollToSourceLocation(first));
+    const first = selectedNode?.semantic_unit_ids.find((id) => blockRefs.current.has(id));
+    if (first) window.requestAnimationFrame(() => scrollToUnit(first));
   }, [sourceMode, documentInfo, selectedNodeId, unitById]);
 
   useEffect(() => {
@@ -328,9 +286,9 @@ function App() {
     setMessage(nextMessage);
   }
 
-  function scrollToSourceLocation(contentId: string) {
+  function scrollToUnit(unitId: string) {
     window.requestAnimationFrame(() => {
-      blockRefs.current.get(contentId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      blockRefs.current.get(unitId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     });
   }
 
@@ -357,8 +315,8 @@ function App() {
     setSelectedNodeId(nodeId);
   }
 
-  function selectSourceLocationOwner(contentId: string) {
-    const nodeId = firstNodeBySourceLocation.get(contentId);
+  function selectUnitOwner(unitId: string) {
+    const nodeId = firstNodeByUnitId.get(unitId);
     if (nodeId) revealNode(nodeId);
   }
 
@@ -386,22 +344,9 @@ function App() {
       });
       setUploadProgress(100);
       setMessage('Graph generated. Loading source locations...');
-      const [nextSemanticUnits, nextDocumentInfo] = await Promise.all([
-        fetchSemanticUnits(nextGraph.paper_id),
-        fetchDocumentInfo(nextGraph.paper_id).catch(() => null),
-      ]);
-      setGraph(nextGraph);
-      setSemanticUnits(nextSemanticUnits);
-      setDocumentInfo(nextDocumentInfo);
-      setSourceMode(nextDocumentInfo ? 'pages' : 'units');
-      setSelectedNodeId(nextGraph.nodes[0]?.id ?? null);
-      setFocusedContributionId(null);
+      await loadPaper(nextGraph.paper_id);
       setQuery('');
-      setStatus('ready');
-      setUploadProgress(null);
-      setMessage(`Graph ready: ${nextGraph.nodes.length} nodes, ${nextGraph.edges.length} edges.`);
-      const nextPapers = await listPapers();
-      setPapers(nextPapers);
+      setPapers(await listPapers());
     } catch (error) {
       setStatus('error');
       setUploadProgress(null);
@@ -645,9 +590,9 @@ function App() {
                 >
                   <FileImage size={15} />
                 </button>
-	                <button
-	                  type="button"
-	                  className={sourceMode === 'units' ? 'active' : ''}
+                <button
+                  type="button"
+                  className={sourceMode === 'units' ? 'active' : ''}
                   title="Semantic units"
                   onClick={() => setSourceMode('units')}
                 >
@@ -694,16 +639,18 @@ function App() {
                     loading="lazy"
                   />
                   <div className="bbox-layer">
-                    {(sourceLocationByPage.get(page.page) ?? []).map((region) => {
-                      if (region.bbox.length !== 4) return null;
-                      const [ymin, xmin, ymax, xmax] = region.bbox;
-                      const highlighted = sourceLocationIds.has(region.id);
+                    {(unitsByPage.get(page.page) ?? []).map((unit) => {
+                      const unitId = unit.semantic_unit_id;
+                      const { bbox, extracted_text } = unit.source_location;
+                      if (bbox.length !== 4) return null;
+                      const [ymin, xmin, ymax, xmax] = bbox;
+                      const highlighted = selectedUnitIds.has(unitId);
                       return (
                         <button
-                          key={region.id}
+                          key={unitId}
                           ref={(el) => {
-                            if (el) blockRefs.current.set(region.id, el);
-                            else blockRefs.current.delete(region.id);
+                            if (el) blockRefs.current.set(unitId, el);
+                            else blockRefs.current.delete(unitId);
                           }}
                           type="button"
                           className={`bbox-highlight ${highlighted ? 'highlighted' : ''}`}
@@ -713,8 +660,8 @@ function App() {
                             width: `${(xmax - xmin) * 100}%`,
                             height: `${(ymax - ymin) * 100}%`,
                           }}
-                          title={`${region.role}: ${(region.extractedText || region.text).slice(0, 180)}`}
-                          onClick={() => selectSourceLocationOwner(region.id)}
+                          title={`${unit.role}: ${(extracted_text || unit.text).slice(0, 180)}`}
+                          onClick={() => selectUnitOwner(unitId)}
                         />
                       );
                     })}
@@ -725,26 +672,26 @@ function App() {
           ) : semanticUnits.length ? (
             <div className="block-list">
               {semanticUnits.map((unit) => {
-                const firstEvidenceId = sourceLocationKey(unit.semantic_unit_id, 0);
-                const highlighted = sourceLocationIds.has(firstEvidenceId);
-	                return (
-	                  <div
-	                    key={unit.semantic_unit_id}
-	                    ref={(el) => {
-	                      if (el && firstEvidenceId) blockRefs.current.set(firstEvidenceId, el);
-	                      else if (firstEvidenceId) blockRefs.current.delete(firstEvidenceId);
-	                    }}
-	                    className={`content-block ${highlighted ? 'highlighted' : ''}`}
-	                    onClick={() => firstEvidenceId ? selectSourceLocationOwner(firstEvidenceId) : undefined}
-	                  >
-	                    <header>
-	                      <span className="role-tag">{unit.role}</span>
-	                      <span>p.{unit.source_location.page}</span>
-	                    </header>
-	                    <p>{unit.text}</p>
-	                  </div>
-	                );
-	              })}
+                const unitId = unit.semantic_unit_id;
+                const highlighted = selectedUnitIds.has(unitId);
+                return (
+                  <div
+                    key={unitId}
+                    ref={(el) => {
+                      if (el) blockRefs.current.set(unitId, el);
+                      else blockRefs.current.delete(unitId);
+                    }}
+                    className={`content-block ${highlighted ? 'highlighted' : ''}`}
+                    onClick={() => selectUnitOwner(unitId)}
+                  >
+                    <header>
+                      <span className="role-tag">{unit.role}</span>
+                      <span>p.{unit.source_location.page}</span>
+                    </header>
+                    <p>{unit.text}</p>
+                  </div>
+                );
+              })}
             </div>
           ) : (
             <button className="upload-drop" type="button" onClick={() => fileInputRef.current?.click()}>
@@ -835,25 +782,17 @@ function App() {
                 <section className="evidence-list">
                   <h3>Semantic Units</h3>
                   <div className="evidence-chips">
-	                    {selectedNode.semantic_unit_ids.map((unitId) => {
-	                      const unit = unitById.get(unitId);
-	                      const firstEvidenceId = unit ? sourceLocationKey(unitId, 0) : '';
-	                      const firstPage = unit?.source_location.page;
-	                      return (
-	                        <button
-	                          key={unitId}
-	                          type="button"
-	                          className="evidence-chip"
-	                          onClick={() =>
-	                            firstEvidenceId
-	                              ? blockRefs.current.get(firstEvidenceId)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-	                              : undefined
-	                          }
-	                        >
-	                          {unit
-	                            ? `${unit.role}${firstPage ? ` · p.${firstPage}` : ''}`
-	                            : unitId}
-	                        </button>
+                    {selectedNode.semantic_unit_ids.map((unitId) => {
+                      const unit = unitById.get(unitId);
+                      return (
+                        <button
+                          key={unitId}
+                          type="button"
+                          className="evidence-chip"
+                          onClick={() => scrollToUnit(unitId)}
+                        >
+                          {unit ? `${unit.role} · p.${unit.source_location.page}` : unitId}
+                        </button>
                       );
                     })}
                   </div>

@@ -179,18 +179,9 @@ class ContributionEvidenceAssigner:
             "source_location": unit.source_location.model_dump(),
         }
 
-    @staticmethod
-    def _unit_json(unit: SemanticUnit) -> str:
-        return json.dumps(
-            {
-                "semantic_unit_id": unit.semantic_unit_id,
-                "role": unit.role,
-                "title": unit.title,
-                "text": unit.text,
-                "source_location": unit.source_location.model_dump(),
-            },
-            ensure_ascii=False,
-        )
+    @classmethod
+    def _unit_json(cls, unit: SemanticUnit) -> str:
+        return json.dumps(cls._unit_payload(unit), ensure_ascii=False)
 
 
 class ContributionEvidenceAssignmentError(RuntimeError):

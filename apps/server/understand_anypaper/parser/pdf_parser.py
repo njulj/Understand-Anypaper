@@ -8,13 +8,9 @@ import fitz  # PyMuPDF
 from understand_anypaper.parser.models import DocumentPage, PaperReference, ParsedPaper
 
 _REFERENCE_SECTION = re.compile(r"^\s*(references|bibliography)\s*$", re.IGNORECASE)
-_NUMERIC_CITATION = re.compile(r"\[(\d+(?:\s*[,;\-–]\s*\d+)*)\]")
-_REF_MARKER = re.compile(r"^\s*\[(\d+)\]\s*")
-_CAPTION = re.compile(r"^(figure|fig\.|table)\s*\d+", re.IGNORECASE)
 _YEAR = re.compile(r"\b(19|20)\d{2}\b")
 _DOI = re.compile(r"\b10\.\d{4,9}/[^\s,;]+", re.IGNORECASE)
 _ARXIV = re.compile(r"arxiv[:\s]*(\d{4}\.\d{4,5})", re.IGNORECASE)
-_MATH_CHARS = set("=+−-*/^_∑∏∫√∂∇≈≠≤≥∈∀∃αβγδεζηθλμπσφψωΔΣΠΩ()|{}")
 
 
 class PdfParser:
@@ -181,17 +177,6 @@ class PdfParser:
         )
 
     @staticmethod
-    def _block_type(text: str, raw: dict, body_size: float) -> str:
-        if _CAPTION.match(text):
-            return "figure_caption" if text.lower().startswith(("figure", "fig.")) else "table_caption"
-        stripped = text.replace(" ", "")
-        if stripped:
-            math_ratio = sum(1 for ch in stripped if ch in _MATH_CHARS or ch.isdigit()) / len(stripped)
-            if math_ratio > 0.45 and len(stripped) < 200:
-                return "equation"
-        return "paragraph"
-
-    @staticmethod
     def _detect_abstract(texts: list[str]) -> str:
         for text in texts:
             if text.lower().startswith("abstract"):
@@ -292,17 +277,3 @@ class PdfParser:
             doi=doi_match.group(0).rstrip(".") if doi_match else None,
             arxiv_id=arxiv_match.group(1) if arxiv_match else None,
         )
-
-    @staticmethod
-    def _expand_numbers(group: str) -> list[int]:
-        numbers: list[int] = []
-        for part in re.split(r"[,;]", group):
-            part = part.strip()
-            range_match = re.match(r"^(\d+)\s*[\-–]\s*(\d+)$", part)
-            if range_match:
-                start, end = int(range_match.group(1)), int(range_match.group(2))
-                if 0 < end - start <= 30:
-                    numbers.extend(range(start, end + 1))
-            elif part.isdigit():
-                numbers.append(int(part))
-        return numbers

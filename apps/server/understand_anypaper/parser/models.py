@@ -49,16 +49,6 @@ class PaperReference(BaseModel):
     arxiv_id: str | None = None
 
 
-class CitationMention(BaseModel):
-    mention_id: str
-    reference_id: str
-    page: int | None = None
-    bbox: list[float] | None = None
-    sentence: str
-    intent: str = "BACKGROUND"
-    confidence: float = Field(ge=0, le=1, default=0.6)
-
-
 class ParsedPaper(BaseModel):
     paper_id: str
     title: str
@@ -66,7 +56,6 @@ class ParsedPaper(BaseModel):
     pages: list[DocumentPage] = Field(default_factory=list)
     semantic_units: list[SemanticUnit] = Field(default_factory=list)
     references: list[PaperReference] = Field(default_factory=list)
-    mentions: list[CitationMention] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     source_bytes: bytes = Field(default=b"", exclude=True)
     source_media_type: str = ""

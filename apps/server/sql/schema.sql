@@ -63,21 +63,9 @@ CREATE TABLE IF NOT EXISTS paper_references (
   metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
-CREATE TABLE IF NOT EXISTS analysis_tasks (
-  id UUID PRIMARY KEY,
-  paper_id UUID REFERENCES papers(id) ON DELETE CASCADE,
-  task_type TEXT NOT NULL,
-  status TEXT NOT NULL,
-  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 CREATE TABLE IF NOT EXISTS graph_patches (
   id UUID PRIMARY KEY,
   paper_id UUID NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
   operations_json JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
-ALTER TABLE nodes ALTER COLUMN embedding TYPE vector;
