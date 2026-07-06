@@ -1,10 +1,12 @@
+import threading
+
 from pydantic import BaseModel
 
 from understand_anypaper.analyzers.contribution_evidence_assigner import (
     ContributionEvidenceAssigner,
     ContributionEvidenceSelectionOutput,
 )
-from understand_anypaper.parser.models import ParsedPaper, SemanticUnit, SourceBlock, SourceRange
+from understand_anypaper.parser.models import PageEvidence, ParsedPaper, SemanticUnit
 
 
 class FakeAgent:
@@ -19,14 +21,14 @@ class FakeAgent:
         return self.outputs.pop(0)
 
 
-def _unit(unit_id: str, role: str, title: str, block_id: str) -> SemanticUnit:
+def _unit(unit_id: str, role: str, title: str, page: int) -> SemanticUnit:
     return SemanticUnit(
         semantic_unit_id=unit_id,
         paper_id="paper-12345678",
         role=role,
         title=title,
         text=title,
-        source_ranges=[SourceRange(source_block_id=block_id)],
+        evidence=[PageEvidence(page=page, bbox=[0.1, 0.1, 0.2, 0.8], extracted_text=title)],
         confidence=0.9,
     )
 
@@ -36,16 +38,11 @@ def test_assigner_selects_evidence_per_contribution():
         paper_id="paper-12345678",
         title="TinyLUT",
         abstract="A compact lookup-table method.",
-        source_blocks=[
-            SourceBlock(source_block_id="paper-block1", order=1, page=1, text="We contribute TinyLUT."),
-            SourceBlock(source_block_id="paper-block2", order=2, page=1, text="Mobile demand motivates it."),
-            SourceBlock(source_block_id="paper-block3", order=3, page=2, text="The method uses mapping."),
-        ],
     )
     units = [
-        _unit("unit-contribution", "contribution", "TinyLUT contribution", "paper-block1"),
-        _unit("unit-motivation", "motivation", "Mobile demand", "paper-block2"),
-        _unit("unit-method", "method", "Separable mapping", "paper-block3"),
+        _unit("unit-contribution", "contribution", "TinyLUT contribution", 1),
+        _unit("unit-motivation", "motivation", "Mobile demand", 1),
+        _unit("unit-method", "method", "Separable mapping", 2),
     ]
     agent = FakeAgent(
         [
@@ -73,5 +70,52 @@ def test_assigner_selects_evidence_per_contribution():
 
     assert by_id["unit-motivation"].properties["contribution_unit_ids"] == ["unit-contribution"]
     assert by_id["unit-method"].properties["contribution_unit_ids"] == ["unit-contribution"]
-    assert agent.cache_keys == ["evidence-assignment:paper-12345678"]
+    assert agent.cache_keys == ["evidence-assignment:paper-12345678:unit-contribution"]
     assert "TARGET_CONTRIBUTION" in agent.prompts[0]
+
+
+def test_assigner_runs_contribution_requests_in_parallel_with_limit():
+    parsed = ParsedPaper(
+        paper_id="paper-12345678",
+        title="TinyLUT",
+        abstract="A compact lookup-table method.",
+    )
+    units = [
+        *[
+            _unit(f"unit-contribution-{index}", "contribution", f"Contribution {index}", 1)
+            for index in range(6)
+        ],
+        _unit("unit-method", "method", "Separable mapping", 2),
+    ]
+
+    class TrackingAgent:
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+            self.calls = 0
+            self.lock = threading.Lock()
+            self.five_active = threading.Event()
+
+        def run(
+            self,
+            prompt: str,
+            output_model: type[BaseModel],
+            prompt_cache_key: str | None = None,
+        ):
+            with self.lock:
+                self.active += 1
+                self.calls += 1
+                self.max_active = max(self.max_active, self.active)
+                if self.active == 5:
+                    self.five_active.set()
+            self.five_active.wait(timeout=1)
+            with self.lock:
+                self.active -= 1
+            return ContributionEvidenceSelectionOutput.model_validate({"evidence": []})
+
+    agent = TrackingAgent()
+
+    ContributionEvidenceAssigner(agent=agent).assign(parsed, units)
+
+    assert agent.calls == 6
+    assert agent.max_active == 5

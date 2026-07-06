@@ -1,11 +1,12 @@
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from understand_anypaper.analyzers.structured_agent import StructuredAgent, StructuredAgentError
 from understand_anypaper.config import Settings, settings
-from understand_anypaper.parser.models import ParsedPaper, SemanticUnit, SourceBlock, SourceRange
+from understand_anypaper.parser.models import ParsedPaper, SemanticUnit
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,6 @@ _ASSIGNER_INSTRUCTIONS = """\
 You select evidence for one target contribution in a Paper Argument Graph.
 
 You receive:
-- the full paper text as source blocks,
 - all semantic evidence units extracted from the paper,
 - one target contribution unit.
 
@@ -40,6 +40,8 @@ an empty evidence list if none of the evidence units support this contribution.
 Use only the provided semantic_unit_id values. Do not select contribution units. Return
 JSON matching the schema.
 """
+
+_MAX_PARALLEL_ASSIGNMENTS = 5
 
 
 class ContributionEvidenceAssigner:
@@ -82,16 +84,8 @@ class ContributionEvidenceAssigner:
         }
         base_context = self._base_context(parsed, evidence_units)
 
-        for contribution in contributions:
-            prompt = f"{base_context}\n\nTARGET_CONTRIBUTION:\n{self._unit_json(contribution)}"
-            try:
-                output = self._agent.run(
-                    prompt,
-                    ContributionEvidenceSelectionOutput,
-                    prompt_cache_key=f"evidence-assignment:{parsed.paper_id}",
-                )
-            except StructuredAgentError as exc:
-                raise ContributionEvidenceAssignmentError(str(exc)) from exc
+        outputs = self._select_evidence_for_contributions(parsed, base_context, contributions)
+        for contribution, output in zip(contributions, outputs, strict=True):
             for selected in output.evidence:
                 if selected.semantic_unit_id not in evidence_ids:
                     raise ContributionEvidenceAssignmentError(
@@ -131,62 +125,59 @@ class ContributionEvidenceAssigner:
             )
         return assigned
 
+    def _select_evidence_for_contributions(
+        self,
+        parsed: ParsedPaper,
+        base_context: str,
+        contributions: list[SemanticUnit],
+    ) -> list[ContributionEvidenceSelectionOutput]:
+        with ThreadPoolExecutor(
+            max_workers=min(_MAX_PARALLEL_ASSIGNMENTS, len(contributions))
+        ) as executor:
+            futures = [
+                executor.submit(self._select_evidence_for_contribution, parsed, base_context, unit)
+                for unit in contributions
+            ]
+            return [future.result() for future in futures]
+
+    def _select_evidence_for_contribution(
+        self,
+        parsed: ParsedPaper,
+        base_context: str,
+        contribution: SemanticUnit,
+    ) -> ContributionEvidenceSelectionOutput:
+        prompt = f"{base_context}\n\nTARGET_CONTRIBUTION:\n{self._unit_json(contribution)}"
+        try:
+            return self._agent.run(
+                prompt,
+                ContributionEvidenceSelectionOutput,
+                prompt_cache_key=(
+                    f"evidence-assignment:{parsed.paper_id}:{contribution.semantic_unit_id}"
+                ),
+            )
+        except StructuredAgentError as exc:
+            raise ContributionEvidenceAssignmentError(str(exc)) from exc
+
     def _base_context(self, parsed: ParsedPaper, evidence_units: list[SemanticUnit]) -> str:
-        full_text = "\n\n".join(
-            self._source_block_text(block) for block in sorted(parsed.source_blocks, key=lambda b: b.order)
-        )
         payload = {
             "paper": {
                 "paper_id": parsed.paper_id,
                 "title": parsed.title,
                 "abstract": parsed.abstract,
             },
-            "full_text": full_text,
-            "evidence_units": [
-                self._unit_payload(unit, parsed.source_blocks) for unit in evidence_units
-            ],
+            "evidence_units": [self._unit_payload(unit) for unit in evidence_units],
         }
         return json.dumps(payload, ensure_ascii=False)
 
     @staticmethod
-    def _source_block_text(block: SourceBlock) -> str:
-        metadata = {
-            "source_block_id": block.source_block_id,
-            "order": block.order,
-            "page": block.page,
-            "section": block.section,
-            "heading": block.heading,
-            "block_type": block.block_type,
-        }
-        return f"{json.dumps(metadata, ensure_ascii=False)}\n{block.text}"
-
-    @staticmethod
-    def _unit_payload(unit: SemanticUnit, source_blocks: list[SourceBlock]) -> dict:
-        blocks = {block.source_block_id: block for block in source_blocks}
+    def _unit_payload(unit: SemanticUnit) -> dict:
         return {
             "semantic_unit_id": unit.semantic_unit_id,
             "role": unit.role,
             "title": unit.title,
             "text": unit.text,
-            "source_ranges": [
-                {
-                    **source_range.model_dump(),
-                    "source_text": ContributionEvidenceAssigner._source_range_text(
-                        blocks.get(source_range.source_block_id),
-                        source_range,
-                    ),
-                }
-                for source_range in unit.source_ranges
-            ],
+            "evidence": [item.model_dump() for item in unit.evidence],
         }
-
-    @staticmethod
-    def _source_range_text(block: SourceBlock | None, source_range: SourceRange) -> str | None:
-        if block is None:
-            return None
-        if source_range.start_char is not None and source_range.end_char is not None:
-            return block.text[source_range.start_char:source_range.end_char]
-        return block.text
 
     @staticmethod
     def _unit_json(unit: SemanticUnit) -> str:
@@ -196,7 +187,7 @@ class ContributionEvidenceAssigner:
                 "role": unit.role,
                 "title": unit.title,
                 "text": unit.text,
-                "source_ranges": [source_range.model_dump() for source_range in unit.source_ranges],
+                "evidence": [evidence.model_dump() for evidence in unit.evidence],
             },
             ensure_ascii=False,
         )

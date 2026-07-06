@@ -38,25 +38,13 @@ CREATE TABLE IF NOT EXISTS edges (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS source_blocks (
-  id TEXT PRIMARY KEY,
-  paper_id UUID NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
-  block_order INTEGER NOT NULL,
-  page INTEGER NOT NULL,
-  section TEXT,
-  block_type TEXT NOT NULL,
-  bbox JSONB,
-  text TEXT NOT NULL,
-  embedding vector
-);
-
 CREATE TABLE IF NOT EXISTS semantic_units (
   id TEXT PRIMARY KEY,
   paper_id UUID NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
   role TEXT NOT NULL,
   title TEXT NOT NULL,
   text TEXT NOT NULL,
-  source_ranges_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  evidence_json JSONB NOT NULL DEFAULT '[]'::jsonb,
   confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
   created_by TEXT NOT NULL,
   properties_json JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -73,16 +61,6 @@ CREATE TABLE IF NOT EXISTS paper_references (
   doi TEXT,
   arxiv_id TEXT,
   metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb
-);
-
-CREATE TABLE IF NOT EXISTS citation_mentions (
-  id TEXT PRIMARY KEY,
-  reference_id TEXT NOT NULL REFERENCES paper_references(id) ON DELETE CASCADE,
-  source_block_id TEXT NOT NULL REFERENCES source_blocks(id) ON DELETE CASCADE,
-  sentence TEXT NOT NULL,
-  intent TEXT NOT NULL,
-  cited_object TEXT,
-  confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1)
 );
 
 CREATE TABLE IF NOT EXISTS analysis_tasks (
@@ -103,4 +81,3 @@ CREATE TABLE IF NOT EXISTS graph_patches (
 );
 
 ALTER TABLE nodes ALTER COLUMN embedding TYPE vector;
-ALTER TABLE source_blocks ALTER COLUMN embedding TYPE vector;

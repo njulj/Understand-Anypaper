@@ -22,7 +22,7 @@ from understand_anypaper.config import settings
 from understand_anypaper.graph.graph_builder import GraphBuildError, PaperArgumentGraphBuilder
 from understand_anypaper.graph.graph_validator import GraphValidator
 from understand_anypaper.graph.schema import GraphEdge, GraphNode, PaperArgumentGraph
-from understand_anypaper.parser.models import PaperReference, ParsedPaper, SemanticUnit, SourceBlock
+from understand_anypaper.parser.models import PaperReference, ParsedPaper, SemanticUnit
 from understand_anypaper.parser.pdf_parser import PdfParser
 from understand_anypaper.recursive.traversal_policy import TraversalPolicy
 from understand_anypaper.storage import GraphStore, create_graph_store
@@ -121,7 +121,7 @@ async def upload_paper(file: Annotated[UploadFile, File(...)]) -> StreamingRespo
         def run_pipeline() -> None:
             tmp_path: Path | None = None
             try:
-                emit("upload_received", 60, "Upload received. Parsing source blocks.")
+                emit("upload_received", 60, "Upload received. Rendering document pages.")
                 with NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                     tmp.write(data)
                     tmp_path = Path(tmp.name)
@@ -142,10 +142,10 @@ async def upload_paper(file: Annotated[UploadFile, File(...)]) -> StreamingRespo
                     }
                 )
                 emit(
-                    "parsed_source_blocks",
+                    "rendered_pages",
                     68,
-                    "Parsed source blocks.",
-                    source_block_count=len(parsed.source_blocks),
+                    "Rendered document pages.",
+                    page_count=len(parsed.pages),
                 )
 
                 units = SemanticUnitSlicer().slice_semantic_units(parsed)
@@ -234,12 +234,6 @@ def get_graph(paper_id: str) -> PaperArgumentGraph:
     return _get_graph(paper_id)
 
 
-@router.get("/papers/{paper_id}/blocks", response_model=list[SourceBlock])
-def get_blocks(paper_id: str) -> list[SourceBlock]:
-    _get_graph(paper_id)
-    return get_store().get_blocks(paper_id)
-
-
 @router.get("/papers/{paper_id}/semantic-units", response_model=list[SemanticUnit])
 def get_semantic_units(paper_id: str) -> list[SemanticUnit]:
     _get_graph(paper_id)
@@ -323,7 +317,6 @@ def get_node_evidence(node_id: str, paper_id: str | None = None) -> dict:
         node = next((n for n in graph.nodes if n.id == node_id), None)
         if node is None:
             continue
-        blocks = {block.source_block_id: block for block in store.get_blocks(pid)}
         semantic_units = {unit.semantic_unit_id: unit for unit in store.get_semantic_units(pid)}
         evidence = [
             {
@@ -331,17 +324,9 @@ def get_node_evidence(node_id: str, paper_id: str | None = None) -> dict:
                 "role": semantic_units[semantic_unit_id].role if semantic_unit_id in semantic_units else None,
                 "title": semantic_units[semantic_unit_id].title if semantic_unit_id in semantic_units else None,
                 "text": semantic_units[semantic_unit_id].text if semantic_unit_id in semantic_units else None,
-                "source_ranges": [
-                    {
-                        **source_range.model_dump(),
-                        "page": blocks[source_range.source_block_id].page
-                        if source_range.source_block_id in blocks else None,
-                        "bbox": blocks[source_range.source_block_id].bbox
-                        if source_range.source_block_id in blocks else None,
-                        "source_text": blocks[source_range.source_block_id].text
-                        if source_range.source_block_id in blocks else None,
-                    }
-                    for source_range in semantic_units[semantic_unit_id].source_ranges
+                "evidence": [
+                    item.model_dump()
+                    for item in semantic_units[semantic_unit_id].evidence
                 ] if semantic_unit_id in semantic_units else [],
             }
             for semantic_unit_id in node.semantic_unit_ids

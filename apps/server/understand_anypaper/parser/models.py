@@ -3,23 +3,25 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
-class SourceBlock(BaseModel):
-    source_block_id: str
-    order: int
+class DocumentPage(BaseModel):
     page: int
-    section: str | None = None
-    heading: str | None = None
-    bbox: list[float] | None = None
-    text: str
-    block_type: str = "paragraph"
-    citations: list[str] = Field(default_factory=list)
-    neighbor_ids: list[str] = Field(default_factory=list)
+    width: float
+    height: float
+    image_width: int | None = None
+    image_height: int | None = None
+    image_mime_type: str = "image/png"
+    image_data: bytes = Field(default=b"", exclude=True)
 
 
-class SourceRange(BaseModel):
-    source_block_id: str
-    start_char: int | None = None
-    end_char: int | None = None
+class PageEvidence(BaseModel):
+    page: int
+    bbox: list[float] = Field(
+        min_length=4,
+        max_length=4,
+        description="Normalized [ymin, xmin, ymax, xmax] coordinates on the rendered page.",
+    )
+    extracted_text: str = ""
+    extraction_method: str = "pymupdf_clip"
 
 
 class SemanticUnit(BaseModel):
@@ -28,7 +30,7 @@ class SemanticUnit(BaseModel):
     role: str
     title: str
     text: str
-    source_ranges: list[SourceRange]
+    evidence: list[PageEvidence]
     confidence: float = Field(ge=0, le=1, default=0.0)
     created_by: str = "llm-semantic-slicer"
     properties: dict[str, Any] = Field(default_factory=dict)
@@ -48,7 +50,8 @@ class PaperReference(BaseModel):
 class CitationMention(BaseModel):
     mention_id: str
     reference_id: str
-    source_block_id: str
+    page: int | None = None
+    bbox: list[float] | None = None
     sentence: str
     intent: str = "BACKGROUND"
     confidence: float = Field(ge=0, le=1, default=0.6)
@@ -58,8 +61,10 @@ class ParsedPaper(BaseModel):
     paper_id: str
     title: str
     abstract: str = ""
-    source_blocks: list[SourceBlock] = Field(default_factory=list)
+    pages: list[DocumentPage] = Field(default_factory=list)
     semantic_units: list[SemanticUnit] = Field(default_factory=list)
     references: list[PaperReference] = Field(default_factory=list)
     mentions: list[CitationMention] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    source_bytes: bytes = Field(default=b"", exclude=True)
+    source_media_type: str = ""

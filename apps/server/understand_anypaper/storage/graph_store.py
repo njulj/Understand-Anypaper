@@ -11,7 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from understand_anypaper.config import settings
 from understand_anypaper.graph.schema import GraphEdge, GraphNode, PaperArgumentGraph
-from understand_anypaper.parser.models import CitationMention, PaperReference, ParsedPaper, SemanticUnit, SourceBlock
+from understand_anypaper.parser.models import CitationMention, PageEvidence, PaperReference, ParsedPaper, SemanticUnit
 from understand_anypaper.retrieval.embeddings import EmbeddingClient
 
 logger = logging.getLogger(__name__)
@@ -47,9 +47,6 @@ class GraphStore(ABC):
 
     @abstractmethod
     def replace_graph(self, paper_id: str, graph: PaperArgumentGraph) -> None: ...
-
-    @abstractmethod
-    def get_blocks(self, paper_id: str) -> list[SourceBlock]: ...
 
     @abstractmethod
     def get_semantic_units(self, paper_id: str) -> list[SemanticUnit]: ...
@@ -122,10 +119,6 @@ class InMemoryGraphStore(GraphStore):
     def replace_graph(self, paper_id: str, graph: PaperArgumentGraph) -> None:
         self._graphs[paper_id] = graph
 
-    def get_blocks(self, paper_id: str) -> list[SourceBlock]:
-        paper = self._papers.get(paper_id)
-        return paper.source_blocks if paper else []
-
     def get_semantic_units(self, paper_id: str) -> list[SemanticUnit]:
         paper = self._papers.get(paper_id)
         return paper.semantic_units if paper else []
@@ -186,41 +179,14 @@ class PostgresGraphStore(GraphStore):
                     "metadata": json.dumps(parsed.metadata, default=str),
                 },
             )
-            for table in ("citation_mentions", "edges", "nodes", "semantic_units", "source_blocks", "paper_references"):
-                if table == "citation_mentions":
-                    conn.execute(
-                        text(
-                            "DELETE FROM citation_mentions WHERE reference_id IN "
-                            "(SELECT id FROM paper_references WHERE paper_id = :pid)"
-                        ),
-                        {"pid": parsed.paper_id},
-                    )
-                else:
-                    conn.execute(text(f"DELETE FROM {table} WHERE paper_id = :pid"), {"pid": parsed.paper_id})  # noqa: S608
-
-            for block in parsed.source_blocks:
-                conn.execute(
-                    text(
-                        "INSERT INTO source_blocks (id, paper_id, block_order, page, section, block_type, bbox, text) "
-                        "VALUES (:id, :pid, :block_order, :page, :section, :block_type, :bbox, :text)"
-                    ),
-                    {
-                        "id": block.source_block_id,
-                        "pid": parsed.paper_id,
-                        "block_order": block.order,
-                        "page": block.page,
-                        "section": block.section,
-                        "block_type": block.block_type,
-                        "bbox": json.dumps(block.bbox) if block.bbox else None,
-                        "text": block.text,
-                    },
-                )
+            for table in ("edges", "nodes", "semantic_units", "paper_references"):
+                conn.execute(text(f"DELETE FROM {table} WHERE paper_id = :pid"), {"pid": parsed.paper_id})  # noqa: S608
             for unit in parsed.semantic_units:
                 conn.execute(
                     text(
-                        "INSERT INTO semantic_units (id, paper_id, role, title, text, source_ranges_json, "
+                        "INSERT INTO semantic_units (id, paper_id, role, title, text, evidence_json, "
                         "confidence, created_by, properties_json) VALUES (:id, :pid, :role, :title, :text, "
-                        "CAST(:source_ranges AS jsonb), :confidence, :created_by, CAST(:properties AS jsonb))"
+                        "CAST(:evidence AS jsonb), :confidence, :created_by, CAST(:properties AS jsonb))"
                     ),
                     {
                         "id": unit.semantic_unit_id,
@@ -228,7 +194,7 @@ class PostgresGraphStore(GraphStore):
                         "role": unit.role,
                         "title": unit.title,
                         "text": unit.text,
-                        "source_ranges": json.dumps([item.model_dump() for item in unit.source_ranges]),
+                        "evidence": json.dumps([item.model_dump() for item in unit.evidence]),
                         "confidence": unit.confidence,
                         "created_by": unit.created_by,
                         "properties": json.dumps(unit.properties, default=str),
@@ -254,22 +220,6 @@ class PostgresGraphStore(GraphStore):
                         "metadata": json.dumps({"marker": reference.marker}),
                     },
                 )
-            for mention in parsed.mentions:
-                conn.execute(
-                    text(
-                        "INSERT INTO citation_mentions (id, reference_id, source_block_id, sentence, intent, confidence) "
-                        "VALUES (:id, :ref, :block, :sentence, :intent, :confidence)"
-                    ),
-                    {
-                        "id": mention.mention_id,
-                        "ref": mention.reference_id,
-                        "block": mention.source_block_id,
-                        "sentence": mention.sentence,
-                        "intent": mention.intent,
-                        "confidence": mention.confidence,
-                    },
-                )
-
     def list_papers(self) -> list[dict]:
         with self._engine.connect() as conn:
             rows = conn.execute(
@@ -412,39 +362,11 @@ class PostgresGraphStore(GraphStore):
             self._insert_nodes(conn, graph.nodes, node_embeddings)
             self._insert_edges(conn, graph.edges)
 
-    def get_blocks(self, paper_id: str) -> list[SourceBlock]:
-        with self._engine.connect() as conn:
-            rows = conn.execute(
-                text(
-                    "SELECT id, block_order, page, section, block_type, bbox, text "
-                    "FROM source_blocks WHERE paper_id = :pid ORDER BY block_order"
-                ),
-                {"pid": paper_id},
-            ).mappings()
-            blocks = [
-                SourceBlock(
-                    source_block_id=row["id"],
-                    order=row["block_order"],
-                    page=row["page"],
-                    section=row["section"],
-                    bbox=row["bbox"],
-                    text=row["text"],
-                    block_type=row["block_type"],
-                )
-                for row in rows
-            ]
-        blocks.sort(key=lambda b: (b.page, b.order))
-        for order, block in enumerate(blocks, start=1):
-            block.order = order
-        return blocks
-
     def get_semantic_units(self, paper_id: str) -> list[SemanticUnit]:
-        from understand_anypaper.parser.models import SourceRange
-
         with self._engine.connect() as conn:
             rows = conn.execute(
                 text(
-                    "SELECT id, role, title, text, source_ranges_json, confidence, created_by, properties_json "
+                    "SELECT id, role, title, text, evidence_json, confidence, created_by, properties_json "
                     "FROM semantic_units WHERE paper_id = :pid ORDER BY id"
                 ),
                 {"pid": paper_id},
@@ -456,7 +378,7 @@ class PostgresGraphStore(GraphStore):
                     role=row["role"],
                     title=row["title"],
                     text=row["text"],
-                    source_ranges=[SourceRange(**item) for item in row["source_ranges_json"]],
+                    evidence=[PageEvidence(**item) for item in row["evidence_json"]],
                     confidence=row["confidence"],
                     created_by=row["created_by"],
                     properties=row["properties_json"],
@@ -522,25 +444,7 @@ class PostgresGraphStore(GraphStore):
             )
 
     def get_mentions(self, reference_id: str) -> list[CitationMention]:
-        with self._engine.connect() as conn:
-            rows = conn.execute(
-                text(
-                    "SELECT id, reference_id, source_block_id, sentence, intent, confidence "
-                    "FROM citation_mentions WHERE reference_id = :rid"
-                ),
-                {"rid": reference_id},
-            ).mappings()
-            return [
-                CitationMention(
-                    mention_id=row["id"],
-                    reference_id=row["reference_id"],
-                    source_block_id=row["source_block_id"],
-                    sentence=row["sentence"],
-                    intent=row["intent"],
-                    confidence=row["confidence"],
-                )
-                for row in rows
-            ]
+        return []
 
     def record_patch(self, paper_id: str, operations: list[dict]) -> str:
         patch_id = str(uuid4())

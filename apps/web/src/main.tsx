@@ -8,7 +8,6 @@ import {
   FileText,
   GitBranch,
   Link2,
-  ListTree,
   Loader2,
   Plus,
   Save,
@@ -24,10 +23,8 @@ import {
   PaperDocumentInfo,
   PaperSummary,
   SemanticUnit,
-  SourceBlock,
   deletePaper,
   documentPageImageUrl,
-  fetchBlocks,
   fetchDocumentInfo,
   fetchSemanticUnits,
   fetchGraph,
@@ -69,6 +66,17 @@ const EDGE_TYPE_OPTIONS = [
   'CONTRASTS_WITH',
   'DESCRIBES',
 ];
+
+type EvidenceRegion = {
+  id: string;
+  unitId: string;
+  role: string;
+  title: string;
+  text: string;
+  page: number;
+  bbox: number[];
+  extractedText: string;
+};
 
 function isNavigationEdge(edge: GraphEdge): boolean {
   return edge.edge_type !== 'NEXT' && edge.edge_type !== 'PREVIOUS';
@@ -129,15 +137,18 @@ function owningContributionId(graph: PaperArgumentGraph, nodeId: string): string
   return null;
 }
 
+function evidenceKey(unitId: string, index: number): string {
+  return `${unitId}:${index}`;
+}
+
 function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const blockRefs = useRef(new Map<string, HTMLElement>());
   const [papers, setPapers] = useState<PaperSummary[]>([]);
   const [graph, setGraph] = useState<PaperArgumentGraph | null>(null);
-  const [blocks, setBlocks] = useState<SourceBlock[]>([]);
   const [semanticUnits, setSemanticUnits] = useState<SemanticUnit[]>([]);
   const [documentInfo, setDocumentInfo] = useState<PaperDocumentInfo | null>(null);
-  const [sourceMode, setSourceMode] = useState<'pages' | 'blocks'>('blocks');
+  const [sourceMode, setSourceMode] = useState<'pages' | 'units'>('pages');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [focusedContributionId, setFocusedContributionId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -189,28 +200,45 @@ function App() {
     }
     return stats;
   }, [graph]);
-  const blockById = useMemo(() => new Map(blocks.map((block) => [block.source_block_id, block])), [blocks]);
   const unitById = useMemo(
     () => new Map(semanticUnits.map((unit) => [unit.semantic_unit_id, unit])),
     [semanticUnits],
   );
-  const blocksByPage = useMemo(() => {
-    const grouped = new Map<number, SourceBlock[]>();
-    for (const block of blocks) {
-      if (!block.bbox) continue;
-      grouped.set(block.page, [...(grouped.get(block.page) ?? []), block]);
+  const evidenceRegions = useMemo(() => {
+    const regions: EvidenceRegion[] = [];
+    for (const unit of semanticUnits) {
+      unit.evidence.forEach((evidence, index) => {
+        regions.push({
+          id: evidenceKey(unit.semantic_unit_id, index),
+          unitId: unit.semantic_unit_id,
+          role: unit.role,
+          title: unit.title,
+          text: unit.text,
+          page: evidence.page,
+          bbox: evidence.bbox,
+          extractedText: evidence.extracted_text,
+        });
+      });
+    }
+    return regions;
+  }, [semanticUnits]);
+  const evidenceByPage = useMemo(() => {
+    const grouped = new Map<number, EvidenceRegion[]>();
+    for (const region of evidenceRegions) {
+      grouped.set(region.page, [...(grouped.get(region.page) ?? []), region]);
     }
     return grouped;
-  }, [blocks]);
+  }, [evidenceRegions]);
   const firstNodeByEvidence = useMemo(() => {
     const byEvidence = new Map<string, string>();
     if (!graph) return byEvidence;
     for (const node of graph.nodes) {
       for (const unitId of node.semantic_unit_ids) {
         const unit = unitById.get(unitId);
-        for (const sourceRange of unit?.source_ranges ?? []) {
-          if (!byEvidence.has(sourceRange.source_block_id)) byEvidence.set(sourceRange.source_block_id, node.id);
-        }
+        unit?.evidence.forEach((_, index) => {
+          const key = evidenceKey(unitId, index);
+          if (!byEvidence.has(key)) byEvidence.set(key, node.id);
+        });
       }
     }
     return byEvidence;
@@ -226,9 +254,7 @@ function App() {
     const ids = new Set<string>();
     for (const unitId of selectedNode?.semantic_unit_ids ?? []) {
       const unit = unitById.get(unitId);
-      for (const sourceRange of unit?.source_ranges ?? []) {
-        ids.add(sourceRange.source_block_id);
-      }
+      unit?.evidence.forEach((_, index) => ids.add(evidenceKey(unitId, index)));
     }
     return ids;
   }, [selectedNode, unitById]);
@@ -250,7 +276,7 @@ function App() {
     setEditSummary(selectedNode.summary);
     setEditVerified(selectedNode.verified);
     const first = selectedNode.semantic_unit_ids
-      .flatMap((id) => unitById.get(id)?.source_ranges.map((range) => range.source_block_id) ?? [])
+      .flatMap((id) => unitById.get(id)?.evidence.map((_, index) => evidenceKey(id, index)) ?? [])
       .find((id) => blockRefs.current.has(id));
     if (first) {
       scrollToEvidence(first);
@@ -259,10 +285,10 @@ function App() {
 
   useEffect(() => {
     const first = selectedNode?.semantic_unit_ids
-      .flatMap((id) => unitById.get(id)?.source_ranges.map((range) => range.source_block_id) ?? [])
-      .find((id) => blockById.has(id));
+      .flatMap((id) => unitById.get(id)?.evidence.map((_, index) => evidenceKey(id, index)) ?? [])
+      .find((id) => blockRefs.current.has(id));
     if (first) window.requestAnimationFrame(() => scrollToEvidence(first));
-  }, [sourceMode, documentInfo, selectedNodeId, unitById, blockById]);
+  }, [sourceMode, documentInfo, selectedNodeId, unitById]);
 
   useEffect(() => {
     if (!graph) return;
@@ -276,17 +302,15 @@ function App() {
   }, [graph?.paper_id, selectedNodeId, unitById]);
 
   async function loadPaper(paperId: string, readyMessage?: string) {
-    const [nextGraph, nextBlocks, nextSemanticUnits, nextDocumentInfo] = await Promise.all([
+    const [nextGraph, nextSemanticUnits, nextDocumentInfo] = await Promise.all([
       fetchGraph(paperId),
-      fetchBlocks(paperId),
       fetchSemanticUnits(paperId),
       fetchDocumentInfo(paperId).catch(() => null),
     ]);
     setGraph(nextGraph);
-    setBlocks(nextBlocks);
     setSemanticUnits(nextSemanticUnits);
     setDocumentInfo(nextDocumentInfo);
-    setSourceMode(nextDocumentInfo ? 'pages' : 'blocks');
+    setSourceMode(nextDocumentInfo ? 'pages' : 'units');
     setSelectedNodeId(nextGraph.nodes[0]?.id ?? null);
     setFocusedContributionId(null);
     setStatus('ready');
@@ -296,7 +320,6 @@ function App() {
 
   function clearPaperState(nextMessage = 'Upload a .txt, .md, or PDF to build a Paper Argument Graph.') {
     setGraph(null);
-    setBlocks([]);
     setSemanticUnits([]);
     setDocumentInfo(null);
     setSelectedNodeId(null);
@@ -365,16 +388,14 @@ function App() {
       });
       setUploadProgress(100);
       setMessage('Graph generated. Loading source evidence...');
-      const [nextBlocks, nextSemanticUnits, nextDocumentInfo] = await Promise.all([
-        fetchBlocks(nextGraph.paper_id),
+      const [nextSemanticUnits, nextDocumentInfo] = await Promise.all([
         fetchSemanticUnits(nextGraph.paper_id),
         fetchDocumentInfo(nextGraph.paper_id).catch(() => null),
       ]);
       setGraph(nextGraph);
-      setBlocks(nextBlocks);
       setSemanticUnits(nextSemanticUnits);
       setDocumentInfo(nextDocumentInfo);
-      setSourceMode(nextDocumentInfo ? 'pages' : 'blocks');
+      setSourceMode(nextDocumentInfo ? 'pages' : 'units');
       setSelectedNodeId(nextGraph.nodes[0]?.id ?? null);
       setFocusedContributionId(null);
       setQuery('');
@@ -458,9 +479,7 @@ function App() {
   async function addManualNode() {
     if (!graph || !newNodeTitle.trim()) return;
     const evidenceUnit = newNodeEvidenceId ? unitById.get(newNodeEvidenceId) : null;
-    const evidenceBlock = evidenceUnit?.source_ranges[0]
-      ? blockById.get(evidenceUnit.source_ranges[0].source_block_id)
-      : null;
+    const evidencePage = evidenceUnit?.evidence[0]?.page;
     const node: GraphNode = {
       id: `manual-${graph.paper_id.slice(0, 8)}-${Date.now()}`,
       paper_id: graph.paper_id,
@@ -470,7 +489,7 @@ function App() {
       confidence: 1,
       source_type: 'human_added',
       semantic_unit_ids: evidenceUnit ? [evidenceUnit.semantic_unit_id] : [],
-      page_ranges: evidenceBlock ? [[evidenceBlock.page, evidenceBlock.page]] : [],
+      page_ranges: evidencePage ? [[evidencePage, evidencePage]] : [],
       properties: { manual: true },
       created_by: 'human',
       verified: true,
@@ -626,13 +645,13 @@ function App() {
                 >
                   <FileImage size={15} />
                 </button>
-                <button
-                  type="button"
-                  className={sourceMode === 'blocks' ? 'active' : ''}
-                  title="Text blocks"
-                  onClick={() => setSourceMode('blocks')}
+	                <button
+	                  type="button"
+	                  className={sourceMode === 'units' ? 'active' : ''}
+                  title="Semantic units"
+                  onClick={() => setSourceMode('units')}
                 >
-                  <ListTree size={15} />
+                  <FileText size={15} />
                 </button>
               </div>
             ) : null}
@@ -675,27 +694,27 @@ function App() {
                     loading="lazy"
                   />
                   <div className="bbox-layer">
-                    {(blocksByPage.get(page.page) ?? []).map((block) => {
-                      if (!block.bbox) return null;
-                      const [x0, y0, x1, y1] = block.bbox;
-                      const highlighted = evidenceIds.has(block.source_block_id);
+                    {(evidenceByPage.get(page.page) ?? []).map((region) => {
+                      if (region.bbox.length !== 4) return null;
+                      const [ymin, xmin, ymax, xmax] = region.bbox;
+                      const highlighted = evidenceIds.has(region.id);
                       return (
                         <button
-                          key={block.source_block_id}
+                          key={region.id}
                           ref={(el) => {
-                            if (el) blockRefs.current.set(block.source_block_id, el);
-                            else blockRefs.current.delete(block.source_block_id);
+                            if (el) blockRefs.current.set(region.id, el);
+                            else blockRefs.current.delete(region.id);
                           }}
                           type="button"
                           className={`bbox-highlight ${highlighted ? 'highlighted' : ''}`}
                           style={{
-                            left: `${(x0 / page.width) * 100}%`,
-                            top: `${(y0 / page.height) * 100}%`,
-                            width: `${((x1 - x0) / page.width) * 100}%`,
-                            height: `${((y1 - y0) / page.height) * 100}%`,
+                            left: `${xmin * 100}%`,
+                            top: `${ymin * 100}%`,
+                            width: `${(xmax - xmin) * 100}%`,
+                            height: `${(ymax - ymin) * 100}%`,
                           }}
-                          title={`${block.block_type}: ${block.text.slice(0, 180)}`}
-                          onClick={() => selectEvidenceOwner(block.source_block_id)}
+                          title={`${region.role}: ${(region.extractedText || region.text).slice(0, 180)}`}
+                          onClick={() => selectEvidenceOwner(region.id)}
                         />
                       );
                     })}
@@ -703,25 +722,31 @@ function App() {
                 </article>
               ))}
             </div>
-          ) : blocks.length ? (
+          ) : semanticUnits.length ? (
             <div className="block-list">
-              {blocks.map((block) => (
-                <div
-                  key={block.source_block_id}
-                  ref={(el) => {
-                    if (el) blockRefs.current.set(block.source_block_id, el);
-                    else blockRefs.current.delete(block.source_block_id);
-                  }}
-                  className={`content-block ${evidenceIds.has(block.source_block_id) ? 'highlighted' : ''}`}
-                  onClick={() => selectEvidenceOwner(block.source_block_id)}
-                >
-                  <header>
-                    <span className="role-tag">{block.block_type}</span>
-                    <span>p.{block.page}{block.section ? ` · ${block.section}` : ''}</span>
-                  </header>
-                  <p>{block.text}</p>
-                </div>
-              ))}
+              {semanticUnits.map((unit) => {
+                const firstEvidenceId = unit.evidence.length ? evidenceKey(unit.semantic_unit_id, 0) : '';
+                const highlighted = unit.evidence.some((_, index) =>
+                  evidenceIds.has(evidenceKey(unit.semantic_unit_id, index)),
+                );
+	                return (
+	                  <div
+	                    key={unit.semantic_unit_id}
+	                    ref={(el) => {
+	                      if (el && firstEvidenceId) blockRefs.current.set(firstEvidenceId, el);
+	                      else if (firstEvidenceId) blockRefs.current.delete(firstEvidenceId);
+	                    }}
+	                    className={`content-block ${highlighted ? 'highlighted' : ''}`}
+	                    onClick={() => firstEvidenceId ? selectEvidenceOwner(firstEvidenceId) : undefined}
+	                  >
+	                    <header>
+	                      <span className="role-tag">{unit.role}</span>
+	                      <span>{unit.evidence.map((item) => `p.${item.page}`).join(', ')}</span>
+	                    </header>
+	                    <p>{unit.text}</p>
+	                  </div>
+	                );
+	              })}
             </div>
           ) : (
             <button className="upload-drop" type="button" onClick={() => fileInputRef.current?.click()}>
@@ -812,25 +837,25 @@ function App() {
                 <section className="evidence-list">
                   <h3>Semantic Units</h3>
                   <div className="evidence-chips">
-                    {selectedNode.semantic_unit_ids.map((unitId) => {
-                      const unit = unitById.get(unitId);
-                      const firstSourceBlockId = unit?.source_ranges[0]?.source_block_id;
-                      const firstBlock = firstSourceBlockId ? blockById.get(firstSourceBlockId) : null;
-                      return (
-                        <button
-                          key={unitId}
-                          type="button"
-                          className="evidence-chip"
-                          onClick={() =>
-                            firstSourceBlockId
-                              ? blockRefs.current.get(firstSourceBlockId)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-                              : undefined
-                          }
-                        >
-                          {unit
-                            ? `${unit.role}${firstBlock ? ` · p.${firstBlock.page}` : ''}`
-                            : unitId}
-                        </button>
+	                    {selectedNode.semantic_unit_ids.map((unitId) => {
+	                      const unit = unitById.get(unitId);
+	                      const firstEvidenceId = unit?.evidence.length ? evidenceKey(unitId, 0) : '';
+	                      const firstPage = unit?.evidence[0]?.page;
+	                      return (
+	                        <button
+	                          key={unitId}
+	                          type="button"
+	                          className="evidence-chip"
+	                          onClick={() =>
+	                            firstEvidenceId
+	                              ? blockRefs.current.get(firstEvidenceId)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+	                              : undefined
+	                          }
+	                        >
+	                          {unit
+	                            ? `${unit.role}${firstPage ? ` · p.${firstPage}` : ''}`
+	                            : unitId}
+	                        </button>
                       );
                     })}
                   </div>

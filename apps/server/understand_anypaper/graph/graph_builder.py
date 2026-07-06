@@ -2,7 +2,7 @@ from collections import defaultdict
 from uuid import uuid4
 
 from understand_anypaper.graph.schema import EdgeType, GraphEdge, GraphNode, NodeType, PaperArgumentGraph
-from understand_anypaper.parser.models import ParsedPaper, SemanticUnit, SourceBlock
+from understand_anypaper.parser.models import ParsedPaper, SemanticUnit
 
 
 class GraphBuildError(RuntimeError):
@@ -12,15 +12,14 @@ class GraphBuildError(RuntimeError):
 class PaperArgumentGraphBuilder:
     """Builds a PAG from LLM-sliced semantic units.
 
-    The parser only provides source blocks for location and citation extraction.
-    Semantic roles belong to SemanticUnit objects produced by the LLM analyzer.
+    Semantic roles and page/bbox evidence belong to SemanticUnit objects produced
+    by the LLM analyzer.
     """
 
     def build(self, parsed: ParsedPaper) -> PaperArgumentGraph:
         semantic_units = self._semantic_units(parsed)
         parsed.semantic_units = semantic_units
 
-        source_blocks = {block.source_block_id: block for block in parsed.source_blocks}
         paper_node = GraphNode(
             id=f"paper-{parsed.paper_id}",
             paper_id=parsed.paper_id,
@@ -30,7 +29,7 @@ class PaperArgumentGraphBuilder:
             confidence=1.0,
             source_type="uploaded_document",
             semantic_unit_ids=[unit.semantic_unit_id for unit in semantic_units[:3]],
-            page_ranges=self._page_ranges_for_units(semantic_units[:3], source_blocks),
+            page_ranges=self._page_ranges_for_units(semantic_units[:3]),
             created_by="pdf-parser",
             verified=False,
         )
@@ -46,19 +45,15 @@ class PaperArgumentGraphBuilder:
 
         contribution_ids: dict[str, str] = {}
         facet_ids: dict[str, dict[str, str]] = {}
-        source_block_assignments: dict[str, set[str]] = defaultdict(set)
         for index, unit in enumerate(contributions, start=1):
             contribution_id = f"contribution-{parsed.paper_id[:8]}-{index}"
             contribution_ids[unit.semantic_unit_id] = contribution_id
             facet_ids[contribution_id] = {}
-            for source_block_id in self._unit_source_block_ids(unit):
-                source_block_assignments[source_block_id].add(contribution_id)
             graph.nodes.append(
                 self._node_from_unit(
                     unit,
                     contribution_id,
                     NodeType.CONTRIBUTION,
-                    source_blocks,
                     source_type="llm_extracted",
                     created_by="llm-contribution-agent",
                 )
@@ -88,7 +83,7 @@ class PaperArgumentGraphBuilder:
                         confidence=unit.confidence,
                         source_type="system_inferred",
                         semantic_unit_ids=[unit.semantic_unit_id],
-                        page_ranges=self._page_ranges_for_units([unit], source_blocks),
+                        page_ranges=self._page_ranges_for_units([unit]),
                         properties={"argument_facet": facet, "parent_contribution_id": contribution_id},
                         created_by="pag-builder",
                     )
@@ -115,15 +110,12 @@ class PaperArgumentGraphBuilder:
                     unit,
                     node_id,
                     self._node_type_for_role(unit.role),
-                    source_blocks,
                     source_type="semantic_unit",
                     created_by=unit.created_by,
                 )
             )
             facet = self._facet_for_role(unit.role)
             for contribution_id in self._target_contributions(unit, contribution_ids):
-                for source_block_id in self._unit_source_block_ids(unit):
-                    source_block_assignments[source_block_id].add(contribution_id)
                 facet_id = facet_ids[contribution_id][facet]
                 graph.edges.append(
                     GraphEdge(
@@ -139,7 +131,6 @@ class PaperArgumentGraphBuilder:
                     )
                 )
 
-        self._attach_references(graph, parsed, semantic_units, source_block_assignments, facet_ids)
         return graph
 
     def _semantic_units(self, parsed: ParsedPaper) -> list[SemanticUnit]:
@@ -152,7 +143,6 @@ class PaperArgumentGraphBuilder:
         unit: SemanticUnit,
         node_id: str,
         node_type: NodeType,
-        source_blocks: dict[str, SourceBlock],
         source_type: str,
         created_by: str,
     ) -> GraphNode:
@@ -165,10 +155,10 @@ class PaperArgumentGraphBuilder:
             confidence=unit.confidence,
             source_type=source_type,
             semantic_unit_ids=[unit.semantic_unit_id],
-            page_ranges=self._page_ranges_for_units([unit], source_blocks),
+            page_ranges=self._page_ranges_for_units([unit]),
             properties={
                 "semantic_role": unit.role,
-                "source_ranges": [source_range.model_dump() for source_range in unit.source_ranges],
+                "evidence": [evidence.model_dump() for evidence in unit.evidence],
                 **unit.properties,
             },
             created_by=created_by,
@@ -199,14 +189,12 @@ class PaperArgumentGraphBuilder:
         self,
         graph: PaperArgumentGraph,
         semantic_units: list[SemanticUnit],
-        source_blocks: dict[str, SourceBlock],
     ) -> None:
-        order_by_block = {block_id: block.order for block_id, block in source_blocks.items()}
         ordered_units = sorted(
             semantic_units,
             key=lambda unit: min(
-                (order_by_block.get(source_range.source_block_id, 10**9) for source_range in unit.source_ranges),
-                default=10**9,
+                ((evidence.page, evidence.bbox[0], evidence.bbox[1]) for evidence in unit.evidence),
+                default=(10**9, 1.0, 1.0),
             ),
         )
         node_ids = {node.id for node in graph.nodes}
@@ -238,93 +226,14 @@ class PaperArgumentGraphBuilder:
                 return node.id
         return None
 
-    def _attach_references(
-        self,
-        graph: PaperArgumentGraph,
-        parsed: ParsedPaper,
-        semantic_units: list[SemanticUnit],
-        source_block_assignments: dict[str, set[str]],
-        facet_ids: dict[str, dict[str, str]],
-    ) -> None:
-        unit_ids_by_source_block: dict[str, list[str]] = defaultdict(list)
-        for unit in semantic_units:
-            for source_block_id in self._unit_source_block_ids(unit):
-                unit_ids_by_source_block[source_block_id].append(unit.semantic_unit_id)
-
-        mentions_by_reference: dict[str, list] = defaultdict(list)
-        for mention in parsed.mentions:
-            mentions_by_reference[mention.reference_id].append(mention)
-
-        for reference in parsed.references:
-            mentions = mentions_by_reference.get(reference.reference_id, [])
-            linked_contributions = sorted({
-                contribution_id
-                for mention in mentions
-                for contribution_id in source_block_assignments.get(mention.source_block_id, set())
-            })
-            if not linked_contributions:
-                continue
-
-            semantic_unit_ids = sorted({
-                unit_id
-                for mention in mentions
-                for unit_id in unit_ids_by_source_block.get(mention.source_block_id, [])
-            })
-            node = GraphNode(
-                id=reference.reference_id,
-                paper_id=parsed.paper_id,
-                node_type=NodeType.REFERENCE,
-                title=reference.title or reference.raw_text[:80],
-                summary=reference.raw_text,
-                confidence=0.8,
-                source_type="reference_entry",
-                semantic_unit_ids=semantic_unit_ids,
-                properties={
-                    "marker": reference.marker,
-                    "authors": reference.authors,
-                    "year": reference.year,
-                    "doi": reference.doi,
-                    "arxiv_id": reference.arxiv_id,
-                },
-                created_by="reference-extractor",
-            )
-            graph.nodes.append(node)
-
-            linked: set[tuple[str, str]] = set()
-            for mention in mentions:
-                for contribution_id in source_block_assignments.get(mention.source_block_id, set()):
-                    edge_type = self._edge_type_for_intent(mention.intent)
-                    if (contribution_id, edge_type) in linked:
-                        continue
-                    linked.add((contribution_id, edge_type))
-                    graph.edges.append(
-                        GraphEdge(
-                            id=f"edge-{uuid4()}",
-                            paper_id=parsed.paper_id,
-                            source_node_id=facet_ids[contribution_id][self._facet_for_intent(mention.intent)],
-                            target_node_id=reference.reference_id,
-                            edge_type=edge_type,
-                            confidence=mention.confidence,
-                            semantic_unit_ids=unit_ids_by_source_block.get(mention.source_block_id, []),
-                            inference_type="citation_mention",
-                            properties={"intent": mention.intent, "source_block_id": mention.source_block_id},
-                        )
-                    )
-
-    @staticmethod
-    def _unit_source_block_ids(unit: SemanticUnit) -> set[str]:
-        return {source_range.source_block_id for source_range in unit.source_ranges}
-
     @staticmethod
     def _page_ranges_for_units(
         units: list[SemanticUnit],
-        source_blocks: dict[str, SourceBlock],
     ) -> list[tuple[int, int]]:
         pages = sorted({
-            source_blocks[source_range.source_block_id].page
+            evidence.page
             for unit in units
-            for source_range in unit.source_ranges
-            if source_range.source_block_id in source_blocks
+            for evidence in unit.evidence
         })
         return [(page, page) for page in pages]
 

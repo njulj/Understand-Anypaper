@@ -5,13 +5,11 @@ from uuid import uuid4
 
 import fitz  # PyMuPDF
 
-from understand_anypaper.analyzers.citation_intent_classifier import CitationIntentClassifier
-from understand_anypaper.parser.models import CitationMention, PaperReference, ParsedPaper, SourceBlock
+from understand_anypaper.parser.models import DocumentPage, PaperReference, ParsedPaper
 
 _REFERENCE_SECTION = re.compile(r"^\s*(references|bibliography)\s*$", re.IGNORECASE)
 _NUMERIC_CITATION = re.compile(r"\[(\d+(?:\s*[,;\-–]\s*\d+)*)\]")
 _REF_MARKER = re.compile(r"^\s*\[(\d+)\]\s*")
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z\[])")
 _CAPTION = re.compile(r"^(figure|fig\.|table)\s*\d+", re.IGNORECASE)
 _YEAR = re.compile(r"\b(19|20)\d{2}\b")
 _DOI = re.compile(r"\b10\.\d{4,9}/[^\s,;]+", re.IGNORECASE)
@@ -20,15 +18,11 @@ _MATH_CHARS = set("=+−-*/^_∑∏∫√∂∇≈≠≤≥∈∀∃αβγδεζ
 
 
 class PdfParser:
-    """Parses PDF (via PyMuPDF) and text/markdown papers into traceable source blocks.
+    """Parses papers into page images plus lightweight metadata.
 
-    Produces per-block page numbers and bounding boxes, extracted reference
-    entries, and inline citation mentions. Semantic slicing is intentionally
-    delegated to the LLM analyzer.
+    For PDFs the LLM receives rendered page images and returns page/bbox evidence.
+    PyMuPDF text extraction remains only for metadata and post-LLM bbox text clips.
     """
-
-    def __init__(self) -> None:
-        self._intents = CitationIntentClassifier()
 
     def parse(self, path: Path) -> ParsedPaper:
         if path.suffix.lower() == ".pdf":
@@ -40,19 +34,19 @@ class PdfParser:
     def _parse_pdf(self, path: Path) -> ParsedPaper:
         paper_id = str(uuid4())
         prefix = paper_id[:8]
+        source_bytes = path.read_bytes()
         doc = fitz.open(path)
         try:
             raw_blocks = self._extract_raw_blocks(doc)
             title = self._detect_title(doc, raw_blocks)
+            pages = self._render_pages(doc)
         finally:
             doc.close()
 
         body_size = self._body_font_size(raw_blocks)
-        blocks: list[SourceBlock] = []
         reference_lines: list[str] = []
-        section: str | None = None
         in_references = False
-        order = 0
+        body_texts: list[str] = []
 
         for raw in raw_blocks:
             text = raw["text"].strip()
@@ -60,39 +54,42 @@ class PdfParser:
                 continue
             is_heading = self._is_heading(raw, body_size)
             if is_heading:
-                section = text
                 in_references = bool(_REFERENCE_SECTION.match(text))
                 continue
             if in_references:
                 reference_lines.append(text)
                 continue
-            block_type = self._block_type(text, raw, body_size)
-            order += 1
-            flat_text = re.sub(r"\s+", " ", text)
-            blocks.append(
-                SourceBlock(
-                    source_block_id=f"text-{prefix}-page{raw['page']}-block{order}",
-                    order=order,
-                    page=raw["page"],
-                    section=section,
-                    bbox=list(raw["bbox"]),
-                    text=flat_text,
-                    block_type=block_type,
-                )
-            )
+            body_texts.append(re.sub(r"\s+", " ", text))
 
-        abstract = self._detect_abstract(blocks)
+        abstract = self._detect_abstract(body_texts)
         references = self._parse_reference_entries(reference_lines, prefix)
-        mentions = self._extract_mentions(blocks, references, prefix)
-        self._link_neighbors(blocks)
         return ParsedPaper(
             paper_id=paper_id,
             title=title or path.stem,
             abstract=abstract,
-            source_blocks=blocks,
+            pages=pages,
             references=references,
-            mentions=mentions,
+            source_bytes=source_bytes,
+            source_media_type="application/pdf",
         )
+
+    @staticmethod
+    def _render_pages(doc: fitz.Document, scale: float = 1.6) -> list[DocumentPage]:
+        pages: list[DocumentPage] = []
+        matrix = fitz.Matrix(scale, scale)
+        for index, page in enumerate(doc, start=1):
+            pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+            pages.append(
+                DocumentPage(
+                    page=index,
+                    width=page.rect.width,
+                    height=page.rect.height,
+                    image_width=pixmap.width,
+                    image_height=pixmap.height,
+                    image_data=pixmap.tobytes("png"),
+                )
+            )
+        return pages
 
     @staticmethod
     def _extract_raw_blocks(doc: fitz.Document) -> list[dict]:
@@ -195,15 +192,11 @@ class PdfParser:
         return "paragraph"
 
     @staticmethod
-    def _detect_abstract(blocks: list[SourceBlock]) -> str:
-        for block in blocks:
-            section = (block.section or "").lower()
-            text = block.text
-            if section.startswith("abstract"):
-                return text[:2000]
+    def _detect_abstract(texts: list[str]) -> str:
+        for text in texts:
             if text.lower().startswith("abstract"):
                 return text[len("abstract"):].lstrip(" .:—-")[:2000]
-        return blocks[0].text[:1000] if blocks else ""
+        return texts[0][:1000] if texts else ""
 
     # ----------------------------------------------------------- text / md
 
@@ -213,49 +206,37 @@ class PdfParser:
         text = path.read_text(errors="ignore")
         paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()] or [path.name]
 
-        blocks: list[SourceBlock] = []
+        body_paragraphs: list[str] = []
         reference_lines: list[str] = []
-        section: str | None = None
         in_references = False
         title = path.stem
-        order = 0
 
         for paragraph in paragraphs:
             heading = re.match(r"^#{1,6}\s+(.+)$", paragraph)
             if heading:
-                section = heading.group(1).strip()
-                in_references = bool(_REFERENCE_SECTION.match(section))
+                heading_text = heading.group(1).strip()
+                in_references = bool(_REFERENCE_SECTION.match(heading_text))
                 if title == path.stem and paragraph.startswith("# "):
-                    title = section
+                    title = heading_text
                 continue
             if _REFERENCE_SECTION.match(paragraph):
                 in_references = True
-                section = paragraph.strip()
                 continue
             if in_references:
                 reference_lines.extend(line for line in paragraph.splitlines() if line.strip())
                 continue
-            order += 1
-            blocks.append(
-                SourceBlock(
-                    source_block_id=f"text-{prefix}-page1-block{order}",
-                    order=order,
-                    page=1,
-                    section=section,
-                    text=paragraph,
-                )
-            )
+            body_paragraphs.append(paragraph)
 
         references = self._parse_reference_entries(reference_lines, prefix)
-        mentions = self._extract_mentions(blocks, references, prefix)
-        self._link_neighbors(blocks)
         return ParsedPaper(
             paper_id=paper_id,
             title=title,
-            abstract=blocks[0].text[:1000] if blocks else "",
-            source_blocks=blocks,
+            abstract=body_paragraphs[0][:1000] if body_paragraphs else "",
+            pages=[DocumentPage(page=1, width=1, height=1)],
             references=references,
-            mentions=mentions,
+            metadata={"plain_text": "\n\n".join(body_paragraphs)},
+            source_bytes=text.encode(),
+            source_media_type="text/plain",
         )
 
     # ----------------------------------------------------------- references
@@ -312,32 +293,6 @@ class PdfParser:
             arxiv_id=arxiv_match.group(1) if arxiv_match else None,
         )
 
-    def _extract_mentions(
-        self, blocks: list[SourceBlock], references: list[PaperReference], prefix: str
-    ) -> list[CitationMention]:
-        by_marker = {ref.marker: ref for ref in references if ref.marker}
-        mentions: list[CitationMention] = []
-        for block in blocks:
-            for match in _NUMERIC_CITATION.finditer(block.text):
-                sentence = self._containing_sentence(block.text, match.start())
-                for number in self._expand_numbers(match.group(1)):
-                    reference = by_marker.get(f"[{number}]")
-                    if reference is None:
-                        continue
-                    if reference.marker not in block.citations:
-                        block.citations.append(reference.marker or f"[{number}]")
-                    mentions.append(
-                        CitationMention(
-                            mention_id=f"mention-{prefix}-{len(mentions) + 1}",
-                            reference_id=reference.reference_id,
-                            source_block_id=block.source_block_id,
-                            sentence=sentence,
-                            intent=str(self._intents.classify(sentence)),
-                            confidence=0.6,
-                        )
-                    )
-        return mentions
-
     @staticmethod
     def _expand_numbers(group: str) -> list[int]:
         numbers: list[int] = []
@@ -351,22 +306,3 @@ class PdfParser:
             elif part.isdigit():
                 numbers.append(int(part))
         return numbers
-
-    @staticmethod
-    def _containing_sentence(text: str, position: int) -> str:
-        sentences = _SENTENCE_SPLIT.split(text)
-        offset = 0
-        for sentence in sentences:
-            end = offset + len(sentence) + 1
-            if position < end:
-                return sentence.strip()
-            offset = end
-        return text[:300]
-
-    @staticmethod
-    def _link_neighbors(blocks: list[SourceBlock]) -> None:
-        for i, block in enumerate(blocks):
-            if i > 0:
-                block.neighbor_ids.append(blocks[i - 1].source_block_id)
-            if i + 1 < len(blocks):
-                block.neighbor_ids.append(blocks[i + 1].source_block_id)

@@ -27,8 +27,8 @@ docker-compose.yml
 
 1. 前端或调用方上传论文到 `POST /api/papers`。
 2. `apps/server/understand_anypaper/api/routes.py` 把上传文件写到临时文件。
-3. `PdfParser` 产出 `ParsedPaper` 和一组只负责原文定位的 `SourceBlock`。
-4. `LLMAnalyzer` 基于 `SourceBlock` 切分一组 `SemanticUnit`，每个 unit 只有一个 semantic role，并记录自己来自哪些 source ranges。
+3. `PdfParser` 产出 `ParsedPaper`，对 PDF 渲染页面图片，并保留原始 PDF bytes 供后续 bbox 文本提取。
+4. `SemanticUnitSlicer` 把页面图片发给多模态 LLM，切分一组 `SemanticUnit`，每个 unit 只有一个 semantic role，并记录 `page + bbox` 形式的 evidence。bbox 采用归一化 `[ymin, xmin, ymax, xmax]`。
 5. `PaperArgumentGraphBuilder` 从 contribution `SemanticUnit` 出发构建 `PaperArgumentGraph`，节点和边统一引用 `semantic_unit_ids` 作为证据。
 6. 图通过 `GraphStore` 保存；数据库可用时写入 PostgreSQL，否则回退到进程内内存 store。
 
@@ -46,7 +46,7 @@ docker-compose.yml
 
 - `Dockerfile`：构建 FastAPI 服务镜像，安装 Python 包并启动 uvicorn。
 - `pyproject.toml`：Python 项目元数据、依赖、dev 依赖和 ruff 配置。
-- `sql/schema.sql`：PostgreSQL/pgvector schema。核心表包括 `papers`、`nodes`、`edges`、`source_blocks`、`semantic_units`、`paper_references`、`citation_mentions`、`analysis_tasks`、`graph_patches`。
+- `sql/schema.sql`：PostgreSQL/pgvector schema。核心表包括 `papers`、`nodes`、`edges`、`semantic_units`、`paper_references`、`analysis_tasks`、`graph_patches`。
 - `tests/test_graph_builder.py`：覆盖当前 PAG builder 的核心行为：能创建 contribution 节点，并保证节点/边带 evidence。
 
 ### 后端包：`apps/server/understand_anypaper`
@@ -54,8 +54,8 @@ docker-compose.yml
 - `main.py`：FastAPI 应用入口，配置 CORS、挂载 API router，并提供 `/health`。
 - `config.py`：`pydantic-settings` 配置入口。默认值包括数据库 URL、递归深度/数量限制和 `codex_cli`。
 - `api/routes.py`：当前所有 REST API。注意图数据暂存在模块级 `_PAPERS` 内存字典中，重启会丢失。
-- `parser/models.py`：解析和语义切分数据模型。`SourceBlock` 表示 PDF/text parser 的原文定位块，`SemanticUnit` 表示 LLM 切出的论证语义单元，`ParsedPaper` 表示解析后的论文。
-- `parser/pdf_parser.py`：parser facade。对 `.txt`/`.md` 读文本并按段落生成 `SourceBlock`；对 PDF 用 PyMuPDF 提取页面、bbox、段落/公式/图表 caption 和引用。它不再分配 semantic role。
+- `parser/models.py`：解析和语义切分数据模型。`DocumentPage` 表示渲染后的页面图片元数据，`PageEvidence` 表示 semantic unit 的 `page + bbox + extracted_text`，`SemanticUnit` 表示 LLM 切出的论证语义单元。
+- `parser/pdf_parser.py`：parser facade。对 PDF 用 PyMuPDF 渲染页面图片，并提取 title/abstract/reference 元数据；semantic role 和 evidence bbox 由多模态 LLM 负责。`.txt`/`.md` 仍作为文本 fallback。
 - `graph/schema.py`：Paper Argument Graph 的 Pydantic 模型和枚举，包括 `NodeType`、`EdgeType`、`GraphNode`、`GraphEdge`、`PaperArgumentGraph`。节点和边通过 `semantic_unit_ids` 溯源。
 - `graph/graph_builder.py`：从 `ParsedPaper.semantic_units` 构建 PAG。当前策略是找 `role == "contribution"` 的 semantic units 生成 contribution 节点，再把其他 semantic units 按 role 连接到最近或显式指定的 contribution。
 - `graph/graph_validator.py`：贡献完整度评分，检查每个 contribution 是否有 motivation/gap、method/module、equation、experiment/result、reference 类型邻居。

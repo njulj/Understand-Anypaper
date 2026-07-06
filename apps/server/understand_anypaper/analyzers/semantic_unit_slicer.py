@@ -1,12 +1,17 @@
+import base64
+import json
 import logging
+import re
 from typing import Literal
 from uuid import uuid4
 
+import fitz
+import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from understand_anypaper.analyzers.structured_agent import StructuredAgent, StructuredAgentError
 from understand_anypaper.config import Settings, settings
-from understand_anypaper.parser.models import ParsedPaper, SemanticUnit, SourceBlock, SourceRange
+from understand_anypaper.parser.models import PageEvidence, ParsedPaper, SemanticUnit
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +31,15 @@ SemanticRole = Literal[
 ]
 
 
-class SemanticUnitSourceQuote(BaseModel):
+class SemanticUnitEvidenceOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    source_block_id: str = Field(description="ID of the source block containing this evidence.")
-    quote: str = Field(description="Exact copied text span from that source block.")
+    page: int = Field(ge=1, description="1-indexed page number.")
+    bbox: list[float] = Field(
+        min_length=4,
+        max_length=4,
+        description="Normalized [ymin, xmin, ymax, xmax] coordinates on the page image.",
+    )
 
 
 class SemanticUnitOutput(BaseModel):
@@ -39,9 +48,9 @@ class SemanticUnitOutput(BaseModel):
     role: SemanticRole
     title: str = Field(description="Short graph-node title for this semantic unit.")
     text: str = Field(description="Concise faithful restatement of this unit.")
-    source_quotes: list[SemanticUnitSourceQuote] = Field(
+    evidence: list[SemanticUnitEvidenceOutput] = Field(
         min_length=1,
-        description="One or more copied text spans that support this unit.",
+        description="One or more page regions that visually support this semantic unit.",
     )
     confidence: float = Field(ge=0, le=1)
 
@@ -54,20 +63,27 @@ class SemanticSliceOutput(BaseModel):
 
 _SEMANTIC_UNIT_SYSTEM_PROMPT = """\
 You slice a research paper into semantic argument units for a Paper Argument Graph.
-Use only the provided source_block_id values. Each semantic unit has exactly one role.
-Split mixed paragraphs into separate units when they contain different roles, such as
-a contribution claim and a method mechanism in the same source block. Keep units large
+Use the provided page images as the primary source. Each semantic unit has exactly
+one role and must include at least one visual evidence region.
+
+Coordinate convention:
+- page numbers are 1-indexed.
+- bbox is normalized [ymin, xmin, ymax, xmax] on the rendered page image.
+- each coordinate must be between 0 and 1.
+- bbox should tightly cover the region that supports the unit: contribution text,
+  method description, equation, figure, table, experiment paragraph, result row, or
+  reference entry.
+
+Split mixed regions into separate units when they contain different roles, such as
+a contribution claim and a method mechanism in the same paragraph. Keep units large
 enough to be meaningful graph evidence, not sentence fragments.
 
 Role standards:
 - contribution: an author-claimed contribution or achieved advance. Prefer explicit
   claims from the abstract, introduction contribution list, method summary, or conclusion.
-  A contribution often states the paper's result-level novelty or value: a new framework,
-  module, algorithm, capability, benchmark result, efficiency gain, or demonstrated
-  generality. If a source block says "the main contributions are", "our contributions",
-  or similar, classify each following contribution-list bullet as contribution even when
-  it describes a method component or experimental finding. Do not label every
-  implementation detail as a contribution outside such author-claimed contexts.
+  If a page says "the main contributions are", "our contributions", or similar,
+  classify each following contribution-list bullet as contribution even when it
+  describes a method component or experimental finding.
 - method: how the work implements a contribution: architecture, module design, training
   procedure, algorithmic step, indexing strategy, inference pipeline, or mechanism.
 - motivation: why the work matters; demand, deployment pressure, practical need, or
@@ -79,14 +95,12 @@ Role standards:
 - conclusion: final summary, implication, or takeaway claimed by the authors.
 - background: established context or prior-work description that is not itself a gap.
 - equation: mathematical definition, formula, loss, objective, or derivation.
-- figure: a figure caption or prose whose primary purpose is to explain a figure.
-- table: a table caption or prose whose primary purpose is to explain a table.
+- figure: a figure region, figure caption, or prose whose primary purpose is to explain a figure.
+- table: a table region, table caption, or prose whose primary purpose is to explain a table.
 - reference: bibliography entries or citation-centered content about another work.
 
-Return a JSON object with a semantic_units array. Each item must contain role, title, text,
-source_quotes, and confidence. Each source_quotes item must contain source_block_id and quote.
-For source_quotes, copy short exact spans from the provided source block text. Do not invent
-character offsets; the server will match quoted spans back to start_char/end_char.
+Return a JSON object with a semantic_units array. Each item must contain role, title,
+text, evidence, and confidence. Do not invent content that is not visible in the page images.
 """
 
 _CONTRIBUTION_REQUIRED_RETRY_PROMPT = """\
@@ -94,13 +108,11 @@ Your previous semantic slicing did not include any contribution role. Re-slice t
 paper and include at least one contribution unit when the paper contains author-claimed
 contribution evidence, especially explicit contribution lists introduced by phrases such
 as "the main contributions are", "our contributions", "we propose", or "we introduce".
-The bullets following an explicit contribution-list header should be contribution units,
-not only method or result units.
 """
 
 
 class SemanticUnitSlicer:
-    """Agent-backed semantic unit slicer."""
+    """Image-backed semantic unit slicer."""
 
     def __init__(
         self,
@@ -120,82 +132,151 @@ class SemanticUnitSlicer:
         return self._agent_injected or bool(self._config.openai_api_key)
 
     def slice_semantic_units(self, parsed: ParsedPaper) -> list[SemanticUnit] | None:
-        if not self.available or not parsed.source_blocks:
+        if not self.available or not parsed.pages:
             return None
 
-        prompt = self._prompt(parsed)
         try:
-            output = self._agent.run(
-                prompt,
-                SemanticSliceOutput,
-                prompt_cache_key=f"semantic-slice:{parsed.paper_id}",
-            )
+            output = self._run(parsed)
         except StructuredAgentError as exc:
             logger.warning("LLM semantic slicing failed: %s", exc)
             return None
 
         if not self._has_contribution(output):
-            output = self._retry_with_required_contribution(parsed, prompt)
-            if output is None:
+            logger.error("LLM semantic slicing returned no contribution units; retrying once")
+            try:
+                output = self._run(parsed, _CONTRIBUTION_REQUIRED_RETRY_PROMPT)
+            except StructuredAgentError as exc:
+                logger.warning("LLM semantic slicing failed: %s", exc)
+                return None
+            if not self._has_contribution(output):
                 return None
 
         return self._semantic_units_from_output(parsed, output)
 
-    def _retry_with_required_contribution(
-        self,
-        parsed: ParsedPaper,
-        prompt: str,
-    ) -> SemanticSliceOutput | None:
-        logger.error("LLM semantic slicing returned no contribution units; retrying once")
-        retry_agent = StructuredAgent(
-            name="SemanticUnitSlicer",
-            instructions=f"{_SEMANTIC_UNIT_SYSTEM_PROMPT}\n\n{_CONTRIBUTION_REQUIRED_RETRY_PROMPT}",
-            config=self._config,
-        )
-        try:
-            output = retry_agent.run(
-                prompt,
+    def _run(self, parsed: ParsedPaper, retry_instruction: str = "") -> SemanticSliceOutput:
+        if self._agent_injected:
+            return self._agent.run(
+                self._text_prompt(parsed, retry_instruction),
                 SemanticSliceOutput,
-                prompt_cache_key=f"semantic-slice-retry:{parsed.paper_id}",
+                prompt_cache_key=f"semantic-slice:{parsed.paper_id}:{bool(retry_instruction)}",
             )
-        except StructuredAgentError as exc:
-            logger.warning("LLM semantic slicing failed: %s", exc)
-            return None
-        return output if self._has_contribution(output) else None
+        if any(page.image_data for page in parsed.pages):
+            return self._run_multimodal(parsed, retry_instruction)
+        try:
+            return self._agent.run(
+                self._text_prompt(parsed, retry_instruction),
+                SemanticSliceOutput,
+                prompt_cache_key=f"semantic-slice:{parsed.paper_id}:{bool(retry_instruction)}",
+            )
+        except StructuredAgentError:
+            raise
+
+    def _run_multimodal(self, parsed: ParsedPaper, retry_instruction: str = "") -> SemanticSliceOutput:
+        content: list[dict] = [{"type": "text", "text": self._text_prompt(parsed, retry_instruction)}]
+        for page in parsed.pages:
+            if not page.image_data:
+                continue
+            encoded = base64.b64encode(page.image_data).decode("ascii")
+            content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"PAGE {page.page}: PDF size={page.width:.1f}x{page.height:.1f}; "
+                        f"image size={page.image_width}x{page.image_height}."
+                    ),
+                }
+            )
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{page.image_mime_type};base64,{encoded}"},
+                }
+            )
+
+        payload = {
+            "model": self._config.openai_model,
+            "messages": [
+                {"role": "system", "content": _SEMANTIC_UNIT_SYSTEM_PROMPT},
+                {"role": "user", "content": content},
+            ],
+            "temperature": 0,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "SemanticSliceOutput",
+                    "strict": True,
+                    "schema": SemanticSliceOutput.model_json_schema(),
+                },
+            },
+        }
+        url = f"{self._config.openai_base_url.rstrip('/')}/chat/completions"
+        try:
+            with httpx.Client(timeout=180) as client:
+                response = client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {self._config.openai_api_key}"},
+                    json=payload,
+                )
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise StructuredAgentError(f"OpenAI multimodal request failed: {exc}") from exc
+
+        try:
+            message = response.json()["choices"][0]["message"]["content"]
+            data = json.loads(message if isinstance(message, str) else message[0]["text"])
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+            raise StructuredAgentError("OpenAI multimodal response did not contain valid JSON") from exc
+        validated = self._validated_output(data)
+        if validated is None:
+            raise StructuredAgentError("OpenAI multimodal response did not match semantic slice schema")
+        return validated
 
     @staticmethod
-    def _prompt(parsed: ParsedPaper) -> str:
-        blocks = "\n\n".join(
-            f"[{block.source_block_id}] page={block.page} section={block.section or 'none'} "
-            f"type={block.block_type}\n{block.text[:1600]}"
-            for block in parsed.source_blocks[:120]
+    def _text_prompt(parsed: ParsedPaper, retry_instruction: str = "") -> str:
+        page_summaries = "\n".join(
+            f"- page {page.page}: pdf={page.width:.1f}x{page.height:.1f}, "
+            f"image={page.image_width or 'none'}x{page.image_height or 'none'}"
+            for page in parsed.pages
         )
-        return f"Title: {parsed.title}\nAbstract: {parsed.abstract[:1600]}\n\nSource blocks:\n{blocks}"
+        plain_text = parsed.metadata.get("plain_text")
+        text_context = f"\n\nPlain text source:\n{plain_text[:20000]}" if isinstance(plain_text, str) else ""
+        retry = f"\n\n{retry_instruction}" if retry_instruction else ""
+        return (
+            f"Title: {parsed.title}\n"
+            f"Abstract: {parsed.abstract[:1600]}\n\n"
+            f"Pages:\n{page_summaries}"
+            f"{text_context}"
+            f"{retry}"
+        )
 
     def _semantic_units_from_output(
         self,
         parsed: ParsedPaper,
         output: SemanticSliceOutput,
     ) -> list[SemanticUnit] | None:
-        known_blocks = {block.source_block_id: block for block in parsed.source_blocks}
         units: list[SemanticUnit] = []
         prefix = parsed.paper_id[:8]
-        for index, item in enumerate(output.semantic_units, start=1):
-            ranges = self._clean_source_quotes(item.source_quotes, known_blocks)
-            if not ranges:
-                continue
-            units.append(
-                SemanticUnit(
-                    semantic_unit_id=f"unit-{prefix}-{index}-{uuid4().hex[:8]}",
-                    paper_id=parsed.paper_id,
-                    role=item.role,
-                    title=item.title.strip()[:160] or item.role.title(),
-                    text=item.text.strip(),
-                    source_ranges=ranges,
-                    confidence=max(0.0, min(item.confidence, 1.0)),
-                    created_by="semantic-unit-slicer-agent",
+        doc = self._open_pdf(parsed)
+        try:
+            for index, item in enumerate(output.semantic_units, start=1):
+                evidence = self._clean_evidence(parsed, item.evidence, doc)
+                if not evidence:
+                    continue
+                units.append(
+                    SemanticUnit(
+                        semantic_unit_id=f"unit-{prefix}-{index}-{uuid4().hex[:8]}",
+                        paper_id=parsed.paper_id,
+                        role=item.role,
+                        title=item.title.strip()[:160] or item.role.title(),
+                        text=item.text.strip(),
+                        evidence=evidence,
+                        confidence=max(0.0, min(item.confidence, 1.0)),
+                        created_by="semantic-unit-slicer-agent",
+                    )
                 )
-            )
+        finally:
+            if doc is not None:
+                doc.close()
         return units or None
 
     @staticmethod
@@ -213,72 +294,69 @@ class SemanticUnitSlicer:
         return any(unit.role == "contribution" for unit in output.semantic_units)
 
     @staticmethod
-    def _clean_source_quotes(
-        source_quotes: list[SemanticUnitSourceQuote],
-        known_blocks: dict[str, SourceBlock],
-    ) -> list[SourceRange]:
-        ranges: list[SourceRange] = []
-        seen: set[tuple[str, int | None, int | None]] = set()
-        for source_quote in source_quotes:
-            block = known_blocks.get(source_quote.source_block_id)
-            if block is None:
+    def _open_pdf(parsed: ParsedPaper) -> fitz.Document | None:
+        if parsed.source_media_type != "application/pdf" or not parsed.source_bytes:
+            return None
+        return fitz.open(stream=parsed.source_bytes, filetype="pdf")
+
+    def _clean_evidence(
+        self,
+        parsed: ParsedPaper,
+        evidence_items: list[SemanticUnitEvidenceOutput],
+        doc: fitz.Document | None,
+    ) -> list[PageEvidence]:
+        valid_pages = {page.page: page for page in parsed.pages}
+        evidence: list[PageEvidence] = []
+        seen: set[tuple[int, tuple[float, float, float, float]]] = set()
+        for item in evidence_items:
+            if item.page not in valid_pages:
                 continue
-            start, end = SemanticUnitSlicer._find_quote_span(block.text, source_quote.quote)
-            key = (source_quote.source_block_id, start, end)
+            bbox = self._normalize_bbox(item.bbox)
+            if bbox is None:
+                continue
+            key = (item.page, tuple(bbox))
             if key in seen:
                 continue
             seen.add(key)
-            ranges.append(
-                SourceRange(
-                    source_block_id=source_quote.source_block_id,
-                    start_char=start,
-                    end_char=end,
+            extracted_text = self._extract_text(parsed, item.page, bbox, doc)
+            evidence.append(
+                PageEvidence(
+                    page=item.page,
+                    bbox=bbox,
+                    extracted_text=extracted_text,
+                    extraction_method="pymupdf_clip" if doc is not None else "plain_text",
                 )
             )
-        return ranges
+        return evidence
 
     @staticmethod
-    def _find_quote_span(source_text: str, quote: str) -> tuple[int | None, int | None]:
-        quote = quote.strip()
-        if not quote:
-            return (None, None)
-
-        start = source_text.find(quote)
-        if start >= 0:
-            return (start, start + len(quote))
-
-        start = source_text.lower().find(quote.lower())
-        if start >= 0:
-            return (start, start + len(quote))
-
-        normalized_source, source_map = SemanticUnitSlicer._normalize_with_index_map(source_text)
-        normalized_quote, _ = SemanticUnitSlicer._normalize_with_index_map(quote)
-        if not normalized_quote:
-            return (None, None)
-
-        normalized_start = normalized_source.find(normalized_quote)
-        if normalized_start < 0:
-            return (None, None)
-        normalized_end = normalized_start + len(normalized_quote) - 1
-        return (source_map[normalized_start], source_map[normalized_end] + 1)
+    def _normalize_bbox(value: list[float]) -> list[float] | None:
+        if len(value) != 4:
+            return None
+        ymin, xmin, ymax, xmax = [max(0.0, min(1.0, float(item))) for item in value]
+        if ymax <= ymin or xmax <= xmin:
+            return None
+        return [round(ymin, 5), round(xmin, 5), round(ymax, 5), round(xmax, 5)]
 
     @staticmethod
-    def _normalize_with_index_map(value: str) -> tuple[str, list[int]]:
-        normalized_chars: list[str] = []
-        index_map: list[int] = []
-        previous_was_space = True
-        for index, char in enumerate(value):
-            if char.isspace():
-                if not previous_was_space:
-                    normalized_chars.append(" ")
-                    index_map.append(index)
-                previous_was_space = True
-                continue
-            normalized_chars.append(char.lower())
-            index_map.append(index)
-            previous_was_space = False
-
-        if normalized_chars and normalized_chars[-1] == " ":
-            normalized_chars.pop()
-            index_map.pop()
-        return ("".join(normalized_chars), index_map)
+    def _extract_text(
+        parsed: ParsedPaper,
+        page_number: int,
+        bbox: list[float],
+        doc: fitz.Document | None,
+    ) -> str:
+        if doc is None:
+            plain_text = parsed.metadata.get("plain_text")
+            return plain_text[:4000] if isinstance(plain_text, str) else ""
+        if page_number < 1 or page_number > doc.page_count:
+            return ""
+        page = doc.load_page(page_number - 1)
+        ymin, xmin, ymax, xmax = bbox
+        rect = fitz.Rect(
+            xmin * page.rect.width,
+            ymin * page.rect.height,
+            xmax * page.rect.width,
+            ymax * page.rect.height,
+        )
+        text = page.get_text("text", clip=rect)
+        return re.sub(r"\s+", " ", text).strip()

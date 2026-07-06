@@ -31,21 +31,11 @@ export type PaperArgumentGraph = {
   edges: GraphEdge[];
 };
 
-export type SourceBlock = {
-  source_block_id: string;
-  order: number;
+export type PageEvidence = {
   page: number;
-  section?: string | null;
-  bbox?: number[] | null;
-  text: string;
-  block_type: string;
-  citations: string[];
-};
-
-export type SourceRange = {
-  source_block_id: string;
-  start_char?: number | null;
-  end_char?: number | null;
+  bbox: number[];
+  extracted_text: string;
+  extraction_method: string;
 };
 
 export type SemanticUnit = {
@@ -54,7 +44,7 @@ export type SemanticUnit = {
   role: string;
   title: string;
   text: string;
-  source_ranges: SourceRange[];
+  evidence: PageEvidence[];
   confidence: number;
   created_by: string;
   properties: Record<string, unknown>;
@@ -100,7 +90,7 @@ export type UploadStageProgress = {
   progress: number;
   message: string;
   graph?: PaperArgumentGraph;
-  source_block_count?: number;
+  page_count?: number;
   semantic_unit_count?: number;
   node_count?: number;
   edge_count?: number;
@@ -221,10 +211,6 @@ export function deletePaper(paperId: string): Promise<{ deleted: string; papers:
 
 export function fetchGraph(paperId: string): Promise<PaperArgumentGraph> {
   return request<PaperArgumentGraph>(`/api/papers/${paperId}/graph`);
-}
-
-export function fetchBlocks(paperId: string): Promise<SourceBlock[]> {
-  return request<SourceBlock[]>(`/api/papers/${paperId}/blocks`);
 }
 
 export function fetchSemanticUnits(paperId: string): Promise<SemanticUnit[]> {
