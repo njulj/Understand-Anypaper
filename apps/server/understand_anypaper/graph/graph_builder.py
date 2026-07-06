@@ -158,10 +158,7 @@ class PaperArgumentGraphBuilder:
             page_ranges=self._page_ranges_for_units([unit]),
             properties={
                 "semantic_role": unit.role,
-                "source_locations": [
-                    source_location.model_dump()
-                    for source_location in unit.source_locations
-                ],
+                "source_location": unit.source_location.model_dump(),
                 **unit.properties,
             },
             created_by=created_by,
@@ -195,12 +192,10 @@ class PaperArgumentGraphBuilder:
     ) -> None:
         ordered_units = sorted(
             semantic_units,
-            key=lambda unit: min(
-                (
-                    (location.page, location.bbox[0], location.bbox[1])
-                    for location in unit.source_locations
-                ),
-                default=(10**9, 1.0, 1.0),
+            key=lambda unit: (
+                unit.source_location.page,
+                unit.source_location.bbox[0],
+                unit.source_location.bbox[1],
             ),
         )
         node_ids = {node.id for node in graph.nodes}
@@ -237,9 +232,8 @@ class PaperArgumentGraphBuilder:
         units: list[SemanticUnit],
     ) -> list[tuple[int, int]]:
         pages = sorted({
-            location.page
+            unit.source_location.page
             for unit in units
-            for location in unit.source_locations
         })
         return [(page, page) for page in pages]
 

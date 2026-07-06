@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS semantic_units (
   role TEXT NOT NULL,
   title TEXT NOT NULL,
   text TEXT NOT NULL,
-  source_locations_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  source_location_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
   created_by TEXT NOT NULL,
   properties_json JSONB NOT NULL DEFAULT '{}'::jsonb,

@@ -176,7 +176,7 @@ class ContributionEvidenceAssigner:
             "role": unit.role,
             "title": unit.title,
             "text": unit.text,
-            "source_locations": [item.model_dump() for item in unit.source_locations],
+            "source_location": unit.source_location.model_dump(),
         }
 
     @staticmethod
@@ -187,10 +187,7 @@ class ContributionEvidenceAssigner:
                 "role": unit.role,
                 "title": unit.title,
                 "text": unit.text,
-                "source_locations": [
-                    source_location.model_dump()
-                    for source_location in unit.source_locations
-                ],
+                "source_location": unit.source_location.model_dump(),
             },
             ensure_ascii=False,
         )

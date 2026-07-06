@@ -18,14 +18,8 @@ Server API: <http://localhost:8000/docs>
 
 Web client: <http://localhost:5173>
 
-If Docker or OrbStack is already holding the default ports, either stop those
-containers or run Devbox on alternate ports:
-
 ```bash
-devbox services up \
-  --env PGPORT=15432 \
-  --env API_PORT=18000 \
-  --env WEB_PORT=15173
+devbox services up --background
 ```
 
 Docker is still available if you need an isolated container run:

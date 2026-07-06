@@ -81,9 +81,8 @@ class SemanticUnitOutput(BaseModel):
     role: SemanticRole
     title: str = Field(description="Short graph-node title for this semantic unit.")
     text: str = Field(description="Concise faithful restatement of this unit.")
-    source_locations: list[SemanticUnitSourceLocationOutput] = Field(
-        min_length=1,
-        description="One or more page locations where this semantic unit appears.",
+    source_location: SemanticUnitSourceLocationOutput = Field(
+        description="The page location where this semantic unit appears.",
     )
     confidence: float = Field(ge=0, le=1)
 
@@ -96,10 +95,20 @@ class SemanticSliceOutput(BaseModel):
 
 _SEMANTIC_UNIT_SYSTEM_PROMPT = f"""\
 You are a paper extractor in Understand-Anypaper, a project that generates a graph to help user learn/understand a paper.
-You output **semantic units** in the paper. A sementic unit is a part of text that has some semantic meaning, e.g. a method
-or a previous work, or a gap between vision and reality.
+You output **semantic units** in the paper. A sementic unit is a part of continuous text (or figure, or table) that has some semantic meaning, e.g. a method or a previous work, or a gap between vision and reality.
 
-Types(role) of semantic units to extract:
+## Finding semantic units
+
+Any description of a method, a contribution etc. (full list of roles below) should be made into a semantic unit,
+even if something else describe the same concept.
+
+## Determining boundary of semantic units
+
+Semantic units should be a single thing, e.g. one contribution, or one method, or one experiment.
+Do not make "a summary of contributions" as a semantic unit.
+
+## Types(role) of semantic units to extract
+
 - contribution: an author-claimed contribution or achievement.
 - method: how the work implements a contribution: architecture, module design, etc.
 - motivation: why the authors did something
@@ -121,6 +130,8 @@ When outputting coordinates:
 - bbox coordinates are normalized on the rendered page image, where x/y is the top-left corner.
 
 When outputting source locations:
+- Each semantic unit must have exactly one source_location. If the same idea appears in
+  multiple places, output separate semantic units instead of multiple locations.
 - For pure text roles, use locator.kind="text" with exact start_text and end_text anchors copied
   from the paper text on that page. The anchors should be short, distinctive visible strings
   at the beginning and ending of the semantic unit span.
@@ -285,8 +296,8 @@ class SemanticUnitSlicer:
         doc = self._open_pdf(parsed)
         try:
             for index, item in enumerate(output.semantic_units, start=1):
-                source_locations = self._clean_source_locations(parsed, item.source_locations, doc)
-                if not source_locations:
+                source_location = self._clean_source_location(parsed, item.source_location, doc)
+                if source_location is None:
                     continue
                 units.append(
                     SemanticUnit(
@@ -295,7 +306,7 @@ class SemanticUnitSlicer:
                         role=item.role,
                         title=item.title.strip()[:160] or item.role.title(),
                         text=item.text.strip(),
-                        source_locations=source_locations,
+                        source_location=source_location,
                         confidence=max(0.0, min(item.confidence, 1.0)),
                         created_by="semantic-unit-slicer-agent",
                     )
@@ -325,45 +336,27 @@ class SemanticUnitSlicer:
             return None
         return fitz.open(stream=parsed.source_bytes, filetype="pdf")
 
-    def _clean_source_locations(
+    def _clean_source_location(
         self,
         parsed: ParsedPaper,
-        source_location_items: list[SemanticUnitSourceLocationOutput],
+        item: SemanticUnitSourceLocationOutput,
         doc: fitz.Document | None,
-    ) -> list[PageSourceLocation]:
+    ) -> PageSourceLocation | None:
         valid_pages = {page.page: page for page in parsed.pages}
-        source_locations: list[PageSourceLocation] = []
-        seen: set[tuple[int, tuple[float, float, float, float]]] = set()
-        for item in source_location_items:
-            if item.page not in valid_pages:
-                continue
-            if isinstance(item.locator, TextSourceLocator):
-                anchor_location = self._source_location_from_text_anchors(parsed, item, doc)
-                if anchor_location is None:
-                    continue
-                key = (anchor_location.page, tuple(anchor_location.bbox))
-                if key in seen:
-                    continue
-                seen.add(key)
-                source_locations.append(anchor_location)
-                continue
-            bbox = self._bbox_locator_to_normalized(item.locator)
-            if bbox is None:
-                continue
-            key = (item.page, tuple(bbox))
-            if key in seen:
-                continue
-            seen.add(key)
-            extracted_text = self._extract_text(parsed, item.page, bbox, doc)
-            source_locations.append(
-                PageSourceLocation(
-                    page=item.page,
-                    bbox=bbox,
-                    extracted_text=extracted_text,
-                    extraction_method="pymupdf_clip" if doc is not None else "plain_text",
-                )
-            )
-        return source_locations
+        if item.page not in valid_pages:
+            return None
+        if isinstance(item.locator, TextSourceLocator):
+            return self._source_location_from_text_anchors(parsed, item, doc)
+        bbox = self._bbox_locator_to_normalized(item.locator)
+        if bbox is None:
+            return None
+        extracted_text = self._extract_text(parsed, item.page, bbox, doc)
+        return PageSourceLocation(
+            page=item.page,
+            bbox=bbox,
+            extracted_text=extracted_text,
+            extraction_method="pymupdf_clip" if doc is not None else "plain_text",
+        )
 
     def _source_location_from_text_anchors(
         self,
@@ -396,13 +389,23 @@ class SemanticUnitSlicer:
             return None
         end_rects = self._search_anchor_rects(page, end_text, "end") if end_text else []
 
-        rect = self._rect_for_anchor_range(page, start_rects, end_rects)
+        words = page.get_text("words", sort=True)
+        selection = self._word_range_for_anchor_rects(words, start_rects, end_rects)
+        if selection is None:
+            return None
+        start_index, end_index = selection
+        extracted_text = self._text_from_words(words[start_index : end_index + 1])
+        if not self._text_contains_anchor(extracted_text, start_text):
+            return None
+        if end_text and not self._text_contains_anchor(extracted_text, end_text):
+            return None
+
+        rect = self._rect_for_word_range(words, start_index, end_index)
         if rect is None:
             return None
         bbox = self._rect_to_normalized_bbox(page, rect)
         if bbox is None:
             return None
-        extracted_text = self._extract_text(parsed, item.page, bbox, doc)
         return PageSourceLocation(
             page=item.page,
             bbox=bbox,
@@ -465,48 +468,61 @@ class SemanticUnitSlicer:
         return []
 
     @classmethod
-    def _rect_for_anchor_range(
+    def _word_range_for_anchor_rects(
         cls,
-        page: fitz.Page,
+        words: list[tuple],
         start_rects: list[fitz.Rect],
         end_rects: list[fitz.Rect],
-    ) -> fitz.Rect | None:
-        start_rect = start_rects[0]
-        end_rect = cls._first_rect_after(start_rect, end_rects) if end_rects else start_rect
-        words = page.get_text("words", sort=True)
+    ) -> tuple[int, int] | None:
         if not words:
-            return start_rect | end_rect
+            return None
+        start_spans = cls._word_spans_intersecting_rects(words, start_rects)
+        if not start_spans:
+            return None
+        start_index = start_spans[0][0]
+        if not end_rects:
+            return start_index, start_spans[0][1]
+        for span_start, span_end in cls._word_spans_intersecting_rects(words, end_rects):
+            if span_end >= start_index:
+                return start_index, max(span_end, start_index)
+        return None
 
-        start_index = cls._first_word_intersecting(words, start_rect)
-        end_index = cls._last_word_intersecting(words, end_rect)
-        if start_index is None or end_index is None or end_index < start_index:
-            return start_rect | end_rect
+    @staticmethod
+    def _word_spans_intersecting_rects(
+        words: list[tuple],
+        rects: list[fitz.Rect],
+    ) -> list[tuple[int, int]]:
+        spans: list[tuple[int, int]] = []
+        for rect in sorted(rects, key=lambda item: (item.y0, item.x0, item.y1, item.x1)):
+            indices = [
+                index
+                for index, word in enumerate(words)
+                if fitz.Rect(word[:4]).intersects(rect)
+            ]
+            if indices:
+                spans.append((min(indices), max(indices)))
+        return sorted(set(spans))
 
+    @staticmethod
+    def _rect_for_word_range(words: list[tuple], start_index: int, end_index: int) -> fitz.Rect | None:
+        if not words or end_index < start_index:
+            return None
         rect = fitz.Rect(words[start_index][:4])
         for word in words[start_index + 1 : end_index + 1]:
             rect |= fitz.Rect(word[:4])
-        return rect
+        return fitz.Rect(rect.x0 - 1, rect.y0 - 1, rect.x1 + 1, rect.y1 + 1)
 
     @staticmethod
-    def _first_rect_after(start_rect: fitz.Rect, rects: list[fitz.Rect]) -> fitz.Rect:
-        for rect in sorted(rects, key=lambda item: (item.y0, item.x0, item.y1, item.x1)):
-            if (rect.y0, rect.x0) >= (start_rect.y0, start_rect.x0):
-                return rect
-        return rects[-1] if rects else start_rect
+    def _text_from_words(words: list[tuple]) -> str:
+        return re.sub(r"\s+", " ", " ".join(str(word[4]) for word in words)).strip()
 
     @staticmethod
-    def _first_word_intersecting(words: list[tuple], rect: fitz.Rect) -> int | None:
-        for index, word in enumerate(words):
-            if fitz.Rect(word[:4]).intersects(rect):
-                return index
-        return None
-
-    @staticmethod
-    def _last_word_intersecting(words: list[tuple], rect: fitz.Rect) -> int | None:
-        for index in range(len(words) - 1, -1, -1):
-            if fitz.Rect(words[index][:4]).intersects(rect):
-                return index
-        return None
+    def _text_contains_anchor(text: str, anchor: str) -> bool:
+        return re.sub(r"\s+", " ", anchor).strip().casefold() in re.sub(
+            r"\s+",
+            " ",
+            text,
+        ).strip().casefold()
 
     @classmethod
     def _rect_to_normalized_bbox(cls, page: fitz.Page, rect: fitz.Rect) -> list[float] | None:

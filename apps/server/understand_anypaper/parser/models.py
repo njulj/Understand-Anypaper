@@ -32,7 +32,7 @@ class SemanticUnit(BaseModel):
     role: str
     title: str
     text: str
-    source_locations: list[PageSourceLocation]
+    source_location: PageSourceLocation
     confidence: float = Field(ge=0, le=1, default=0.0)
     created_by: str = "llm-semantic-slicer"
     properties: dict[str, Any] = Field(default_factory=dict)

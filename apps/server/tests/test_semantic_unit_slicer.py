@@ -48,18 +48,16 @@ def test_slice_semantic_units_uses_agent_output():
                             "role": "contribution",
                             "title": "TinyLUT contribution",
                             "text": "The paper proposes TinyLUT.",
-                            "source_locations": [
-                                {
-                                    "page": 1,
-                                    "locator": {
-                                        "kind": "bbox",
-                                        "x": 0.1,
-                                        "y": 0.1,
-                                        "width": 0.7,
-                                        "height": 0.1,
-                                    },
-                                }
-                            ],
+                            "source_location": {
+                                "page": 1,
+                                "locator": {
+                                    "kind": "bbox",
+                                    "x": 0.1,
+                                    "y": 0.1,
+                                    "width": 0.7,
+                                    "height": 0.1,
+                                },
+                            },
                             "confidence": 0.9,
                         }
                     ]
@@ -72,7 +70,7 @@ def test_slice_semantic_units_uses_agent_output():
 
     assert units
     assert units[0].role == "contribution"
-    assert units[0].source_locations[0].bbox == [0.1, 0.1, 0.2, 0.8]
+    assert units[0].source_location.bbox == [0.1, 0.1, 0.2, 0.8]
     assert units[0].created_by == "semantic-unit-slicer-agent"
     assert agent.prompts
 
@@ -102,16 +100,14 @@ def test_slice_semantic_units_prefers_text_anchors_for_text_roles():
                             "role": "contribution",
                             "title": "TinyLUT contribution",
                             "text": "The paper proposes TinyLUT.",
-                            "source_locations": [
-                                {
-                                    "page": 1,
-                                    "locator": {
-                                        "kind": "text",
-                                        "start_text": "We propose TinyLUT",
-                                        "end_text": "improves latency",
-                                    },
-                                }
-                            ],
+                            "source_location": {
+                                "page": 1,
+                                "locator": {
+                                    "kind": "text",
+                                    "start_text": "We propose TinyLUT",
+                                    "end_text": "improves latency",
+                                },
+                            },
                             "confidence": 0.9,
                         }
                     ]
@@ -123,9 +119,56 @@ def test_slice_semantic_units_prefers_text_anchors_for_text_roles():
     units = SemanticUnitSlicer(agent=agent).slice_semantic_units(parsed)
 
     assert units
-    location = units[0].source_locations[0]
+    location = units[0].source_location
     assert location.extraction_method == "pymupdf_text_anchors"
     assert location.bbox != [0.0, 0.0, 1.0, 1.0]
     assert location.start_text == "We propose TinyLUT"
     assert location.end_text == "improves latency"
-    assert "TinyLUT" in location.extracted_text
+    assert "We propose TinyLUT" in location.extracted_text
+    assert "improves latency" in location.extracted_text
+
+
+def test_text_anchor_resolution_uses_end_anchor_after_start_anchor():
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 96), "Result appears before the target span.")
+    page.insert_text((72, 120), "Target starts here and the final Result appears here.")
+    source_bytes = doc.tobytes()
+    doc.close()
+    parsed = ParsedPaper(
+        paper_id="paper",
+        title="TinyLUT",
+        pages=[DocumentPage(page=1, width=612, height=792)],
+        source_bytes=source_bytes,
+        source_media_type="application/pdf",
+    )
+    agent = FakeAgent(
+        [
+            SemanticSliceOutput.model_validate(
+                {
+                    "semantic_units": [
+                        {
+                            "role": "contribution",
+                            "title": "Anchor ordering",
+                            "text": "The target span ends at the later Result.",
+                            "source_location": {
+                                "page": 1,
+                                "locator": {
+                                    "kind": "text",
+                                    "start_text": "Target starts here",
+                                    "end_text": "Result appears here",
+                                },
+                            },
+                            "confidence": 0.9,
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+
+    units = SemanticUnitSlicer(agent=agent).slice_semantic_units(parsed)
+
+    assert units
+    assert "Target starts here" in units[0].source_location.extracted_text
+    assert "Result appears here" in units[0].source_location.extracted_text

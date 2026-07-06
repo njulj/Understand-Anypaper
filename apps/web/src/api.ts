@@ -46,7 +46,7 @@ export type SemanticUnit = {
   role: string;
   title: string;
   text: string;
-  source_locations: PageSourceLocation[];
+  source_location: PageSourceLocation;
   confidence: number;
   created_by: string;
   properties: Record<string, unknown>;

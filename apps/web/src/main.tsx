@@ -204,41 +204,40 @@ function App() {
     () => new Map(semanticUnits.map((unit) => [unit.semantic_unit_id, unit])),
     [semanticUnits],
   );
-  const sourceLocationRegions = useMemo(() => {
+  const sourceLocationRegion = useMemo(() => {
     const regions: SourceLocationRegion[] = [];
     for (const unit of semanticUnits) {
-      unit.source_locations.forEach((sourceLocation, index) => {
-        regions.push({
-          id: sourceLocationKey(unit.semantic_unit_id, index),
-          unitId: unit.semantic_unit_id,
-          role: unit.role,
-          title: unit.title,
-          text: unit.text,
-          page: sourceLocation.page,
-          bbox: sourceLocation.bbox,
-          extractedText: sourceLocation.extracted_text,
-        });
+      const sourceLocation = unit.source_location;
+      regions.push({
+        id: sourceLocationKey(unit.semantic_unit_id, 0),
+        unitId: unit.semantic_unit_id,
+        role: unit.role,
+        title: unit.title,
+        text: unit.text,
+        page: sourceLocation.page,
+        bbox: sourceLocation.bbox,
+        extractedText: sourceLocation.extracted_text,
       });
     }
     return regions;
   }, [semanticUnits]);
-  const sourceLocationsByPage = useMemo(() => {
+  const sourceLocationByPage = useMemo(() => {
     const grouped = new Map<number, SourceLocationRegion[]>();
-    for (const region of sourceLocationRegions) {
+    for (const region of sourceLocationRegion) {
       grouped.set(region.page, [...(grouped.get(region.page) ?? []), region]);
     }
     return grouped;
-  }, [sourceLocationRegions]);
+  }, [sourceLocationRegion]);
   const firstNodeBySourceLocation = useMemo(() => {
     const bySourceLocation = new Map<string, string>();
     if (!graph) return bySourceLocation;
     for (const node of graph.nodes) {
       for (const unitId of node.semantic_unit_ids) {
         const unit = unitById.get(unitId);
-        unit?.source_locations.forEach((_, index) => {
-          const key = sourceLocationKey(unitId, index);
+        if (unit) {
+          const key = sourceLocationKey(unitId, 0);
           if (!bySourceLocation.has(key)) bySourceLocation.set(key, node.id);
-        });
+        }
       }
     }
     return bySourceLocation;
@@ -253,8 +252,7 @@ function App() {
   const sourceLocationIds = useMemo(() => {
     const ids = new Set<string>();
     for (const unitId of selectedNode?.semantic_unit_ids ?? []) {
-      const unit = unitById.get(unitId);
-      unit?.source_locations.forEach((_, index) => ids.add(sourceLocationKey(unitId, index)));
+      if (unitById.has(unitId)) ids.add(sourceLocationKey(unitId, 0));
     }
     return ids;
   }, [selectedNode, unitById]);
@@ -276,7 +274,7 @@ function App() {
     setEditSummary(selectedNode.summary);
     setEditVerified(selectedNode.verified);
     const first = selectedNode.semantic_unit_ids
-      .flatMap((id) => unitById.get(id)?.source_locations.map((_, index) => sourceLocationKey(id, index)) ?? [])
+      .map((id) => unitById.has(id) ? sourceLocationKey(id, 0) : '')
       .find((id) => blockRefs.current.has(id));
     if (first) {
       scrollToSourceLocation(first);
@@ -285,7 +283,7 @@ function App() {
 
   useEffect(() => {
     const first = selectedNode?.semantic_unit_ids
-      .flatMap((id) => unitById.get(id)?.source_locations.map((_, index) => sourceLocationKey(id, index)) ?? [])
+      .map((id) => unitById.has(id) ? sourceLocationKey(id, 0) : '')
       .find((id) => blockRefs.current.has(id));
     if (first) window.requestAnimationFrame(() => scrollToSourceLocation(first));
   }, [sourceMode, documentInfo, selectedNodeId, unitById]);
@@ -479,7 +477,7 @@ function App() {
   async function addManualNode() {
     if (!graph || !newNodeTitle.trim()) return;
     const evidenceUnit = newNodeEvidenceId ? unitById.get(newNodeEvidenceId) : null;
-    const evidencePage = evidenceUnit?.source_locations[0]?.page;
+    const evidencePage = evidenceUnit?.source_location.page;
     const node: GraphNode = {
       id: `manual-${graph.paper_id.slice(0, 8)}-${Date.now()}`,
       paper_id: graph.paper_id,
@@ -696,7 +694,7 @@ function App() {
                     loading="lazy"
                   />
                   <div className="bbox-layer">
-                    {(sourceLocationsByPage.get(page.page) ?? []).map((region) => {
+                    {(sourceLocationByPage.get(page.page) ?? []).map((region) => {
                       if (region.bbox.length !== 4) return null;
                       const [ymin, xmin, ymax, xmax] = region.bbox;
                       const highlighted = sourceLocationIds.has(region.id);
@@ -727,10 +725,8 @@ function App() {
           ) : semanticUnits.length ? (
             <div className="block-list">
               {semanticUnits.map((unit) => {
-                const firstEvidenceId = unit.source_locations.length ? sourceLocationKey(unit.semantic_unit_id, 0) : '';
-                const highlighted = unit.source_locations.some((_, index) =>
-                  sourceLocationIds.has(sourceLocationKey(unit.semantic_unit_id, index)),
-                );
+                const firstEvidenceId = sourceLocationKey(unit.semantic_unit_id, 0);
+                const highlighted = sourceLocationIds.has(firstEvidenceId);
 	                return (
 	                  <div
 	                    key={unit.semantic_unit_id}
@@ -743,7 +739,7 @@ function App() {
 	                  >
 	                    <header>
 	                      <span className="role-tag">{unit.role}</span>
-	                      <span>{unit.source_locations.map((item) => `p.${item.page}`).join(', ')}</span>
+	                      <span>p.{unit.source_location.page}</span>
 	                    </header>
 	                    <p>{unit.text}</p>
 	                  </div>
@@ -841,8 +837,8 @@ function App() {
                   <div className="evidence-chips">
 	                    {selectedNode.semantic_unit_ids.map((unitId) => {
 	                      const unit = unitById.get(unitId);
-	                      const firstEvidenceId = unit?.source_locations.length ? sourceLocationKey(unitId, 0) : '';
-	                      const firstPage = unit?.source_locations[0]?.page;
+	                      const firstEvidenceId = unit ? sourceLocationKey(unitId, 0) : '';
+	                      const firstPage = unit?.source_location.page;
 	                      return (
 	                        <button
 	                          key={unitId}

@@ -184,9 +184,9 @@ class PostgresGraphStore(GraphStore):
             for unit in parsed.semantic_units:
                 conn.execute(
                     text(
-                        "INSERT INTO semantic_units (id, paper_id, role, title, text, source_locations_json, "
+                        "INSERT INTO semantic_units (id, paper_id, role, title, text, source_location_json, "
                         "confidence, created_by, properties_json) VALUES (:id, :pid, :role, :title, :text, "
-                        "CAST(:source_locations AS jsonb), :confidence, :created_by, CAST(:properties AS jsonb))"
+                        "CAST(:source_location AS jsonb), :confidence, :created_by, CAST(:properties AS jsonb))"
                     ),
                     {
                         "id": unit.semantic_unit_id,
@@ -194,9 +194,7 @@ class PostgresGraphStore(GraphStore):
                         "role": unit.role,
                         "title": unit.title,
                         "text": unit.text,
-                        "source_locations": json.dumps(
-                            [item.model_dump() for item in unit.source_locations]
-                        ),
+                        "source_location": json.dumps(unit.source_location.model_dump()),
                         "confidence": unit.confidence,
                         "created_by": unit.created_by,
                         "properties": json.dumps(unit.properties, default=str),
@@ -368,7 +366,7 @@ class PostgresGraphStore(GraphStore):
         with self._engine.connect() as conn:
             rows = conn.execute(
                 text(
-                    "SELECT id, role, title, text, source_locations_json, confidence, created_by, properties_json "
+                    "SELECT id, role, title, text, source_location_json, confidence, created_by, properties_json "
                     "FROM semantic_units WHERE paper_id = :pid ORDER BY id"
                 ),
                 {"pid": paper_id},
@@ -380,7 +378,7 @@ class PostgresGraphStore(GraphStore):
                     role=row["role"],
                     title=row["title"],
                     text=row["text"],
-                    source_locations=[PageSourceLocation(**item) for item in row["source_locations_json"]],
+                    source_location=PageSourceLocation(**row["source_location_json"]),
                     confidence=row["confidence"],
                     created_by=row["created_by"],
                     properties=row["properties_json"],
