@@ -81,6 +81,7 @@ function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [message, setMessage] = useState('Upload a .txt, .md, or PDF to build a Paper Argument Graph.');
   const [editTitle, setEditTitle] = useState('');
   const [editSummary, setEditSummary] = useState('');
@@ -196,6 +197,7 @@ function App() {
     setSourceMode(nextDocumentInfo ? 'pages' : 'blocks');
     setSelectedNodeId(nextGraph.nodes[0]?.id ?? null);
     setStatus('ready');
+    setUploadProgress(null);
     setMessage(readyMessage ?? `Graph ready: ${nextGraph.nodes.length} nodes, ${nextGraph.edges.length} edges.`);
   }
 
@@ -207,6 +209,7 @@ function App() {
     setSelectedNodeId(null);
     setQuery('');
     setStatus('idle');
+    setUploadProgress(null);
     setMessage(nextMessage);
   }
 
@@ -225,9 +228,26 @@ function App() {
     const file = event.target.files?.[0];
     if (!file) return;
     setStatus('uploading');
+    setUploadProgress(0);
     setMessage(`Uploading ${file.name}...`);
     try {
-      const nextGraph = await uploadPaper(file);
+      const nextGraph = await uploadPaper(file, {
+        onUploadProgress: ({ percent }) => {
+          const normalized = Math.min(100, Math.max(0, percent));
+          setUploadProgress(Math.round(normalized * 0.6));
+          setMessage(
+            normalized >= 100
+              ? `Upload complete. Waiting for server analysis: ${file.name}`
+              : `Uploading ${file.name}: ${normalized}%`,
+          );
+        },
+        onStageProgress: (progress) => {
+          setUploadProgress(progress.progress);
+          setMessage(progress.message);
+        },
+      });
+      setUploadProgress(100);
+      setMessage('Graph generated. Loading source evidence...');
       const [nextBlocks, nextSemanticUnits, nextDocumentInfo] = await Promise.all([
         fetchBlocks(nextGraph.paper_id),
         fetchSemanticUnits(nextGraph.paper_id),
@@ -241,11 +261,13 @@ function App() {
       setSelectedNodeId(nextGraph.nodes[0]?.id ?? null);
       setQuery('');
       setStatus('ready');
+      setUploadProgress(null);
       setMessage(`Graph ready: ${nextGraph.nodes.length} nodes, ${nextGraph.edges.length} edges.`);
       const nextPapers = await listPapers();
       setPapers(nextPapers);
     } catch (error) {
       setStatus('error');
+      setUploadProgress(null);
       setMessage(error instanceof Error ? error.message : 'Upload failed.');
     } finally {
       event.target.value = '';
@@ -449,7 +471,12 @@ function App() {
               disabled={!graph}
             />
           </label>
-          <button className="primary-action" type="button" onClick={() => fileInputRef.current?.click()}>
+          <button
+            className="primary-action"
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={status === 'uploading'}
+          >
             {status === 'uploading' ? <Loader2 className="spin" size={18} /> : <UploadCloud size={18} />}
             Upload
           </button>
@@ -492,8 +519,28 @@ function App() {
             ) : null}
           </div>
           <div className={`status-line ${status}`}>
-            {status === 'error' ? <AlertCircle size={18} /> : <CheckCircle2 size={18} />}
-            <span>{message}</span>
+            <div className="status-message">
+              {status === 'uploading' ? (
+                <Loader2 className="spin" size={18} />
+              ) : status === 'error' ? (
+                <AlertCircle size={18} />
+              ) : (
+                <CheckCircle2 size={18} />
+              )}
+              <span>{message}</span>
+            </div>
+            {status === 'uploading' ? (
+              <div
+                className="upload-progress"
+                role="progressbar"
+                aria-label="Upload progress"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={uploadProgress ?? 0}
+              >
+                <span style={{ width: `${uploadProgress ?? 0}%` }} />
+              </div>
+            ) : null}
           </div>
           {documentInfo && sourceMode === 'pages' ? (
             <div className="pdf-pages">

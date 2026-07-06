@@ -89,6 +89,28 @@ export type PatchOperation = {
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 
+export type UploadProgress = {
+  loaded: number;
+  total: number;
+  percent: number;
+};
+
+export type UploadStageProgress = {
+  event: string;
+  progress: number;
+  message: string;
+  graph?: PaperArgumentGraph;
+  source_block_count?: number;
+  semantic_unit_count?: number;
+  node_count?: number;
+  edge_count?: number;
+};
+
+export type UploadPaperOptions = {
+  onUploadProgress?: (progress: UploadProgress) => void;
+  onStageProgress?: (progress: UploadStageProgress) => void;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, init);
   if (!response.ok) {
@@ -98,10 +120,93 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
-export function uploadPaper(file: File): Promise<PaperArgumentGraph> {
+export function uploadPaper(
+  file: File,
+  options?: UploadPaperOptions | ((progress: UploadProgress) => void),
+): Promise<PaperArgumentGraph> {
   const formData = new FormData();
   formData.append('file', file);
-  return request<PaperArgumentGraph>('/api/papers', { method: 'POST', body: formData });
+  const onUploadProgress = typeof options === 'function' ? options : options?.onUploadProgress;
+  const onStageProgress = typeof options === 'function' ? undefined : options?.onStageProgress;
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let processedLength = 0;
+    let settled = false;
+    let finalGraph: PaperArgumentGraph | null = null;
+
+    function settleWithGraph(graph: PaperArgumentGraph) {
+      if (settled) return;
+      settled = true;
+      resolve(graph);
+    }
+
+    function settleWithError(error: Error) {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    }
+
+    function handleProgressLine(line: string) {
+      if (!line.trim()) return;
+      let progress: UploadStageProgress;
+      try {
+        progress = JSON.parse(line) as UploadStageProgress;
+      } catch {
+        settleWithError(new Error(`Invalid progress event: ${line}`));
+        return;
+      }
+
+      onStageProgress?.(progress);
+      if (progress.event === 'error') {
+        settleWithError(new Error(progress.message || 'Upload failed.'));
+        xhr.abort();
+        return;
+      }
+      if (progress.event === 'complete' && progress.graph) {
+        finalGraph = progress.graph;
+        settleWithGraph(progress.graph);
+      }
+    }
+
+    function processProgressLines(final = false) {
+      const text = xhr.responseText.slice(processedLength);
+      const lines = text.split('\n');
+      const completeLines = final ? lines : lines.slice(0, -1);
+      processedLength = final ? xhr.responseText.length : xhr.responseText.length - lines[lines.length - 1].length;
+      completeLines.forEach(handleProgressLine);
+    }
+
+    xhr.open('POST', `${API_BASE_URL}/api/papers`);
+
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable || !onUploadProgress) return;
+      onUploadProgress({
+        loaded: event.loaded,
+        total: event.total,
+        percent: Math.round((event.loaded / event.total) * 100),
+      });
+    };
+
+    xhr.onprogress = () => processProgressLines();
+
+    xhr.onload = () => {
+      processProgressLines(true);
+      if (settled) return;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        if (finalGraph) settleWithGraph(finalGraph);
+        else settleWithError(new Error('Upload finished without a graph result.'));
+        return;
+      }
+      settleWithError(new Error(xhr.responseText || xhr.statusText || `Request failed with HTTP ${xhr.status}`));
+    };
+
+    xhr.onerror = () => settleWithError(new Error('Upload failed.'));
+    xhr.onabort = () => {
+      if (!settled) settleWithError(new Error('Upload canceled.'));
+    };
+    xhr.send(formData);
+  });
 }
 
 export function listPapers(): Promise<PaperSummary[]> {

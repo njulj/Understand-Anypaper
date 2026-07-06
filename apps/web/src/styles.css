@@ -237,6 +237,7 @@ button:disabled {
 }
 
 .status-line {
+  display: grid;
   gap: 8px;
   padding: 10px 12px;
   border: 1px solid var(--border);
@@ -246,9 +247,25 @@ button:disabled {
   line-height: 1.35;
 }
 
+.status-message {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.status-message span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .status-line.ready svg,
 .status-line.idle svg {
   color: var(--success);
+}
+
+.status-line.uploading svg {
+  color: var(--accent);
 }
 
 .status-line.error {
@@ -258,6 +275,22 @@ button:disabled {
 
 .status-line.error svg {
   color: var(--danger);
+}
+
+.upload-progress {
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border) 62%, transparent);
+}
+
+.upload-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.18s ease;
 }
 
 .inspector-title {

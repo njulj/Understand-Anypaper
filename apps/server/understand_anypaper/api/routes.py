@@ -1,3 +1,5 @@
+import asyncio
+import json
 import logging
 import re
 from pathlib import Path
@@ -8,6 +10,7 @@ from urllib.parse import quote
 import fitz
 import httpx
 from fastapi import APIRouter, File, HTTPException, Response, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from understand_anypaper.analyzers.contribution_evidence_assigner import (
@@ -82,40 +85,134 @@ def _analyze_and_build_graph(parsed: ParsedPaper) -> PaperArgumentGraph:
     return PaperArgumentGraphBuilder().build(parsed)
 
 
-@router.post("/papers", response_model=PaperArgumentGraph)
-async def upload_paper(file: Annotated[UploadFile, File(...)]) -> PaperArgumentGraph:
+def _upload_progress_line(event: str, progress: int, message: str, **payload: object) -> str:
+    return json.dumps(
+        {
+            "event": event,
+            "progress": progress,
+            "message": message,
+            **payload,
+        },
+        ensure_ascii=False,
+    ) + "\n"
+
+
+@router.post("/papers")
+async def upload_paper(file: Annotated[UploadFile, File(...)]) -> StreamingResponse:
     suffix = Path(file.filename or "paper.pdf").suffix
     media_type = "application/pdf" if suffix.lower() == ".pdf" else (file.content_type or "application/octet-stream")
     data = await file.read()
-    with NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(data)
-        tmp_path = Path(tmp.name)
-    try:
-        parsed = PdfParser().parse(tmp_path)
-    except Exception as exc:  # noqa: BLE001 - surface parse failures as HTTP 422
-        raise HTTPException(status_code=422, detail=f"Failed to parse document: {exc}") from exc
-    finally:
-        tmp_path.unlink(missing_ok=True)
-    parsed.metadata.update(
-        {
-            "source_filename": file.filename or f"paper{suffix}",
-            "source_media_type": media_type,
-        }
-    )
-    try:
-        graph = _analyze_and_build_graph(parsed)
-    except (ContributionEvidenceAssignmentError, GraphBuildError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    store = get_store()
-    store.save_paper(parsed, graph)
-    if suffix.lower() == ".pdf":
-        store.save_source_document(
-            parsed.paper_id,
-            file.filename or f"{parsed.paper_id}.pdf",
-            media_type,
-            data,
-        )
-    return graph
+    filename = file.filename or f"paper{suffix}"
+
+    async def progress_stream():
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+        def emit(event: str, progress: int, message: str, **payload: object) -> None:
+            loop.call_soon_threadsafe(
+                queue.put_nowait,
+                _upload_progress_line(event, progress, message, **payload),
+            )
+
+        def finish() -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        def run_pipeline() -> None:
+            tmp_path: Path | None = None
+            try:
+                emit("upload_received", 60, "Upload received. Parsing source blocks.")
+                with NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                    tmp.write(data)
+                    tmp_path = Path(tmp.name)
+
+                try:
+                    parsed = PdfParser().parse(tmp_path)
+                except Exception as exc:  # noqa: BLE001 - surface parse failures in the progress stream
+                    emit("error", 100, f"Failed to parse document: {exc}")
+                    return
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+                    tmp_path = None
+
+                parsed.metadata.update(
+                    {
+                        "source_filename": filename,
+                        "source_media_type": media_type,
+                    }
+                )
+                emit(
+                    "parsed_source_blocks",
+                    68,
+                    "Parsed source blocks.",
+                    source_block_count=len(parsed.source_blocks),
+                )
+
+                units = SemanticUnitSlicer().slice_semantic_units(parsed)
+                if not units:
+                    raise GraphBuildError("LLM semantic slicing is required to build a Paper Argument Graph")
+                emit(
+                    "generated_semantic_units",
+                    78,
+                    "Generated semantic units.",
+                    semantic_unit_count=len(units),
+                )
+
+                parsed.semantic_units = ContributionEvidenceAssigner().assign(parsed, units)
+                emit(
+                    "assigned_contribution_evidence",
+                    86,
+                    "Connected evidence to contributions.",
+                    semantic_unit_count=len(parsed.semantic_units),
+                )
+
+                graph = PaperArgumentGraphBuilder().build(parsed)
+                emit(
+                    "built_argument_graph",
+                    94,
+                    "Built the argument graph.",
+                    node_count=len(graph.nodes),
+                    edge_count=len(graph.edges),
+                )
+
+                store = get_store()
+                store.save_paper(parsed, graph)
+                if suffix.lower() == ".pdf":
+                    store.save_source_document(
+                        parsed.paper_id,
+                        filename,
+                        media_type,
+                        data,
+                    )
+                emit("saved_graph", 98, "Saved graph and source document.")
+                emit(
+                    "complete",
+                    100,
+                    "Graph ready.",
+                    graph=graph.model_dump(mode="json"),
+                )
+            except (ContributionEvidenceAssignmentError, GraphBuildError) as exc:
+                emit("error", 100, str(exc))
+            except Exception as exc:  # noqa: BLE001 - preserve the progress stream contract for unexpected failures
+                logger.exception("Unexpected paper upload failure")
+                emit("error", 100, f"Upload failed: {exc}")
+            finally:
+                if tmp_path is not None:
+                    tmp_path.unlink(missing_ok=True)
+                finish()
+
+        pipeline_task = asyncio.create_task(asyncio.to_thread(run_pipeline))
+        try:
+            while True:
+                line = await queue.get()
+                if line is None:
+                    break
+                yield line
+            await pipeline_task
+        finally:
+            if not pipeline_task.done():
+                pipeline_task.cancel()
+
+    return StreamingResponse(progress_stream(), media_type="application/x-ndjson")
 
 
 @router.get("/papers")
