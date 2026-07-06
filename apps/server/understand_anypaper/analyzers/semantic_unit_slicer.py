@@ -61,47 +61,34 @@ class SemanticSliceOutput(BaseModel):
     semantic_units: list[SemanticUnitOutput]
 
 
-_SEMANTIC_UNIT_SYSTEM_PROMPT = """\
-You slice a research paper into semantic argument units for a Paper Argument Graph.
-Use the provided page images as the primary source. Each semantic unit has exactly
-one role and must include at least one visual evidence region.
+_SEMANTIC_UNIT_SYSTEM_PROMPT = f"""\
+You are a paper extractor in Understand-Anypaper, a project that generates a graph to help user learn/understand a paper.
+You output **semantic units** in the paper. A sementic unit is a part of text that has some semantic meaning, e.g. a method
+or a previous work, or a gap between vision and reality.
 
-Coordinate convention:
-- page numbers are 1-indexed.
-- bbox is normalized [ymin, xmin, ymax, xmax] on the rendered page image.
-- each coordinate must be between 0 and 1.
-- bbox should tightly cover the region that supports the unit: contribution text,
-  method description, equation, figure, table, experiment paragraph, result row, or
-  reference entry.
-
-Split mixed regions into separate units when they contain different roles, such as
-a contribution claim and a method mechanism in the same paragraph. Keep units large
-enough to be meaningful graph evidence, not sentence fragments.
-
-Role standards:
-- contribution: an author-claimed contribution or achieved advance. Prefer explicit
-  claims from the abstract, introduction contribution list, method summary, or conclusion.
-  If a page says "the main contributions are", "our contributions", or similar,
-  classify each following contribution-list bullet as contribution even when it
-  describes a method component or experimental finding.
-- method: how the work implements a contribution: architecture, module design, training
-  procedure, algorithmic step, indexing strategy, inference pipeline, or mechanism.
-- motivation: why the work matters; demand, deployment pressure, practical need, or
-  research objective.
+Types(role) of semantic units to extract:
+- contribution: an author-claimed contribution or achievement.
+- method: how the work implements a contribution: architecture, module design, etc.
+- motivation: why the authors did something
 - gap: a limitation, failure, missing capability, or unresolved trade-off in prior work.
-- experiment: evaluation setup, datasets, baselines, metrics, ablations, or protocols.
-- result: measured outcomes and comparisons, such as accuracy, PSNR, runtime, storage,
-  or statistical improvements.
-- conclusion: final summary, implication, or takeaway claimed by the authors.
-- background: established context or prior-work description that is not itself a gap.
-- equation: mathematical definition, formula, loss, objective, or derivation.
-- figure: a figure region, figure caption, or prose whose primary purpose is to explain a figure.
-- table: a table region, table caption, or prose whose primary purpose is to explain a table.
-- reference: bibliography entries or citation-centered content about another work.
+- experiment
+- result
+- conclusion
+- background: related works, sota performance, etc.
+- equation
+- figure
+- table
+- reference. Only include a biblography if it's referred to in another semantic unit. For example, citing DDPM in the background of Flux. Don't blindly output every single reference.
 
-Return a JSON object with a semantic_units array. Each item must contain role, title,
-text, evidence, and confidence. Do not invent content that is not visible in the page images.
+Return JSON. Schema:
+{SemanticUnitOutput.model_json_schema()}
+
+When outputting coordinates:
+- page numbers are 1-indexed.
+- bbox is normalized [ymin, xmin, ymax, xmax] on the rendered page image, each coordinate is a float between 0 and 1.
 """
+
+
 
 _CONTRIBUTION_REQUIRED_RETRY_PROMPT = """\
 Your previous semantic slicing did not include any contribution role. Re-slice the same
