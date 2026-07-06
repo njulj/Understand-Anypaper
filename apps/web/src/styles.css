@@ -352,6 +352,45 @@ button:disabled {
   white-space: nowrap;
 }
 
+.graph-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.graph-breadcrumb strong {
+  min-width: 0;
+}
+
+.crumb-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 40%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.crumb-link span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.crumb-link:hover span {
+  text-decoration: underline;
+}
+
+.crumb-sep {
+  color: var(--muted);
+}
+
 .graph-summary span,
 .eyebrow {
   color: var(--muted);
@@ -425,6 +464,11 @@ button:disabled {
 
 .graph-node.selected text {
   fill: var(--text);
+}
+
+.graph-node .node-subtitle {
+  font-size: 9.5px;
+  opacity: 0.8;
 }
 
 .graph-node.dimmed {

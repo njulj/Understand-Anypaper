@@ -2,6 +2,7 @@ import React, { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client';
 import {
   AlertCircle,
+  ArrowLeft,
   CheckCircle2,
   FileImage,
   FileText,
@@ -69,6 +70,65 @@ const EDGE_TYPE_OPTIONS = [
   'DESCRIBES',
 ];
 
+function isNavigationEdge(edge: GraphEdge): boolean {
+  return edge.edge_type !== 'NEXT' && edge.edge_type !== 'PREVIOUS';
+}
+
+function subgraphOf(graph: PaperArgumentGraph, keep: Set<string>): PaperArgumentGraph {
+  return {
+    ...graph,
+    nodes: graph.nodes.filter((node) => keep.has(node.id)),
+    edges: graph.edges.filter((edge) => keep.has(edge.source_node_id) && keep.has(edge.target_node_id)),
+  };
+}
+
+function overviewGraph(graph: PaperArgumentGraph): PaperArgumentGraph {
+  const keep = new Set(
+    graph.nodes
+      .filter((node) => node.node_type === 'Paper' || node.node_type === 'Contribution')
+      .map((node) => node.id),
+  );
+  return subgraphOf(graph, keep);
+}
+
+function contributionGraph(graph: PaperArgumentGraph, contributionId: string): PaperArgumentGraph | null {
+  if (!graph.nodes.some((node) => node.id === contributionId)) return null;
+  const keep = new Set([contributionId]);
+  let frontier = new Set([contributionId]);
+  // Contribution → facet (Why/How/Proof) → evidence: two hops of outgoing edges.
+  for (let hop = 0; hop < 2; hop += 1) {
+    const next = new Set<string>();
+    for (const edge of graph.edges) {
+      if (!isNavigationEdge(edge)) continue;
+      if (frontier.has(edge.source_node_id) && !keep.has(edge.target_node_id)) {
+        keep.add(edge.target_node_id);
+        next.add(edge.target_node_id);
+      }
+    }
+    frontier = next;
+  }
+  return subgraphOf(graph, keep);
+}
+
+function owningContributionId(graph: PaperArgumentGraph, nodeId: string): string | null {
+  const typeById = new Map(graph.nodes.map((node) => [node.id, node.node_type]));
+  if (typeById.get(nodeId) === 'Contribution') return nodeId;
+  const visited = new Set([nodeId]);
+  let frontier = new Set([nodeId]);
+  for (let hop = 0; hop < 3; hop += 1) {
+    const next = new Set<string>();
+    for (const edge of graph.edges) {
+      if (!isNavigationEdge(edge)) continue;
+      if (!frontier.has(edge.target_node_id) || visited.has(edge.source_node_id)) continue;
+      if (typeById.get(edge.source_node_id) === 'Contribution') return edge.source_node_id;
+      visited.add(edge.source_node_id);
+      next.add(edge.source_node_id);
+    }
+    frontier = next;
+  }
+  return null;
+}
+
 function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const blockRefs = useRef(new Map<string, HTMLElement>());
@@ -79,6 +139,7 @@ function App() {
   const [documentInfo, setDocumentInfo] = useState<PaperDocumentInfo | null>(null);
   const [sourceMode, setSourceMode] = useState<'pages' | 'blocks'>('blocks');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [focusedContributionId, setFocusedContributionId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
@@ -97,6 +158,37 @@ function App() {
   const [newEdgeEvidenceId, setNewEdgeEvidenceId] = useState('');
 
   const selectedNode = graph?.nodes.find((node) => node.id === selectedNodeId) ?? null;
+  const focusedContribution = graph?.nodes.find((node) => node.id === focusedContributionId) ?? null;
+  const paperTitle = graph
+    ? graph.nodes.find((node) => node.node_type === 'Paper')?.title ?? graph.paper_id
+    : '';
+  const viewGraph = useMemo(() => {
+    if (!graph) return null;
+    if (focusedContributionId) {
+      const subgraph = contributionGraph(graph, focusedContributionId);
+      if (subgraph) return subgraph;
+    }
+    return overviewGraph(graph);
+  }, [graph, focusedContributionId]);
+  const contributionStats = useMemo(() => {
+    const stats = new Map<string, string>();
+    if (!graph) return stats;
+    for (const contribution of graph.nodes) {
+      if (contribution.node_type !== 'Contribution') continue;
+      const facetIds = new Set(
+        graph.edges
+          .filter((edge) => edge.source_node_id === contribution.id && edge.edge_type === 'CONTAINS')
+          .map((edge) => edge.target_node_id),
+      );
+      const evidenceIds = new Set(
+        graph.edges
+          .filter((edge) => isNavigationEdge(edge) && facetIds.has(edge.source_node_id))
+          .map((edge) => edge.target_node_id),
+      );
+      stats.set(contribution.id, `${evidenceIds.size} evidence`);
+    }
+    return stats;
+  }, [graph]);
   const blockById = useMemo(() => new Map(blocks.map((block) => [block.source_block_id, block])), [blocks]);
   const unitById = useMemo(
     () => new Map(semanticUnits.map((unit) => [unit.semantic_unit_id, unit])),
@@ -196,6 +288,7 @@ function App() {
     setDocumentInfo(nextDocumentInfo);
     setSourceMode(nextDocumentInfo ? 'pages' : 'blocks');
     setSelectedNodeId(nextGraph.nodes[0]?.id ?? null);
+    setFocusedContributionId(null);
     setStatus('ready');
     setUploadProgress(null);
     setMessage(readyMessage ?? `Graph ready: ${nextGraph.nodes.length} nodes, ${nextGraph.edges.length} edges.`);
@@ -207,6 +300,7 @@ function App() {
     setSemanticUnits([]);
     setDocumentInfo(null);
     setSelectedNodeId(null);
+    setFocusedContributionId(null);
     setQuery('');
     setStatus('idle');
     setUploadProgress(null);
@@ -219,9 +313,32 @@ function App() {
     });
   }
 
+  function revealNode(nodeId: string) {
+    if (!graph) return;
+    const node = graph.nodes.find((item) => item.id === nodeId);
+    if (!node) return;
+    if (node.node_type === 'Paper') {
+      setFocusedContributionId(null);
+    } else if (node.node_type === 'Contribution') {
+      setFocusedContributionId(node.id);
+    } else {
+      const owner = owningContributionId(graph, nodeId);
+      if (owner) setFocusedContributionId(owner);
+    }
+    setSelectedNodeId(nodeId);
+  }
+
+  function handleGraphNodeSelect(nodeId: string) {
+    const node = graph?.nodes.find((item) => item.id === nodeId);
+    if (!focusedContributionId && node?.node_type === 'Contribution') {
+      setFocusedContributionId(nodeId);
+    }
+    setSelectedNodeId(nodeId);
+  }
+
   function selectEvidenceOwner(contentId: string) {
     const nodeId = firstNodeByEvidence.get(contentId);
-    if (nodeId) setSelectedNodeId(nodeId);
+    if (nodeId) revealNode(nodeId);
   }
 
   async function handleUpload(event: ChangeEvent<HTMLInputElement>) {
@@ -259,6 +376,7 @@ function App() {
       setDocumentInfo(nextDocumentInfo);
       setSourceMode(nextDocumentInfo ? 'pages' : 'blocks');
       setSelectedNodeId(nextGraph.nodes[0]?.id ?? null);
+      setFocusedContributionId(null);
       setQuery('');
       setStatus('ready');
       setUploadProgress(null);
@@ -325,6 +443,7 @@ function App() {
     try {
       const nextGraph = await patchGraph(graph.paper_id, [{ op: 'remove_node', id: selectedNode.id }]);
       setGraph(nextGraph);
+      if (selectedNode.id === focusedContributionId) setFocusedContributionId(null);
       setSelectedNodeId(nextGraph.nodes[0]?.id ?? null);
       setMessage('Node removed.');
       setStatus('ready');
@@ -422,9 +541,9 @@ function App() {
   }
 
   const legendTypes = useMemo(() => {
-    if (!graph) return [];
-    return [...new Set(graph.nodes.map((node) => node.node_type))];
-  }, [graph]);
+    if (!viewGraph) return [];
+    return [...new Set(viewGraph.nodes.map((node) => node.node_type))];
+  }, [viewGraph]);
 
   return (
     <main className="shell">
@@ -613,23 +732,42 @@ function App() {
         </aside>
 
         <section className="graph-pane" aria-label="Paper argument graph">
-          {graph ? (
+          {graph && viewGraph ? (
             <>
               <div className="graph-summary">
                 <div>
-                  <span className="eyebrow">Paper</span>
-                  <strong>{graph.nodes.find((node) => node.node_type === 'Paper')?.title ?? graph.paper_id}</strong>
+                  <span className="eyebrow">{focusedContribution ? 'Contribution' : 'Paper'}</span>
+                  <nav className="graph-breadcrumb" aria-label="Graph level">
+                    {focusedContribution ? (
+                      <>
+                        <button
+                          type="button"
+                          className="crumb-link"
+                          title="Back to paper overview"
+                          onClick={() => setFocusedContributionId(null)}
+                        >
+                          <ArrowLeft size={14} />
+                          <span>{paperTitle}</span>
+                        </button>
+                        <span className="crumb-sep">›</span>
+                        <strong>{focusedContribution.title}</strong>
+                      </>
+                    ) : (
+                      <strong>{paperTitle}</strong>
+                    )}
+                  </nav>
                 </div>
                 <div>
-                  <span>{graph.nodes.length} nodes</span>
-                  <span>{graph.edges.length} edges</span>
+                  <span>{viewGraph.nodes.length} nodes</span>
+                  <span>{viewGraph.edges.length} edges</span>
                 </div>
               </div>
               <GraphView
-                graph={graph}
+                graph={viewGraph}
                 selectedNodeId={selectedNodeId}
                 query={query}
-                onSelectNode={setSelectedNodeId}
+                onSelectNode={handleGraphNodeSelect}
+                subtitles={focusedContributionId ? undefined : contributionStats}
               />
               <div className="graph-legend">
                 {legendTypes.map((nodeType) => (
@@ -831,7 +969,7 @@ function App() {
                           <X size={14} />
                         </button>
                       </div>
-                      <button type="button" className="edge-link" onClick={() => setSelectedNodeId(otherId)}>
+                      <button type="button" className="edge-link" onClick={() => revealNode(otherId)}>
                         {edge.source_node_id === selectedNode.id ? '→' : '←'} {nodeLabel(otherId)}
                       </button>
                       {edge.semantic_unit_ids.length ? (

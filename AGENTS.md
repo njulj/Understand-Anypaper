@@ -78,4 +78,4 @@ docker-compose.yml
 # 开发提示
 
 - 我们仍处于早期阶段，如果要修改数据库格式，直接把旧的库删了就行，不用考虑migration
--
+- 开发环境和开发服务器使用devbox管理,比如`devbox services restart`

@@ -96,7 +96,7 @@ function layoutGraph(graph: PaperArgumentGraph): { positions: Map<string, Point>
     const facetSlots = facets.length || 1;
 
     facets.forEach((facet, facetIndex) => {
-      const spread = Math.min(COLUMN_WIDTH * 0.68, 300);
+      const spread = columnCount === 1 ? Math.min(width * 0.72, 640) : Math.min(COLUMN_WIDTH * 0.68, 300);
       const offset = facetSlots === 1 ? 0 : -spread / 2 + (spread * facetIndex) / (facetSlots - 1);
       const facetX = columnCenter + offset;
       positions.set(facet.id, { x: facetX, y: FACET_Y });
@@ -141,9 +141,10 @@ type GraphViewProps = {
   selectedNodeId: string | null;
   query: string;
   onSelectNode: (id: string) => void;
+  subtitles?: Map<string, string>;
 };
 
-export function GraphView({ graph, selectedNodeId, query, onSelectNode }: GraphViewProps) {
+export function GraphView({ graph, selectedNodeId, query, onSelectNode, subtitles }: GraphViewProps) {
   const initialLayout = useMemo(() => layoutGraph(graph), [graph]);
   const [positions, setPositions] = useState<Map<string, Point>>(initialLayout.positions);
   const [viewBox, setViewBox] = useState<ViewBox>(initialLayout.viewBox);
@@ -286,6 +287,9 @@ export function GraphView({ graph, selectedNodeId, query, onSelectNode }: GraphV
             <circle r={radius} fill={NODE_COLORS[node.node_type] ?? '#67788a'} />
             {node.verified ? <circle r={radius + 3.5} className="verified-ring" /> : null}
             <text y={radius + 13}>{node.title.length > 26 ? `${node.title.slice(0, 24)}...` : node.title}</text>
+            {subtitles?.has(node.id) ? (
+              <text y={radius + 27} className="node-subtitle">{subtitles.get(node.id)}</text>
+            ) : null}
             <title>{`${node.node_type}: ${node.title}\n${node.summary.slice(0, 200)}`}</title>
           </g>
         );
