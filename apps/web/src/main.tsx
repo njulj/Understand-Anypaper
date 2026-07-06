@@ -591,9 +591,20 @@ function App() {
             </select>
           ) : null}
           <button
-            className="icon-action"
+            className="icon-action toolbar-icon-action"
+            type="button"
+            title="Add paper"
+            aria-label="Add paper"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={status === 'uploading'}
+          >
+            {status === 'uploading' ? <Loader2 className="spin" size={16} /> : <UploadCloud size={16} />}
+          </button>
+          <button
+            className="icon-action toolbar-icon-action danger-icon-action"
             type="button"
             title="Delete current paper"
+            aria-label="Delete current paper"
             onClick={deleteCurrentPaper}
             disabled={!graph || saving}
           >
@@ -609,15 +620,6 @@ function App() {
               disabled={!graph}
             />
           </label>
-          <button
-            className="primary-action"
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={status === 'uploading'}
-          >
-            {status === 'uploading' ? <Loader2 className="spin" size={18} /> : <UploadCloud size={18} />}
-            Upload
-          </button>
           <input
             ref={fileInputRef}
             className="sr-only"

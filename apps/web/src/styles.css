@@ -781,6 +781,24 @@ button:disabled {
   color: var(--danger);
 }
 
+.toolbar-actions .toolbar-icon-action {
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.toolbar-actions .toolbar-icon-action:hover:not(:disabled) {
+  background: var(--panel-soft);
+  color: var(--accent);
+}
+
+.toolbar-actions .danger-icon-action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+  color: var(--danger);
+}
+
 .edge-item span {
   color: var(--muted);
   font-size: 13px;
