@@ -324,9 +324,9 @@ def get_node_evidence(node_id: str, paper_id: str | None = None) -> dict:
                 "role": semantic_units[semantic_unit_id].role if semantic_unit_id in semantic_units else None,
                 "title": semantic_units[semantic_unit_id].title if semantic_unit_id in semantic_units else None,
                 "text": semantic_units[semantic_unit_id].text if semantic_unit_id in semantic_units else None,
-                "evidence": [
+                "source_locations": [
                     item.model_dump()
-                    for item in semantic_units[semantic_unit_id].evidence
+                    for item in semantic_units[semantic_unit_id].source_locations
                 ] if semantic_unit_id in semantic_units else [],
             }
             for semantic_unit_id in node.semantic_unit_ids

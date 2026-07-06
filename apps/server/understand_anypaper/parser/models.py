@@ -13,7 +13,7 @@ class DocumentPage(BaseModel):
     image_data: bytes = Field(default=b"", exclude=True)
 
 
-class PageEvidence(BaseModel):
+class PageSourceLocation(BaseModel):
     page: int
     bbox: list[float] = Field(
         min_length=4,
@@ -21,6 +21,8 @@ class PageEvidence(BaseModel):
         description="Normalized [ymin, xmin, ymax, xmax] coordinates on the rendered page.",
     )
     extracted_text: str = ""
+    start_text: str = ""
+    end_text: str = ""
     extraction_method: str = "pymupdf_clip"
 
 
@@ -30,7 +32,7 @@ class SemanticUnit(BaseModel):
     role: str
     title: str
     text: str
-    evidence: list[PageEvidence]
+    source_locations: list[PageSourceLocation]
     confidence: float = Field(ge=0, le=1, default=0.0)
     created_by: str = "llm-semantic-slicer"
     properties: dict[str, Any] = Field(default_factory=dict)

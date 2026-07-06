@@ -2,7 +2,8 @@ import base64
 import json
 import logging
 import re
-from typing import Literal
+from enum import StrEnum
+from typing import Annotated, Literal
 from uuid import uuid4
 
 import fitz
@@ -11,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from understand_anypaper.analyzers.structured_agent import StructuredAgent, StructuredAgentError
 from understand_anypaper.config import Settings, settings
-from understand_anypaper.parser.models import PageEvidence, ParsedPaper, SemanticUnit
+from understand_anypaper.parser.models import PageSourceLocation, ParsedPaper, SemanticUnit
 
 logger = logging.getLogger(__name__)
 
@@ -31,14 +32,46 @@ SemanticRole = Literal[
 ]
 
 
-class SemanticUnitEvidenceOutput(BaseModel):
+class SourceLocatorKind(StrEnum):
+    TEXT = "text"
+    BBOX = "bbox"
+
+
+class TextSourceLocator(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal[SourceLocatorKind.TEXT]
+    start_text: str = Field(
+        description=(
+            "Exact visible text copied from the beginning of the semantic unit span."
+        ),
+    )
+    end_text: str = Field(
+        description=(
+            "Exact visible text copied from the end of the semantic unit span."
+        ),
+    )
+
+
+class BboxSourceLocator(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal[SourceLocatorKind.BBOX]
+    x: float = Field(ge=0, le=1, description="Normalized left coordinate on the page image.")
+    y: float = Field(ge=0, le=1, description="Normalized top coordinate on the page image.")
+    width: float = Field(gt=0, le=1, description="Normalized width on the page image.")
+    height: float = Field(gt=0, le=1, description="Normalized height on the page image.")
+
+
+SourceLocator = Annotated[TextSourceLocator | BboxSourceLocator, Field(discriminator="kind")]
+
+
+class SemanticUnitSourceLocationOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     page: int = Field(ge=1, description="1-indexed page number.")
-    bbox: list[float] = Field(
-        min_length=4,
-        max_length=4,
-        description="Normalized [ymin, xmin, ymax, xmax] coordinates on the page image.",
+    locator: SourceLocator = Field(
+        description="How to locate this semantic unit source on the page.",
     )
 
 
@@ -48,9 +81,9 @@ class SemanticUnitOutput(BaseModel):
     role: SemanticRole
     title: str = Field(description="Short graph-node title for this semantic unit.")
     text: str = Field(description="Concise faithful restatement of this unit.")
-    evidence: list[SemanticUnitEvidenceOutput] = Field(
+    source_locations: list[SemanticUnitSourceLocationOutput] = Field(
         min_length=1,
-        description="One or more page regions that visually support this semantic unit.",
+        description="One or more page locations where this semantic unit appears.",
     )
     confidence: float = Field(ge=0, le=1)
 
@@ -85,7 +118,13 @@ Return JSON. Schema:
 
 When outputting coordinates:
 - page numbers are 1-indexed.
-- bbox is normalized [ymin, xmin, ymax, xmax] on the rendered page image, each coordinate is a float between 0 and 1.
+- bbox coordinates are normalized on the rendered page image, where x/y is the top-left corner.
+
+When outputting source locations:
+- For pure text roles, use locator.kind="text" with exact start_text and end_text anchors copied
+  from the paper text on that page. The anchors should be short, distinctive visible strings
+  at the beginning and ending of the semantic unit span.
+- For figure and table roles, use locator.kind="bbox" with normalized x, y, width, and height.
 """
 
 
@@ -246,8 +285,8 @@ class SemanticUnitSlicer:
         doc = self._open_pdf(parsed)
         try:
             for index, item in enumerate(output.semantic_units, start=1):
-                evidence = self._clean_evidence(parsed, item.evidence, doc)
-                if not evidence:
+                source_locations = self._clean_source_locations(parsed, item.source_locations, doc)
+                if not source_locations:
                     continue
                 units.append(
                     SemanticUnit(
@@ -256,7 +295,7 @@ class SemanticUnitSlicer:
                         role=item.role,
                         title=item.title.strip()[:160] or item.role.title(),
                         text=item.text.strip(),
-                        evidence=evidence,
+                        source_locations=source_locations,
                         confidence=max(0.0, min(item.confidence, 1.0)),
                         created_by="semantic-unit-slicer-agent",
                     )
@@ -286,19 +325,29 @@ class SemanticUnitSlicer:
             return None
         return fitz.open(stream=parsed.source_bytes, filetype="pdf")
 
-    def _clean_evidence(
+    def _clean_source_locations(
         self,
         parsed: ParsedPaper,
-        evidence_items: list[SemanticUnitEvidenceOutput],
+        source_location_items: list[SemanticUnitSourceLocationOutput],
         doc: fitz.Document | None,
-    ) -> list[PageEvidence]:
+    ) -> list[PageSourceLocation]:
         valid_pages = {page.page: page for page in parsed.pages}
-        evidence: list[PageEvidence] = []
+        source_locations: list[PageSourceLocation] = []
         seen: set[tuple[int, tuple[float, float, float, float]]] = set()
-        for item in evidence_items:
+        for item in source_location_items:
             if item.page not in valid_pages:
                 continue
-            bbox = self._normalize_bbox(item.bbox)
+            if isinstance(item.locator, TextSourceLocator):
+                anchor_location = self._source_location_from_text_anchors(parsed, item, doc)
+                if anchor_location is None:
+                    continue
+                key = (anchor_location.page, tuple(anchor_location.bbox))
+                if key in seen:
+                    continue
+                seen.add(key)
+                source_locations.append(anchor_location)
+                continue
+            bbox = self._bbox_locator_to_normalized(item.locator)
             if bbox is None:
                 continue
             key = (item.page, tuple(bbox))
@@ -306,15 +355,62 @@ class SemanticUnitSlicer:
                 continue
             seen.add(key)
             extracted_text = self._extract_text(parsed, item.page, bbox, doc)
-            evidence.append(
-                PageEvidence(
+            source_locations.append(
+                PageSourceLocation(
                     page=item.page,
                     bbox=bbox,
                     extracted_text=extracted_text,
                     extraction_method="pymupdf_clip" if doc is not None else "plain_text",
                 )
             )
-        return evidence
+        return source_locations
+
+    def _source_location_from_text_anchors(
+        self,
+        parsed: ParsedPaper,
+        item: SemanticUnitSourceLocationOutput,
+        doc: fitz.Document | None,
+    ) -> PageSourceLocation | None:
+        if not isinstance(item.locator, TextSourceLocator):
+            return None
+        start_text = self._normalize_anchor(item.locator.start_text)
+        end_text = self._normalize_anchor(item.locator.end_text)
+        if not start_text:
+            return None
+        if doc is None:
+            plain_text = parsed.metadata.get("plain_text")
+            return PageSourceLocation(
+                page=item.page,
+                bbox=[0.0, 0.0, 1.0, 1.0],
+                extracted_text=plain_text[:4000] if isinstance(plain_text, str) else "",
+                start_text=start_text,
+                end_text=end_text,
+                extraction_method="plain_text_anchors",
+            )
+        if item.page < 1 or item.page > doc.page_count:
+            return None
+
+        page = doc.load_page(item.page - 1)
+        start_rects = self._search_anchor_rects(page, start_text, "start")
+        if not start_rects:
+            return None
+        end_rects = self._search_anchor_rects(page, end_text, "end") if end_text else []
+
+        rect = self._rect_for_anchor_range(page, start_rects, end_rects)
+        if rect is None:
+            return None
+        bbox = self._rect_to_normalized_bbox(page, rect)
+        if bbox is None:
+            return None
+        extracted_text = self._extract_text(parsed, item.page, bbox, doc)
+        return PageSourceLocation(
+            page=item.page,
+            bbox=bbox,
+            extracted_text=extracted_text,
+            start_text=start_text,
+            end_text=end_text,
+            extraction_method="pymupdf_text_anchors",
+        )
 
     @staticmethod
     def _normalize_bbox(value: list[float]) -> list[float] | None:
@@ -324,6 +420,106 @@ class SemanticUnitSlicer:
         if ymax <= ymin or xmax <= xmin:
             return None
         return [round(ymin, 5), round(xmin, 5), round(ymax, 5), round(xmax, 5)]
+
+    @classmethod
+    def _bbox_locator_to_normalized(cls, locator: SourceLocator) -> list[float] | None:
+        if not isinstance(locator, BboxSourceLocator):
+            return None
+        return cls._normalize_bbox(
+            [
+                locator.y,
+                locator.x,
+                locator.y + locator.height,
+                locator.x + locator.width,
+            ]
+        )
+
+    @staticmethod
+    def _normalize_anchor(value: str) -> str:
+        return re.sub(r"\s+", " ", value).strip()
+
+    @staticmethod
+    def _anchor_candidates(value: str, edge: Literal["start", "end"]) -> list[str]:
+        text = re.sub(r"\s+", " ", value).strip()
+        if not text:
+            return []
+        words = text.split()
+        candidates = [text]
+        if len(text) > 120:
+            candidates.append(" ".join(words[:18] if edge == "start" else words[-18:]))
+        if len(words) > 8:
+            candidates.append(" ".join(words[:8] if edge == "start" else words[-8:]))
+        return list(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+    @classmethod
+    def _search_anchor_rects(
+        cls,
+        page: fitz.Page,
+        anchor: str,
+        edge: Literal["start", "end"],
+    ) -> list[fitz.Rect]:
+        for candidate in cls._anchor_candidates(anchor, edge):
+            rects = page.search_for(candidate)
+            if rects:
+                return sorted(rects, key=lambda rect: (rect.y0, rect.x0, rect.y1, rect.x1))
+        return []
+
+    @classmethod
+    def _rect_for_anchor_range(
+        cls,
+        page: fitz.Page,
+        start_rects: list[fitz.Rect],
+        end_rects: list[fitz.Rect],
+    ) -> fitz.Rect | None:
+        start_rect = start_rects[0]
+        end_rect = cls._first_rect_after(start_rect, end_rects) if end_rects else start_rect
+        words = page.get_text("words", sort=True)
+        if not words:
+            return start_rect | end_rect
+
+        start_index = cls._first_word_intersecting(words, start_rect)
+        end_index = cls._last_word_intersecting(words, end_rect)
+        if start_index is None or end_index is None or end_index < start_index:
+            return start_rect | end_rect
+
+        rect = fitz.Rect(words[start_index][:4])
+        for word in words[start_index + 1 : end_index + 1]:
+            rect |= fitz.Rect(word[:4])
+        return rect
+
+    @staticmethod
+    def _first_rect_after(start_rect: fitz.Rect, rects: list[fitz.Rect]) -> fitz.Rect:
+        for rect in sorted(rects, key=lambda item: (item.y0, item.x0, item.y1, item.x1)):
+            if (rect.y0, rect.x0) >= (start_rect.y0, start_rect.x0):
+                return rect
+        return rects[-1] if rects else start_rect
+
+    @staticmethod
+    def _first_word_intersecting(words: list[tuple], rect: fitz.Rect) -> int | None:
+        for index, word in enumerate(words):
+            if fitz.Rect(word[:4]).intersects(rect):
+                return index
+        return None
+
+    @staticmethod
+    def _last_word_intersecting(words: list[tuple], rect: fitz.Rect) -> int | None:
+        for index in range(len(words) - 1, -1, -1):
+            if fitz.Rect(words[index][:4]).intersects(rect):
+                return index
+        return None
+
+    @classmethod
+    def _rect_to_normalized_bbox(cls, page: fitz.Page, rect: fitz.Rect) -> list[float] | None:
+        if page.rect.width <= 0 or page.rect.height <= 0:
+            return None
+        return cls._normalize_bbox(
+            [
+                rect.y0 / page.rect.height,
+                rect.x0 / page.rect.width,
+                rect.y1 / page.rect.height,
+                rect.x1 / page.rect.width,
+            ]
+        )
 
     @staticmethod
     def _extract_text(

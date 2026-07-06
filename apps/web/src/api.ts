@@ -31,10 +31,12 @@ export type PaperArgumentGraph = {
   edges: GraphEdge[];
 };
 
-export type PageEvidence = {
+export type PageSourceLocation = {
   page: number;
   bbox: number[];
   extracted_text: string;
+  start_text: string;
+  end_text: string;
   extraction_method: string;
 };
 
@@ -44,7 +46,7 @@ export type SemanticUnit = {
   role: string;
   title: string;
   text: string;
-  evidence: PageEvidence[];
+  source_locations: PageSourceLocation[];
   confidence: number;
   created_by: string;
   properties: Record<string, unknown>;

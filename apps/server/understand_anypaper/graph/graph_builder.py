@@ -12,7 +12,7 @@ class GraphBuildError(RuntimeError):
 class PaperArgumentGraphBuilder:
     """Builds a PAG from LLM-sliced semantic units.
 
-    Semantic roles and page/bbox evidence belong to SemanticUnit objects produced
+    Semantic roles and page/bbox source locations belong to SemanticUnit objects produced
     by the LLM analyzer.
     """
 
@@ -158,7 +158,10 @@ class PaperArgumentGraphBuilder:
             page_ranges=self._page_ranges_for_units([unit]),
             properties={
                 "semantic_role": unit.role,
-                "evidence": [evidence.model_dump() for evidence in unit.evidence],
+                "source_locations": [
+                    source_location.model_dump()
+                    for source_location in unit.source_locations
+                ],
                 **unit.properties,
             },
             created_by=created_by,
@@ -193,7 +196,10 @@ class PaperArgumentGraphBuilder:
         ordered_units = sorted(
             semantic_units,
             key=lambda unit: min(
-                ((evidence.page, evidence.bbox[0], evidence.bbox[1]) for evidence in unit.evidence),
+                (
+                    (location.page, location.bbox[0], location.bbox[1])
+                    for location in unit.source_locations
+                ),
                 default=(10**9, 1.0, 1.0),
             ),
         )
@@ -231,9 +237,9 @@ class PaperArgumentGraphBuilder:
         units: list[SemanticUnit],
     ) -> list[tuple[int, int]]:
         pages = sorted({
-            evidence.page
+            location.page
             for unit in units
-            for evidence in unit.evidence
+            for location in unit.source_locations
         })
         return [(page, page) for page in pages]
 

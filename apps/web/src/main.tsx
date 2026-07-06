@@ -67,7 +67,7 @@ const EDGE_TYPE_OPTIONS = [
   'DESCRIBES',
 ];
 
-type EvidenceRegion = {
+type SourceLocationRegion = {
   id: string;
   unitId: string;
   role: string;
@@ -137,7 +137,7 @@ function owningContributionId(graph: PaperArgumentGraph, nodeId: string): string
   return null;
 }
 
-function evidenceKey(unitId: string, index: number): string {
+function sourceLocationKey(unitId: string, index: number): string {
   return `${unitId}:${index}`;
 }
 
@@ -191,12 +191,12 @@ function App() {
           .filter((edge) => edge.source_node_id === contribution.id && edge.edge_type === 'CONTAINS')
           .map((edge) => edge.target_node_id),
       );
-      const evidenceIds = new Set(
+      const evidenceNodeIds = new Set(
         graph.edges
           .filter((edge) => isNavigationEdge(edge) && facetIds.has(edge.source_node_id))
           .map((edge) => edge.target_node_id),
       );
-      stats.set(contribution.id, `${evidenceIds.size} evidence`);
+      stats.set(contribution.id, `${evidenceNodeIds.size} evidence`);
     }
     return stats;
   }, [graph]);
@@ -204,44 +204,44 @@ function App() {
     () => new Map(semanticUnits.map((unit) => [unit.semantic_unit_id, unit])),
     [semanticUnits],
   );
-  const evidenceRegions = useMemo(() => {
-    const regions: EvidenceRegion[] = [];
+  const sourceLocationRegions = useMemo(() => {
+    const regions: SourceLocationRegion[] = [];
     for (const unit of semanticUnits) {
-      unit.evidence.forEach((evidence, index) => {
+      unit.source_locations.forEach((sourceLocation, index) => {
         regions.push({
-          id: evidenceKey(unit.semantic_unit_id, index),
+          id: sourceLocationKey(unit.semantic_unit_id, index),
           unitId: unit.semantic_unit_id,
           role: unit.role,
           title: unit.title,
           text: unit.text,
-          page: evidence.page,
-          bbox: evidence.bbox,
-          extractedText: evidence.extracted_text,
+          page: sourceLocation.page,
+          bbox: sourceLocation.bbox,
+          extractedText: sourceLocation.extracted_text,
         });
       });
     }
     return regions;
   }, [semanticUnits]);
-  const evidenceByPage = useMemo(() => {
-    const grouped = new Map<number, EvidenceRegion[]>();
-    for (const region of evidenceRegions) {
+  const sourceLocationsByPage = useMemo(() => {
+    const grouped = new Map<number, SourceLocationRegion[]>();
+    for (const region of sourceLocationRegions) {
       grouped.set(region.page, [...(grouped.get(region.page) ?? []), region]);
     }
     return grouped;
-  }, [evidenceRegions]);
-  const firstNodeByEvidence = useMemo(() => {
-    const byEvidence = new Map<string, string>();
-    if (!graph) return byEvidence;
+  }, [sourceLocationRegions]);
+  const firstNodeBySourceLocation = useMemo(() => {
+    const bySourceLocation = new Map<string, string>();
+    if (!graph) return bySourceLocation;
     for (const node of graph.nodes) {
       for (const unitId of node.semantic_unit_ids) {
         const unit = unitById.get(unitId);
-        unit?.evidence.forEach((_, index) => {
-          const key = evidenceKey(unitId, index);
-          if (!byEvidence.has(key)) byEvidence.set(key, node.id);
+        unit?.source_locations.forEach((_, index) => {
+          const key = sourceLocationKey(unitId, index);
+          if (!bySourceLocation.has(key)) bySourceLocation.set(key, node.id);
         });
       }
     }
-    return byEvidence;
+    return bySourceLocation;
   }, [graph, unitById]);
   const incidentEdges = useMemo(() => {
     if (!graph || !selectedNode) return [];
@@ -250,11 +250,11 @@ function App() {
     );
   }, [graph, selectedNode]);
 
-  const evidenceIds = useMemo(() => {
+  const sourceLocationIds = useMemo(() => {
     const ids = new Set<string>();
     for (const unitId of selectedNode?.semantic_unit_ids ?? []) {
       const unit = unitById.get(unitId);
-      unit?.evidence.forEach((_, index) => ids.add(evidenceKey(unitId, index)));
+      unit?.source_locations.forEach((_, index) => ids.add(sourceLocationKey(unitId, index)));
     }
     return ids;
   }, [selectedNode, unitById]);
@@ -276,18 +276,18 @@ function App() {
     setEditSummary(selectedNode.summary);
     setEditVerified(selectedNode.verified);
     const first = selectedNode.semantic_unit_ids
-      .flatMap((id) => unitById.get(id)?.evidence.map((_, index) => evidenceKey(id, index)) ?? [])
+      .flatMap((id) => unitById.get(id)?.source_locations.map((_, index) => sourceLocationKey(id, index)) ?? [])
       .find((id) => blockRefs.current.has(id));
     if (first) {
-      scrollToEvidence(first);
+      scrollToSourceLocation(first);
     }
   }, [selectedNodeId, graph, unitById]);
 
   useEffect(() => {
     const first = selectedNode?.semantic_unit_ids
-      .flatMap((id) => unitById.get(id)?.evidence.map((_, index) => evidenceKey(id, index)) ?? [])
+      .flatMap((id) => unitById.get(id)?.source_locations.map((_, index) => sourceLocationKey(id, index)) ?? [])
       .find((id) => blockRefs.current.has(id));
-    if (first) window.requestAnimationFrame(() => scrollToEvidence(first));
+    if (first) window.requestAnimationFrame(() => scrollToSourceLocation(first));
   }, [sourceMode, documentInfo, selectedNodeId, unitById]);
 
   useEffect(() => {
@@ -330,7 +330,7 @@ function App() {
     setMessage(nextMessage);
   }
 
-  function scrollToEvidence(contentId: string) {
+  function scrollToSourceLocation(contentId: string) {
     window.requestAnimationFrame(() => {
       blockRefs.current.get(contentId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     });
@@ -359,8 +359,8 @@ function App() {
     setSelectedNodeId(nodeId);
   }
 
-  function selectEvidenceOwner(contentId: string) {
-    const nodeId = firstNodeByEvidence.get(contentId);
+  function selectSourceLocationOwner(contentId: string) {
+    const nodeId = firstNodeBySourceLocation.get(contentId);
     if (nodeId) revealNode(nodeId);
   }
 
@@ -387,7 +387,7 @@ function App() {
         },
       });
       setUploadProgress(100);
-      setMessage('Graph generated. Loading source evidence...');
+      setMessage('Graph generated. Loading source locations...');
       const [nextSemanticUnits, nextDocumentInfo] = await Promise.all([
         fetchSemanticUnits(nextGraph.paper_id),
         fetchDocumentInfo(nextGraph.paper_id).catch(() => null),
@@ -479,7 +479,7 @@ function App() {
   async function addManualNode() {
     if (!graph || !newNodeTitle.trim()) return;
     const evidenceUnit = newNodeEvidenceId ? unitById.get(newNodeEvidenceId) : null;
-    const evidencePage = evidenceUnit?.evidence[0]?.page;
+    const evidencePage = evidenceUnit?.source_locations[0]?.page;
     const node: GraphNode = {
       id: `manual-${graph.paper_id.slice(0, 8)}-${Date.now()}`,
       paper_id: graph.paper_id,
@@ -696,10 +696,10 @@ function App() {
                     loading="lazy"
                   />
                   <div className="bbox-layer">
-                    {(evidenceByPage.get(page.page) ?? []).map((region) => {
+                    {(sourceLocationsByPage.get(page.page) ?? []).map((region) => {
                       if (region.bbox.length !== 4) return null;
                       const [ymin, xmin, ymax, xmax] = region.bbox;
-                      const highlighted = evidenceIds.has(region.id);
+                      const highlighted = sourceLocationIds.has(region.id);
                       return (
                         <button
                           key={region.id}
@@ -716,7 +716,7 @@ function App() {
                             height: `${(ymax - ymin) * 100}%`,
                           }}
                           title={`${region.role}: ${(region.extractedText || region.text).slice(0, 180)}`}
-                          onClick={() => selectEvidenceOwner(region.id)}
+                          onClick={() => selectSourceLocationOwner(region.id)}
                         />
                       );
                     })}
@@ -727,9 +727,9 @@ function App() {
           ) : semanticUnits.length ? (
             <div className="block-list">
               {semanticUnits.map((unit) => {
-                const firstEvidenceId = unit.evidence.length ? evidenceKey(unit.semantic_unit_id, 0) : '';
-                const highlighted = unit.evidence.some((_, index) =>
-                  evidenceIds.has(evidenceKey(unit.semantic_unit_id, index)),
+                const firstEvidenceId = unit.source_locations.length ? sourceLocationKey(unit.semantic_unit_id, 0) : '';
+                const highlighted = unit.source_locations.some((_, index) =>
+                  sourceLocationIds.has(sourceLocationKey(unit.semantic_unit_id, index)),
                 );
 	                return (
 	                  <div
@@ -739,11 +739,11 @@ function App() {
 	                      else if (firstEvidenceId) blockRefs.current.delete(firstEvidenceId);
 	                    }}
 	                    className={`content-block ${highlighted ? 'highlighted' : ''}`}
-	                    onClick={() => firstEvidenceId ? selectEvidenceOwner(firstEvidenceId) : undefined}
+	                    onClick={() => firstEvidenceId ? selectSourceLocationOwner(firstEvidenceId) : undefined}
 	                  >
 	                    <header>
 	                      <span className="role-tag">{unit.role}</span>
-	                      <span>{unit.evidence.map((item) => `p.${item.page}`).join(', ')}</span>
+	                      <span>{unit.source_locations.map((item) => `p.${item.page}`).join(', ')}</span>
 	                    </header>
 	                    <p>{unit.text}</p>
 	                  </div>
@@ -841,8 +841,8 @@ function App() {
                   <div className="evidence-chips">
 	                    {selectedNode.semantic_unit_ids.map((unitId) => {
 	                      const unit = unitById.get(unitId);
-	                      const firstEvidenceId = unit?.evidence.length ? evidenceKey(unitId, 0) : '';
-	                      const firstPage = unit?.evidence[0]?.page;
+	                      const firstEvidenceId = unit?.source_locations.length ? sourceLocationKey(unitId, 0) : '';
+	                      const firstPage = unit?.source_locations[0]?.page;
 	                      return (
 	                        <button
 	                          key={unitId}

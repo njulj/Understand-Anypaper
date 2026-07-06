@@ -6,7 +6,7 @@ from understand_anypaper.analyzers.contribution_evidence_assigner import (
     ContributionEvidenceAssigner,
     ContributionEvidenceSelectionOutput,
 )
-from understand_anypaper.parser.models import PageEvidence, ParsedPaper, SemanticUnit
+from understand_anypaper.parser.models import PageSourceLocation, ParsedPaper, SemanticUnit
 
 
 class FakeAgent:
@@ -28,7 +28,7 @@ def _unit(unit_id: str, role: str, title: str, page: int) -> SemanticUnit:
         role=role,
         title=title,
         text=title,
-        evidence=[PageEvidence(page=page, bbox=[0.1, 0.1, 0.2, 0.8], extracted_text=title)],
+        source_locations=[PageSourceLocation(page=page, bbox=[0.1, 0.1, 0.2, 0.8], extracted_text=title)],
         confidence=0.9,
     )
 

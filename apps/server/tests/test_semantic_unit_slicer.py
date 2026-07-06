@@ -1,5 +1,7 @@
 from pydantic import BaseModel
 
+import fitz
+
 from understand_anypaper.analyzers.semantic_unit_slicer import (
     SemanticSliceOutput,
     SemanticUnitSlicer,
@@ -46,10 +48,16 @@ def test_slice_semantic_units_uses_agent_output():
                             "role": "contribution",
                             "title": "TinyLUT contribution",
                             "text": "The paper proposes TinyLUT.",
-                            "evidence": [
+                            "source_locations": [
                                 {
                                     "page": 1,
-                                    "bbox": [0.1, 0.1, 0.2, 0.8],
+                                    "locator": {
+                                        "kind": "bbox",
+                                        "x": 0.1,
+                                        "y": 0.1,
+                                        "width": 0.7,
+                                        "height": 0.1,
+                                    },
                                 }
                             ],
                             "confidence": 0.9,
@@ -64,6 +72,60 @@ def test_slice_semantic_units_uses_agent_output():
 
     assert units
     assert units[0].role == "contribution"
-    assert units[0].evidence[0].bbox == [0.1, 0.1, 0.2, 0.8]
+    assert units[0].source_locations[0].bbox == [0.1, 0.1, 0.2, 0.8]
     assert units[0].created_by == "semantic-unit-slicer-agent"
     assert agent.prompts
+
+
+def test_slice_semantic_units_prefers_text_anchors_for_text_roles():
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text(
+        (72, 96),
+        "We propose TinyLUT, a compact lookup approach that improves latency.",
+    )
+    source_bytes = doc.tobytes()
+    doc.close()
+    parsed = ParsedPaper(
+        paper_id="paper",
+        title="TinyLUT",
+        pages=[DocumentPage(page=1, width=612, height=792)],
+        source_bytes=source_bytes,
+        source_media_type="application/pdf",
+    )
+    agent = FakeAgent(
+        [
+            SemanticSliceOutput.model_validate(
+                {
+                    "semantic_units": [
+                        {
+                            "role": "contribution",
+                            "title": "TinyLUT contribution",
+                            "text": "The paper proposes TinyLUT.",
+                            "source_locations": [
+                                {
+                                    "page": 1,
+                                    "locator": {
+                                        "kind": "text",
+                                        "start_text": "We propose TinyLUT",
+                                        "end_text": "improves latency",
+                                    },
+                                }
+                            ],
+                            "confidence": 0.9,
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+
+    units = SemanticUnitSlicer(agent=agent).slice_semantic_units(parsed)
+
+    assert units
+    location = units[0].source_locations[0]
+    assert location.extraction_method == "pymupdf_text_anchors"
+    assert location.bbox != [0.0, 0.0, 1.0, 1.0]
+    assert location.start_text == "We propose TinyLUT"
+    assert location.end_text == "improves latency"
+    assert "TinyLUT" in location.extracted_text

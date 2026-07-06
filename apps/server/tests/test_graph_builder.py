@@ -1,7 +1,7 @@
 from understand_anypaper.graph.graph_builder import PaperArgumentGraphBuilder
 from understand_anypaper.graph.schema import EdgeType, NodeType
 from understand_anypaper.parser.models import (
-    PageEvidence,
+    PageSourceLocation,
     PaperReference,
     ParsedPaper,
     SemanticUnit,
@@ -21,7 +21,7 @@ def _unit(
         role=role,
         title=title,
         text=title,
-        evidence=[PageEvidence(page=page, bbox=[0.1, 0.1, 0.2, 0.8], extracted_text=title)],
+        source_locations=[PageSourceLocation(page=page, bbox=[0.1, 0.1, 0.2, 0.8], extracted_text=title)],
         confidence=0.9,
         properties={}
         if contribution_unit_ids is None

@@ -20,8 +20,8 @@ _MATH_CHARS = set("=+−-*/^_∑∏∫√∂∇≈≠≤≥∈∀∃αβγδεζ
 class PdfParser:
     """Parses papers into page images plus lightweight metadata.
 
-    For PDFs the LLM receives rendered page images and returns page/bbox evidence.
-    PyMuPDF text extraction remains only for metadata and post-LLM bbox text clips.
+    For PDFs the LLM receives rendered page images and returns page source locations.
+    PyMuPDF text extraction remains only for metadata and post-LLM source text clips.
     """
 
     def parse(self, path: Path) -> ParsedPaper:

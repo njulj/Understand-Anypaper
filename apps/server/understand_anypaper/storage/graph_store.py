@@ -11,7 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from understand_anypaper.config import settings
 from understand_anypaper.graph.schema import GraphEdge, GraphNode, PaperArgumentGraph
-from understand_anypaper.parser.models import CitationMention, PageEvidence, PaperReference, ParsedPaper, SemanticUnit
+from understand_anypaper.parser.models import CitationMention, PageSourceLocation, PaperReference, ParsedPaper, SemanticUnit
 from understand_anypaper.retrieval.embeddings import EmbeddingClient
 
 logger = logging.getLogger(__name__)
@@ -184,9 +184,9 @@ class PostgresGraphStore(GraphStore):
             for unit in parsed.semantic_units:
                 conn.execute(
                     text(
-                        "INSERT INTO semantic_units (id, paper_id, role, title, text, evidence_json, "
+                        "INSERT INTO semantic_units (id, paper_id, role, title, text, source_locations_json, "
                         "confidence, created_by, properties_json) VALUES (:id, :pid, :role, :title, :text, "
-                        "CAST(:evidence AS jsonb), :confidence, :created_by, CAST(:properties AS jsonb))"
+                        "CAST(:source_locations AS jsonb), :confidence, :created_by, CAST(:properties AS jsonb))"
                     ),
                     {
                         "id": unit.semantic_unit_id,
@@ -194,7 +194,9 @@ class PostgresGraphStore(GraphStore):
                         "role": unit.role,
                         "title": unit.title,
                         "text": unit.text,
-                        "evidence": json.dumps([item.model_dump() for item in unit.evidence]),
+                        "source_locations": json.dumps(
+                            [item.model_dump() for item in unit.source_locations]
+                        ),
                         "confidence": unit.confidence,
                         "created_by": unit.created_by,
                         "properties": json.dumps(unit.properties, default=str),
@@ -366,7 +368,7 @@ class PostgresGraphStore(GraphStore):
         with self._engine.connect() as conn:
             rows = conn.execute(
                 text(
-                    "SELECT id, role, title, text, evidence_json, confidence, created_by, properties_json "
+                    "SELECT id, role, title, text, source_locations_json, confidence, created_by, properties_json "
                     "FROM semantic_units WHERE paper_id = :pid ORDER BY id"
                 ),
                 {"pid": paper_id},
@@ -378,7 +380,7 @@ class PostgresGraphStore(GraphStore):
                     role=row["role"],
                     title=row["title"],
                     text=row["text"],
-                    evidence=[PageEvidence(**item) for item in row["evidence_json"]],
+                    source_locations=[PageSourceLocation(**item) for item in row["source_locations_json"]],
                     confidence=row["confidence"],
                     created_by=row["created_by"],
                     properties=row["properties_json"],
