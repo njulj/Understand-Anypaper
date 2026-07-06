@@ -421,6 +421,64 @@ button:disabled {
   cursor: grabbing;
 }
 
+.graph-mindmap {
+  position: relative;
+  overflow: hidden;
+  cursor: default;
+}
+
+.graph-mindmap jmnodes {
+  background: transparent;
+}
+
+.graph-mindmap jmnode {
+  max-width: 220px;
+  border: 1px solid var(--graph-node-stroke);
+  border-radius: 8px;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.11);
+  line-height: 1.25;
+  white-space: normal;
+}
+
+.graph-mindmap jmnode.root {
+  padding: 12px 16px;
+}
+
+.graph-mindmap jmnode.selected {
+  outline: 2px solid var(--graph-selected-stroke);
+  outline-offset: 2px;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
+}
+
+.graph-mindmap jmnode.dimmed {
+  opacity: 0.22;
+}
+
+.graph-mindmap jmexpander {
+  border-color: var(--border);
+  color: var(--muted);
+  background: var(--panel);
+}
+
+.pag-mind-node {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: flex-start;
+}
+
+.pag-mind-node-title {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.pag-mind-node-subtitle {
+  font-size: 9.5px;
+  font-weight: 600;
+  opacity: 0.78;
+  text-transform: uppercase;
+}
+
 .graph-edge line {
   stroke: var(--graph-edge);
   stroke-width: 1.4;

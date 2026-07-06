@@ -1,8 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
+import jsMind from 'jsmind';
+import type { JsMindOptions, Node as JsMindNode, NodeTreeData, NodeTreeFormat } from 'jsmind';
+import 'jsmind/style/jsmind.css';
 import { GraphEdge, GraphNode, PaperArgumentGraph } from './api';
-
-type Point = { x: number; y: number };
-type ViewBox = { x: number; y: number; w: number; h: number };
 
 export const NODE_COLORS: Record<string, string> = {
   Paper: '#4f8cff',
@@ -25,21 +25,21 @@ export const NODE_COLORS: Record<string, string> = {
   TextBlock: '#67788a',
 };
 
-const MIN_WIDTH = 900;
-const TOP_PADDING = 80;
-const CONTRIBUTION_Y = 230;
-const FACET_Y = 390;
-const EVIDENCE_Y = 545;
-const EVIDENCE_ROW_GAP = 96;
-const COLUMN_WIDTH = 430;
+type NodeTreeDataWithStyle = NodeTreeData & {
+  'background-color'?: string;
+  'foreground-color'?: string;
+  'leading-line-color'?: string;
+  nodeType?: string;
+  subtitle?: string;
+};
 
-function nodeRadius(node: Pick<GraphNode, 'node_type'>): number {
-  if (node.node_type === 'Paper') return 26;
-  if (node.node_type === 'Contribution') return 19;
-  if (node.node_type === 'Why' || node.node_type === 'How' || node.node_type === 'Proof') return 15;
-  if (node.node_type === 'Reference') return 11;
-  return 13;
-}
+type RenderedJsMindNode = JsMindNode & {
+  _data: {
+    view?: {
+      element?: HTMLElement;
+    };
+  };
+};
 
 function isStructuralEdge(edge: GraphEdge): boolean {
   return edge.edge_type !== 'NEXT' && edge.edge_type !== 'PREVIOUS';
@@ -49,91 +49,164 @@ function outgoing(edges: GraphEdge[], nodeId: string): GraphEdge[] {
   return edges.filter((edge) => edge.source_node_id === nodeId);
 }
 
-function uniqueNodes(ids: string[], nodesById: Map<string, GraphNode>): GraphNode[] {
+function displayTitle(node: GraphNode): string {
+  return node.title.length > 42 ? `${node.title.slice(0, 40)}...` : node.title;
+}
+
+function nodeSubtitle(node: GraphNode, subtitles?: Map<string, string>): string {
+  return subtitles?.get(node.id) ?? node.node_type;
+}
+
+function uniqueChildNodes(
+  parentId: string,
+  edges: GraphEdge[],
+  nodesById: Map<string, GraphNode>,
+  assigned: Set<string>,
+): GraphNode[] {
   const seen = new Set<string>();
-  return ids.flatMap((id) => {
-    if (seen.has(id)) return [];
-    const node = nodesById.get(id);
-    if (!node) return [];
-    seen.add(id);
-    return [node];
+  return outgoing(edges, parentId).flatMap((edge) => {
+    if (seen.has(edge.target_node_id) || assigned.has(edge.target_node_id)) return [];
+    const child = nodesById.get(edge.target_node_id);
+    if (!child) return [];
+    seen.add(child.id);
+    assigned.add(child.id);
+    return [child];
   });
 }
 
-function layoutGraph(graph: PaperArgumentGraph): { positions: Map<string, Point>; viewBox: ViewBox } {
+function sortNodes(nodes: GraphNode[]): GraphNode[] {
+  const order = [
+    'Paper',
+    'Contribution',
+    'Why',
+    'How',
+    'Proof',
+    'Motivation',
+    'ResearchGap',
+    'Method',
+    'Module',
+    'Equation',
+    'Algorithm',
+    'Experiment',
+    'Result',
+    'Figure',
+    'Table',
+    'Conclusion',
+    'Reference',
+    'TextBlock',
+  ];
+  return [...nodes].sort((a, b) => {
+    const aIndex = order.indexOf(a.node_type);
+    const bIndex = order.indexOf(b.node_type);
+    return (aIndex === -1 ? order.length : aIndex) - (bIndex === -1 ? order.length : bIndex);
+  });
+}
+
+function toMindNode(
+  node: GraphNode,
+  edges: GraphEdge[],
+  nodesById: Map<string, GraphNode>,
+  assigned: Set<string>,
+  subtitles?: Map<string, string>,
+  direction?: 'left' | 'right',
+): NodeTreeDataWithStyle {
+  const children = sortNodes(uniqueChildNodes(node.id, edges, nodesById, assigned)).map((child) =>
+    toMindNode(child, edges, nodesById, assigned, subtitles),
+  );
+
+  return {
+    id: node.id,
+    topic: displayTitle(node),
+    direction,
+    expanded: true,
+    nodeType: node.node_type,
+    subtitle: nodeSubtitle(node, subtitles),
+    'background-color': NODE_COLORS[node.node_type] ?? '#67788a',
+    'foreground-color': '#ffffff',
+    'leading-line-color': NODE_COLORS[node.node_type] ?? '#8fa0b3',
+    children,
+  };
+}
+
+function chooseRoot(graph: PaperArgumentGraph): GraphNode | null {
+  return (
+    graph.nodes.find((node) => node.node_type === 'Paper') ??
+    graph.nodes.find((node) => node.node_type === 'Contribution') ??
+    graph.nodes[0] ??
+    null
+  );
+}
+
+function graphToMind(graph: PaperArgumentGraph, subtitles?: Map<string, string>): NodeTreeFormat {
   const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
   const edges = graph.edges.filter(isStructuralEdge);
-  const paper = graph.nodes.find((node) => node.node_type === 'Paper') ?? graph.nodes[0];
-  const positions = new Map<string, Point>();
-  if (!paper) return { positions, viewBox: { x: 0, y: 0, w: MIN_WIDTH, h: MIN_WIDTH } };
+  const root = chooseRoot(graph);
 
-  const contributionIds = outgoing(edges, paper.id)
-    .filter((edge) => edge.edge_type === 'HAS_CONTRIBUTION')
-    .map((edge) => edge.target_node_id);
-  const contributions = uniqueNodes(contributionIds, nodesById);
-  const orderedContributions =
-    contributions.length > 0
-      ? contributions
-      : graph.nodes.filter((node) => node.node_type === 'Contribution');
+  if (!root) {
+    return {
+      meta: { name: graph.paper_id, author: 'Understand AnyPaper', version: '1.0' },
+      format: 'node_tree',
+      data: { id: 'empty', topic: 'No graph data' },
+    };
+  }
 
-  const columnCount = Math.max(orderedContributions.length, 1);
-  const width = Math.max(MIN_WIDTH, columnCount * COLUMN_WIDTH);
-  const centerX = width / 2;
-  positions.set(paper.id, { x: centerX, y: TOP_PADDING });
+  const assigned = new Set<string>([root.id]);
+  const rootChildren = sortNodes(uniqueChildNodes(root.id, edges, nodesById, assigned));
+  const midpoint = Math.ceil(rootChildren.length / 2);
+  const children = rootChildren.map((child, index) =>
+    toMindNode(child, edges, nodesById, assigned, subtitles, index < midpoint ? 'left' : 'right'),
+  );
 
-  let maxEvidenceRows = 1;
-  orderedContributions.forEach((contribution, index) => {
-    const columnCenter = ((index + 0.5) * width) / columnCount;
-    positions.set(contribution.id, { x: columnCenter, y: CONTRIBUTION_Y });
-
-    const facetIds = outgoing(edges, contribution.id)
-      .filter((edge) => edge.edge_type === 'CONTAINS')
-      .map((edge) => edge.target_node_id);
-    const facets = uniqueNodes(facetIds, nodesById).sort((a, b) => {
-      const order = ['Why', 'How', 'Proof'];
-      return order.indexOf(a.node_type) - order.indexOf(b.node_type);
-    });
-    const facetSlots = facets.length || 1;
-
-    facets.forEach((facet, facetIndex) => {
-      const spread = columnCount === 1 ? Math.min(width * 0.72, 640) : Math.min(COLUMN_WIDTH * 0.68, 300);
-      const offset = facetSlots === 1 ? 0 : -spread / 2 + (spread * facetIndex) / (facetSlots - 1);
-      const facetX = columnCenter + offset;
-      positions.set(facet.id, { x: facetX, y: FACET_Y });
-
-      const childIds = outgoing(edges, facet.id).map((edge) => edge.target_node_id);
-      const children = uniqueNodes(childIds, nodesById);
-      maxEvidenceRows = Math.max(maxEvidenceRows, children.length);
-      children.forEach((child, childIndex) => {
-        positions.set(child.id, {
-          x: facetX,
-          y: EVIDENCE_Y + childIndex * EVIDENCE_ROW_GAP,
-        });
-      });
-    });
-  });
-
-  const positioned = new Set(positions.keys());
-  const leftovers = graph.nodes.filter((node) => !positioned.has(node.id));
-  leftovers.forEach((node, index) => {
-    const columns = Math.max(Math.floor(width / 180), 1);
-    positions.set(node.id, {
-      x: 90 + (index % columns) * 180,
-      y: EVIDENCE_Y + (maxEvidenceRows + 1 + Math.floor(index / columns)) * EVIDENCE_ROW_GAP,
-    });
-  });
-
-  const xs = [...positions.values()].map((point) => point.x);
-  const ys = [...positions.values()].map((point) => point.y);
-  const pad = 90;
-  const minX = Math.min(...xs) - pad;
-  const maxX = Math.max(...xs) + pad;
-  const minY = Math.min(...ys) - pad;
-  const maxY = Math.max(...ys) + pad;
   return {
-    positions,
-    viewBox: { x: minX, y: minY, w: Math.max(maxX - minX, MIN_WIDTH), h: Math.max(maxY - minY, 520) },
+    meta: { name: graph.paper_id, author: 'Understand AnyPaper', version: '1.0' },
+    format: 'node_tree',
+    data: {
+      id: root.id,
+      topic: displayTitle(root),
+      expanded: true,
+      nodeType: root.node_type,
+      subtitle: nodeSubtitle(root, subtitles),
+      'background-color': NODE_COLORS[root.node_type] ?? '#67788a',
+      'foreground-color': '#ffffff',
+      children,
+    } as NodeTreeDataWithStyle,
   };
+}
+
+function applyNodeRender(_jm: jsMind, element: HTMLElement, node: JsMindNode): boolean {
+  const nodeData = node.data as NodeTreeDataWithStyle;
+  element.textContent = '';
+  element.classList.add('pag-mind-node', `pag-mind-node-${String(nodeData.nodeType ?? 'unknown').toLowerCase()}`);
+  element.dataset.nodeId = node.id;
+
+  const title = document.createElement('span');
+  title.className = 'pag-mind-node-title';
+  title.textContent = node.topic;
+  element.appendChild(title);
+
+  if (nodeData.subtitle) {
+    const subtitle = document.createElement('span');
+    subtitle.className = 'pag-mind-node-subtitle';
+    subtitle.textContent = nodeData.subtitle;
+    element.appendChild(subtitle);
+  }
+
+  return true;
+}
+
+function setMindNodeClasses(
+  jm: jsMind,
+  graph: PaperArgumentGraph,
+  selectedNodeId: string | null,
+  matchedIds: Set<string> | null,
+) {
+  for (const node of graph.nodes) {
+    const mindNode = jm.get_node(node.id) as RenderedJsMindNode | null;
+    const element = mindNode?._data.view?.element;
+    if (!element) continue;
+    element.classList.toggle('selected', node.id === selectedNodeId);
+    element.classList.toggle('dimmed', Boolean(matchedIds && !matchedIds.has(node.id)));
+  }
 }
 
 type GraphViewProps = {
@@ -145,23 +218,11 @@ type GraphViewProps = {
 };
 
 export function GraphView({ graph, selectedNodeId, query, onSelectNode, subtitles }: GraphViewProps) {
-  const initialLayout = useMemo(() => layoutGraph(graph), [graph]);
-  const [positions, setPositions] = useState<Map<string, Point>>(initialLayout.positions);
-  const [viewBox, setViewBox] = useState<ViewBox>(initialLayout.viewBox);
-  const svgRef = useRef<SVGSVGElement | null>(null);
-  const dragState = useRef<
-    | { kind: 'node'; id: string }
-    | { kind: 'pan'; startX: number; startY: number; box: ViewBox }
-    | null
-  >(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const mindRef = useRef<jsMind | null>(null);
+  const onSelectNodeRef = useRef(onSelectNode);
+  const mind = useMemo(() => graphToMind(graph, subtitles), [graph, subtitles]);
 
-  useEffect(() => {
-    const nextLayout = layoutGraph(graph);
-    setPositions(nextLayout.positions);
-    setViewBox(nextLayout.viewBox);
-  }, [graph]);
-
-  const visibleEdges = useMemo(() => graph.edges.filter(isStructuralEdge), [graph]);
   const matchedIds = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     if (!normalized) return null;
@@ -172,128 +233,71 @@ export function GraphView({ graph, selectedNodeId, query, onSelectNode, subtitle
     );
   }, [graph, query]);
 
-  const nodesById = useMemo(() => new Map(graph.nodes.map((node) => [node.id, node])), [graph]);
+  useEffect(() => {
+    onSelectNodeRef.current = onSelectNode;
+  }, [onSelectNode]);
 
-  function toGraphCoords(event: React.PointerEvent | React.WheelEvent): Point {
-    const svg = svgRef.current!;
-    const rect = svg.getBoundingClientRect();
-    return {
-      x: viewBox.x + ((event.clientX - rect.left) / rect.width) * viewBox.w,
-      y: viewBox.y + ((event.clientY - rect.top) / rect.height) * viewBox.h,
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return undefined;
+
+    container.innerHTML = '';
+    const options: JsMindOptions = {
+      container,
+      editable: false,
+      theme: 'pag',
+      mode: 'full',
+      support_html: false,
+      log_level: 'error',
+      view: {
+        engine: 'svg',
+        draggable: true,
+        hide_scrollbars_when_draggable: true,
+        hmargin: 70,
+        vmargin: 42,
+        line_width: 2,
+        line_color: '#8fa0b3',
+        line_style: 'curved',
+        node_overflow: 'wrap',
+        custom_node_render: applyNodeRender,
+        expander_style: 'number',
+        zoom: { min: 0.55, max: 2.2, step: 0.12 },
+      },
+      layout: {
+        hspace: 86,
+        vspace: 18,
+        pspace: 18,
+        cousin_space: 16,
+      },
+      shortcut: { enable: false },
     };
-  }
 
-  function handleWheel(event: React.WheelEvent<SVGSVGElement>) {
-    const scale = event.deltaY > 0 ? 1.12 : 1 / 1.12;
-    const focus = toGraphCoords(event);
-    setViewBox((box) => {
-      const w = Math.min(Math.max(box.w * scale, 180), MIN_WIDTH * 4);
-      const h = (w / box.w) * box.h;
-      return {
-        x: focus.x - ((focus.x - box.x) / box.w) * w,
-        y: focus.y - ((focus.y - box.y) / box.h) * h,
-        w,
-        h,
-      };
+    const jm = new jsMind(options);
+    mindRef.current = jm;
+    jm.show(mind);
+    jm.expand_all();
+    jm.add_event_listener((type, data) => {
+      if (type === jsMind.event_type.select && data.node) onSelectNodeRef.current(data.node);
     });
-  }
 
-  function handlePointerDown(event: React.PointerEvent<SVGSVGElement>) {
-    if (dragState.current) return;
-    dragState.current = { kind: 'pan', startX: event.clientX, startY: event.clientY, box: viewBox };
-    (event.target as Element).setPointerCapture?.(event.pointerId);
-  }
+    return () => {
+      jm.clear_event_listener();
+      container.innerHTML = '';
+      if (mindRef.current === jm) mindRef.current = null;
+    };
+  }, [mind]);
 
-  function handlePointerMove(event: React.PointerEvent<SVGSVGElement>) {
-    const state = dragState.current;
-    if (!state) return;
-    if (state.kind === 'pan') {
-      const rect = svgRef.current!.getBoundingClientRect();
-      const dx = ((event.clientX - state.startX) / rect.width) * state.box.w;
-      const dy = ((event.clientY - state.startY) / rect.height) * state.box.h;
-      setViewBox({ ...state.box, x: state.box.x - dx, y: state.box.y - dy });
+  useEffect(() => {
+    const jm = mindRef.current;
+    if (!jm) return;
+    if (selectedNodeId && jm.get_node(selectedNodeId)) {
+      jm.select_node(selectedNodeId);
+      jm.scroll_node_to_center(selectedNodeId);
     } else {
-      const point = toGraphCoords(event);
-      setPositions((current) => {
-        const next = new Map(current);
-        next.set(state.id, point);
-        return next;
-      });
+      jm.select_clear();
     }
-  }
+    setMindNodeClasses(jm, graph, selectedNodeId, matchedIds);
+  }, [graph, matchedIds, selectedNodeId]);
 
-  function handlePointerUp() {
-    dragState.current = null;
-  }
-
-  function startNodeDrag(event: React.PointerEvent, nodeId: string) {
-    event.stopPropagation();
-    dragState.current = { kind: 'node', id: nodeId };
-    (event.currentTarget as Element).setPointerCapture?.(event.pointerId);
-  }
-
-  return (
-    <svg
-      ref={svgRef}
-      className="graph-canvas"
-      viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`}
-      onWheel={handleWheel}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      onPointerLeave={handlePointerUp}
-    >
-      <defs>
-        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="#5b6b7d" />
-        </marker>
-      </defs>
-      {visibleEdges.map((edge) => {
-        const source = positions.get(edge.source_node_id);
-        const target = positions.get(edge.target_node_id);
-        const targetNode = nodesById.get(edge.target_node_id);
-        if (!source || !target || !targetNode) return null;
-        const dx = target.x - source.x;
-        const dy = target.y - source.y;
-        const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-        const trim = nodeRadius(targetNode) + 4;
-        const endX = target.x - (dx / dist) * trim;
-        const endY = target.y - (dy / dist) * trim;
-        const dimmed = matchedIds && !(matchedIds.has(edge.source_node_id) && matchedIds.has(edge.target_node_id));
-        return (
-          <g key={edge.id} className={`graph-edge ${dimmed ? 'dimmed' : ''}`}>
-            <line x1={source.x} y1={source.y} x2={endX} y2={endY} markerEnd="url(#arrow)" />
-            <title>{`${edge.edge_type} (${Math.round(edge.confidence * 100)}%)`}</title>
-          </g>
-        );
-      })}
-      {graph.nodes.map((node) => {
-        const position = positions.get(node.id);
-        if (!position) return null;
-        const radius = nodeRadius(node);
-        const dimmed = matchedIds && !matchedIds.has(node.id);
-        const selected = node.id === selectedNodeId;
-        return (
-          <g
-            key={node.id}
-            className={`graph-node ${dimmed ? 'dimmed' : ''} ${selected ? 'selected' : ''}`}
-            transform={`translate(${position.x}, ${position.y})`}
-            onPointerDown={(event) => startNodeDrag(event, node.id)}
-            onClick={(event) => {
-              event.stopPropagation();
-              onSelectNode(node.id);
-            }}
-          >
-            <circle r={radius} fill={NODE_COLORS[node.node_type] ?? '#67788a'} />
-            {node.verified ? <circle r={radius + 3.5} className="verified-ring" /> : null}
-            <text y={radius + 13}>{node.title.length > 26 ? `${node.title.slice(0, 24)}...` : node.title}</text>
-            {subtitles?.has(node.id) ? (
-              <text y={radius + 27} className="node-subtitle">{subtitles.get(node.id)}</text>
-            ) : null}
-            <title>{`${node.node_type}: ${node.title}\n${node.summary.slice(0, 200)}`}</title>
-          </g>
-        );
-      })}
-    </svg>
-  );
+  return <div ref={containerRef} className="graph-canvas graph-mindmap" />;
 }
