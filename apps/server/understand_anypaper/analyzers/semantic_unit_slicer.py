@@ -196,11 +196,13 @@ class SemanticUnitSlicer:
         return self._agent.run(
             self._text_prompt(parsed, retry_instruction),
             SemanticSliceOutput,
-            prompt_cache_key=f"semantic-slice:{parsed.paper_id}:{bool(retry_instruction)}",
+            prompt_cache_key=f"semantic-slice:{parsed.paper_id}",
         )
 
     def _run_multimodal(self, parsed: ParsedPaper, retry_instruction: str = "") -> SemanticSliceOutput:
-        content: list[dict] = [{"type": "text", "text": self._text_prompt(parsed, retry_instruction)}]
+        # Page images form the stable (cacheable) prefix; the text prompt goes
+        # last because it varies between the first attempt and the retry.
+        content: list[dict] = []
         for page in parsed.pages:
             if not page.image_data:
                 continue
@@ -220,6 +222,7 @@ class SemanticUnitSlicer:
                     "image_url": {"url": f"data:{page.image_mime_type};base64,{encoded}"},
                 }
             )
+        content.append({"type": "text", "text": self._text_prompt(parsed, retry_instruction)})
 
         payload = {
             "model": self._config.openai_model,
@@ -242,7 +245,12 @@ class SemanticUnitSlicer:
             with httpx.Client(timeout=180) as client:
                 response = client.post(
                     url,
-                    headers={"Authorization": f"Bearer {self._config.openai_api_key}"},
+                    headers={
+                        "Authorization": f"Bearer {self._config.openai_api_key}",
+                        # OpenRouter session affinity: retries reuse the same
+                        # provider and hit its cached image prefix.
+                        "x-session-id": f"semantic-slice:{parsed.paper_id}"[:256],
+                    },
                     json=payload,
                 )
                 response.raise_for_status()

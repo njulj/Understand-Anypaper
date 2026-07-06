@@ -70,11 +70,11 @@ def test_assigner_selects_evidence_per_contribution():
 
     assert by_id["unit-motivation"].properties["contribution_unit_ids"] == ["unit-contribution"]
     assert by_id["unit-method"].properties["contribution_unit_ids"] == ["unit-contribution"]
-    assert agent.cache_keys == ["evidence-assignment:paper-12345678:unit-contribution"]
+    assert agent.cache_keys == ["evidence-assignment:paper-12345678"]
     assert "TARGET_CONTRIBUTION" in agent.prompts[0]
 
 
-def test_assigner_runs_contribution_requests_in_parallel_with_limit():
+def test_assigner_warms_cache_then_runs_remaining_in_parallel_with_limit():
     parsed = ParsedPaper(
         paper_id="paper-12345678",
         title="TinyLUT",
@@ -94,6 +94,7 @@ def test_assigner_runs_contribution_requests_in_parallel_with_limit():
             self.max_active = 0
             self.calls = 0
             self.lock = threading.Lock()
+            self.first_done = threading.Event()
             self.five_active = threading.Event()
 
         def run(
@@ -103,14 +104,19 @@ def test_assigner_runs_contribution_requests_in_parallel_with_limit():
             prompt_cache_key: str | None = None,
         ):
             with self.lock:
-                self.active += 1
                 self.calls += 1
+                call_index = self.calls
+                self.active += 1
                 self.max_active = max(self.max_active, self.active)
                 if self.active == 5:
                     self.five_active.set()
-            self.five_active.wait(timeout=1)
+            if call_index > 1:
+                assert self.first_done.is_set(), "parallel batch started before warm-up call finished"
+                self.five_active.wait(timeout=1)
             with self.lock:
                 self.active -= 1
+            if call_index == 1:
+                self.first_done.set()
             return ContributionEvidenceSelectionOutput.model_validate({"evidence": []})
 
     agent = TrackingAgent()

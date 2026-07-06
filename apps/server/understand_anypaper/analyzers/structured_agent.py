@@ -54,6 +54,12 @@ class StructuredAgent:
             model=self._config.openai_model,
             api_key=self._config.openai_api_key,
             base_url=self._config.openai_base_url,
+            # OpenRouter session affinity: requests sharing an x-session-id are
+            # routed to the same provider so its prompt cache stays warm. The
+            # header is ignored by other OpenAI-compatible backends. Max 256 chars.
+            default_headers=(
+                {"x-session-id": prompt_cache_key[:256]} if prompt_cache_key else None
+            ),
         )
         agent = Agent(
             client=client,

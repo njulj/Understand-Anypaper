@@ -131,14 +131,21 @@ class ContributionEvidenceAssigner:
         base_context: str,
         contributions: list[SemanticUnit],
     ) -> list[ContributionEvidenceSelectionOutput]:
+        # All requests share the same base-context prefix. Run one request
+        # first so it writes the provider prompt cache; the parallel remainder
+        # then reuses the cached prefix instead of racing before it exists.
+        first = self._select_evidence_for_contribution(parsed, base_context, contributions[0])
+        rest = contributions[1:]
+        if not rest:
+            return [first]
         with ThreadPoolExecutor(
-            max_workers=min(_MAX_PARALLEL_ASSIGNMENTS, len(contributions))
+            max_workers=min(_MAX_PARALLEL_ASSIGNMENTS, len(rest))
         ) as executor:
             futures = [
                 executor.submit(self._select_evidence_for_contribution, parsed, base_context, unit)
-                for unit in contributions
+                for unit in rest
             ]
-            return [future.result() for future in futures]
+            return [first, *(future.result() for future in futures)]
 
     def _select_evidence_for_contribution(
         self,
@@ -151,9 +158,7 @@ class ContributionEvidenceAssigner:
             return self._agent.run(
                 prompt,
                 ContributionEvidenceSelectionOutput,
-                prompt_cache_key=(
-                    f"evidence-assignment:{parsed.paper_id}:{contribution.semantic_unit_id}"
-                ),
+                prompt_cache_key=f"evidence-assignment:{parsed.paper_id}",
             )
         except StructuredAgentError as exc:
             raise ContributionEvidenceAssignmentError(str(exc)) from exc
