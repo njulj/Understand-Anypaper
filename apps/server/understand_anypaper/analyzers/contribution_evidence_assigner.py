@@ -1,6 +1,6 @@
+import asyncio
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor
 
 from agent_framework import Agent, SupportsChatGetResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -60,7 +60,11 @@ class ContributionEvidenceAssigner:
     def available(self) -> bool:
         return self._chat_client is not None or bool(self._config.openai_api_key)
 
-    def assign(self, parsed: ParsedPaper, semantic_units: list[SemanticUnit]) -> list[SemanticUnit]:
+    async def assign(
+        self,
+        parsed: ParsedPaper,
+        semantic_units: list[SemanticUnit],
+    ) -> list[SemanticUnit]:
         if not self.available:
             raise ContributionEvidenceAssignmentError("LLM contribution evidence assignment is required")
 
@@ -80,7 +84,7 @@ class ContributionEvidenceAssigner:
         }
         base_context = self._base_context(parsed, evidence_units)
 
-        outputs = self._select_evidence_for_contributions(parsed, base_context, contributions)
+        outputs = await self._select_evidence_for_contributions(parsed, base_context, contributions)
         for contribution, output in zip(contributions, outputs, strict=True):
             for selected in output.evidence:
                 if selected.semantic_unit_id not in evidence_ids:
@@ -121,43 +125,55 @@ class ContributionEvidenceAssigner:
             )
         return assigned
 
-    def _select_evidence_for_contributions(
+    async def _select_evidence_for_contributions(
         self,
         parsed: ParsedPaper,
         base_context: str,
         contributions: list[SemanticUnit],
     ) -> list[ContributionEvidenceSelectionOutput]:
+        session_id = f"evidence-assignment:{parsed.paper_id}"
+        client = self._chat_client or create_chat_client(self._config, session_id=session_id)
         # All requests share the same base-context prefix. Run one request
         # first so it writes the provider prompt cache; the parallel remainder
         # then reuses the cached prefix instead of racing before it exists.
-        first = self._select_evidence_for_contribution(parsed, base_context, contributions[0])
+        first = await self._select_evidence_for_contribution(
+            client, session_id, base_context, contributions[0]
+        )
         rest = contributions[1:]
         if not rest:
             return [first]
-        with ThreadPoolExecutor(
-            max_workers=min(_MAX_PARALLEL_ASSIGNMENTS, len(rest))
-        ) as executor:
-            futures = [
-                executor.submit(self._select_evidence_for_contribution, parsed, base_context, unit)
-                for unit in rest
-            ]
-            return [first, *(future.result() for future in futures)]
 
-    def _select_evidence_for_contribution(
+        semaphore = asyncio.Semaphore(_MAX_PARALLEL_ASSIGNMENTS)
+
+        async def bounded(unit: SemanticUnit) -> ContributionEvidenceSelectionOutput:
+            async with semaphore:
+                return await self._select_evidence_for_contribution(
+                    client, session_id, base_context, unit
+                )
+
+        # return_exceptions lets every request finish before the first error is
+        # raised, so no task is abandoned mid-flight.
+        results = await asyncio.gather(*(bounded(unit) for unit in rest), return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        return [first, *results]
+
+    async def _select_evidence_for_contribution(
         self,
-        parsed: ParsedPaper,
+        client: SupportsChatGetResponse,
+        session_id: str,
         base_context: str,
         contribution: SemanticUnit,
     ) -> ContributionEvidenceSelectionOutput:
         prompt = f"{base_context}\n\nTARGET_CONTRIBUTION:\n{self._unit_json(contribution)}"
-        session_id = f"evidence-assignment:{parsed.paper_id}"
         try:
             agent = Agent(
-                client=self._chat_client or create_chat_client(self._config, session_id=session_id),
+                client=client,
                 name="ContributionEvidenceAssigner",
                 instructions=_ASSIGNER_INSTRUCTIONS,
             )
-            return run_structured(
+            return await run_structured(
                 agent,
                 prompt,
                 ContributionEvidenceSelectionOutput,

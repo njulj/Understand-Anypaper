@@ -1,3 +1,5 @@
+import asyncio
+
 from pydantic import BaseModel
 
 import fitz
@@ -70,7 +72,7 @@ def test_slice_semantic_units_uses_agent_output():
         ]
     )
 
-    units = SemanticUnitSlicer(chat_client=client).slice_semantic_units(parsed)
+    units = asyncio.run(SemanticUnitSlicer(chat_client=client).slice_semantic_units(parsed))
 
     assert units
     assert units[0].role == "contribution"
@@ -120,7 +122,7 @@ def test_slice_semantic_units_prefers_text_anchors_for_text_roles():
         ]
     )
 
-    units = SemanticUnitSlicer(chat_client=client).slice_semantic_units(parsed)
+    units = asyncio.run(SemanticUnitSlicer(chat_client=client).slice_semantic_units(parsed))
 
     assert units
     location = units[0].source_location
@@ -171,7 +173,7 @@ def test_text_anchor_resolution_uses_end_anchor_after_start_anchor():
         ]
     )
 
-    units = SemanticUnitSlicer(chat_client=client).slice_semantic_units(parsed)
+    units = asyncio.run(SemanticUnitSlicer(chat_client=client).slice_semantic_units(parsed))
 
     assert units
     assert "Target starts here" in units[0].source_location.extracted_text

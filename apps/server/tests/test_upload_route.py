@@ -1,0 +1,93 @@
+import json
+
+import fitz
+from fastapi.testclient import TestClient
+
+from understand_anypaper.api import routes
+from understand_anypaper.main import app
+from understand_anypaper.parser.models import PageSourceLocation, SemanticUnit
+from understand_anypaper.storage import InMemoryGraphStore
+
+
+def _pdf_bytes() -> bytes:
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 96), "TinyDemo: contributions and methods.")
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+def _unit(paper_id: str, unit_id: str, role: str, properties: dict | None = None) -> SemanticUnit:
+    return SemanticUnit(
+        semantic_unit_id=unit_id,
+        paper_id=paper_id,
+        role=role,
+        title=unit_id,
+        text=unit_id,
+        source_location=PageSourceLocation(
+            page=1, bbox=[0.1, 0.1, 0.2, 0.8], extracted_text=unit_id
+        ),
+        confidence=0.9,
+        properties=properties or {},
+    )
+
+
+def test_upload_paper_streams_progress_and_saves_graph(monkeypatch):
+    async def fake_slice(self, parsed):
+        return [
+            _unit(parsed.paper_id, "unit-contribution", "contribution"),
+            _unit(parsed.paper_id, "unit-method", "method"),
+        ]
+
+    async def fake_assign(self, parsed, units):
+        return [
+            units[0],
+            units[1].model_copy(
+                update={"properties": {"contribution_unit_ids": ["unit-contribution"]}}
+            ),
+        ]
+
+    monkeypatch.setattr(routes.SemanticUnitSlicer, "slice_semantic_units", fake_slice)
+    monkeypatch.setattr(routes.ContributionEvidenceAssigner, "assign", fake_assign)
+    monkeypatch.setattr(routes, "_store", InMemoryGraphStore())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/papers",
+            files={"file": ("paper.pdf", _pdf_bytes(), "application/pdf")},
+        )
+
+    assert response.status_code == 200
+    events = [json.loads(line) for line in response.text.strip().splitlines()]
+    assert [event["event"] for event in events] == [
+        "upload_received",
+        "rendered_pages",
+        "generated_semantic_units",
+        "assigned_contribution_evidence",
+        "built_argument_graph",
+        "saved_graph",
+        "complete",
+    ]
+    graph = events[-1]["graph"]
+    assert graph["nodes"]
+    assert routes.get_store().get_graph(graph["paper_id"]) is not None
+
+
+def test_upload_paper_reports_pipeline_errors_in_stream(monkeypatch):
+    async def failing_slice(self, parsed):
+        return None
+
+    monkeypatch.setattr(routes.SemanticUnitSlicer, "slice_semantic_units", failing_slice)
+    monkeypatch.setattr(routes, "_store", InMemoryGraphStore())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/papers",
+            files={"file": ("paper.pdf", _pdf_bytes(), "application/pdf")},
+        )
+
+    assert response.status_code == 200
+    events = [json.loads(line) for line in response.text.strip().splitlines()]
+    assert events[-1]["event"] == "error"
+    assert "semantic slicing" in events[-1]["message"]

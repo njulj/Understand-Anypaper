@@ -77,36 +77,17 @@ class GraphPatchRequest(BaseModel):
     operations: list[PatchOperation]
 
 
-def _no_progress(event: str, progress: int, message: str, **payload: object) -> None:
-    pass
-
-
-def _analyze_and_build_graph(parsed: ParsedPaper, emit=_no_progress) -> PaperArgumentGraph:
-    units = SemanticUnitSlicer().slice_semantic_units(parsed)
+async def _slice_semantic_units(parsed: ParsedPaper) -> list[SemanticUnit]:
+    units = await SemanticUnitSlicer().slice_semantic_units(parsed)
     if not units:
         raise GraphBuildError("LLM semantic slicing is required to build a Paper Argument Graph")
-    emit(
-        "generated_semantic_units",
-        78,
-        "Generated semantic units.",
-        semantic_unit_count=len(units),
-    )
-    parsed.semantic_units = ContributionEvidenceAssigner().assign(parsed, units)
-    emit(
-        "assigned_contribution_evidence",
-        86,
-        "Connected evidence to contributions.",
-        semantic_unit_count=len(parsed.semantic_units),
-    )
-    graph = PaperArgumentGraphBuilder().build(parsed)
-    emit(
-        "built_argument_graph",
-        94,
-        "Built the argument graph.",
-        node_count=len(graph.nodes),
-        edge_count=len(graph.edges),
-    )
-    return graph
+    return units
+
+
+async def _analyze_and_build_graph(parsed: ParsedPaper) -> PaperArgumentGraph:
+    units = await _slice_semantic_units(parsed)
+    parsed.semantic_units = await ContributionEvidenceAssigner().assign(parsed, units)
+    return PaperArgumentGraphBuilder().build(parsed)
 
 
 def _upload_progress_line(event: str, progress: int, message: str, **payload: object) -> str:
@@ -130,87 +111,82 @@ async def upload_paper(file: Annotated[UploadFile, File(...)]) -> StreamingRespo
     filename = file.filename or f"paper{suffix}"
 
     async def progress_stream():
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        try:
+            yield _upload_progress_line(
+                "upload_received", 60, "Upload received. Rendering document pages."
+            )
+            with NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(data)
+                tmp_path = Path(tmp.name)
 
-        def emit(event: str, progress: int, message: str, **payload: object) -> None:
-            loop.call_soon_threadsafe(
-                queue.put_nowait,
-                _upload_progress_line(event, progress, message, **payload),
+            try:
+                parsed = await asyncio.to_thread(PdfParser().parse, tmp_path)
+            except Exception as exc:  # noqa: BLE001 - surface parse failures in the progress stream
+                yield _upload_progress_line("error", 100, f"Failed to parse document: {exc}")
+                return
+            finally:
+                tmp_path.unlink(missing_ok=True)
+
+            parsed.metadata.update(
+                {
+                    "source_filename": filename,
+                    "source_media_type": media_type,
+                }
+            )
+            yield _upload_progress_line(
+                "rendered_pages",
+                68,
+                "Rendered document pages.",
+                page_count=len(parsed.pages),
             )
 
-        def finish() -> None:
-            loop.call_soon_threadsafe(queue.put_nowait, None)
+            units = await _slice_semantic_units(parsed)
+            yield _upload_progress_line(
+                "generated_semantic_units",
+                78,
+                "Generated semantic units.",
+                semantic_unit_count=len(units),
+            )
 
-        def run_pipeline() -> None:
-            tmp_path: Path | None = None
-            try:
-                emit("upload_received", 60, "Upload received. Rendering document pages.")
-                with NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                    tmp.write(data)
-                    tmp_path = Path(tmp.name)
+            parsed.semantic_units = await ContributionEvidenceAssigner().assign(parsed, units)
+            yield _upload_progress_line(
+                "assigned_contribution_evidence",
+                86,
+                "Connected evidence to contributions.",
+                semantic_unit_count=len(parsed.semantic_units),
+            )
 
-                try:
-                    parsed = PdfParser().parse(tmp_path)
-                except Exception as exc:  # noqa: BLE001 - surface parse failures in the progress stream
-                    emit("error", 100, f"Failed to parse document: {exc}")
-                    return
-                finally:
-                    tmp_path.unlink(missing_ok=True)
-                    tmp_path = None
+            graph = PaperArgumentGraphBuilder().build(parsed)
+            yield _upload_progress_line(
+                "built_argument_graph",
+                94,
+                "Built the argument graph.",
+                node_count=len(graph.nodes),
+                edge_count=len(graph.edges),
+            )
 
-                parsed.metadata.update(
-                    {
-                        "source_filename": filename,
-                        "source_media_type": media_type,
-                    }
+            store = get_store()
+            await asyncio.to_thread(store.save_paper, parsed, graph)
+            if suffix.lower() == ".pdf":
+                await asyncio.to_thread(
+                    store.save_source_document,
+                    parsed.paper_id,
+                    filename,
+                    media_type,
+                    data,
                 )
-                emit(
-                    "rendered_pages",
-                    68,
-                    "Rendered document pages.",
-                    page_count=len(parsed.pages),
-                )
-
-                graph = _analyze_and_build_graph(parsed, emit)
-
-                store = get_store()
-                store.save_paper(parsed, graph)
-                if suffix.lower() == ".pdf":
-                    store.save_source_document(
-                        parsed.paper_id,
-                        filename,
-                        media_type,
-                        data,
-                    )
-                emit("saved_graph", 98, "Saved graph and source document.")
-                emit(
-                    "complete",
-                    100,
-                    "Graph ready.",
-                    graph=graph.model_dump(mode="json"),
-                )
-            except (ContributionEvidenceAssignmentError, GraphBuildError) as exc:
-                emit("error", 100, str(exc))
-            except Exception as exc:  # noqa: BLE001 - preserve the progress stream contract for unexpected failures
-                logger.exception("Unexpected paper upload failure")
-                emit("error", 100, f"Upload failed: {exc}")
-            finally:
-                if tmp_path is not None:
-                    tmp_path.unlink(missing_ok=True)
-                finish()
-
-        pipeline_task = asyncio.create_task(asyncio.to_thread(run_pipeline))
-        try:
-            while True:
-                line = await queue.get()
-                if line is None:
-                    break
-                yield line
-            await pipeline_task
-        finally:
-            if not pipeline_task.done():
-                pipeline_task.cancel()
+            yield _upload_progress_line("saved_graph", 98, "Saved graph and source document.")
+            yield _upload_progress_line(
+                "complete",
+                100,
+                "Graph ready.",
+                graph=graph.model_dump(mode="json"),
+            )
+        except (ContributionEvidenceAssignmentError, GraphBuildError) as exc:
+            yield _upload_progress_line("error", 100, str(exc))
+        except Exception as exc:  # noqa: BLE001 - preserve the progress stream contract for unexpected failures
+            logger.exception("Unexpected paper upload failure")
+            yield _upload_progress_line("error", 100, f"Upload failed: {exc}")
 
     return StreamingResponse(progress_stream(), media_type="application/x-ndjson")
 
@@ -375,14 +351,14 @@ def resolve_reference(reference_id: str) -> PaperReference:
 
 
 @router.post("/references/{reference_id}/analyze")
-def analyze_reference(reference_id: str, request: ReferenceAnalyzeRequest) -> dict:
+async def analyze_reference(reference_id: str, request: ReferenceAnalyzeRequest) -> dict:
     store = get_store()
-    reference = store.find_reference(reference_id)
+    reference = await asyncio.to_thread(store.find_reference, reference_id)
     if reference is None:
         raise HTTPException(status_code=404, detail="Reference not found")
     policy = TraversalPolicy(max_depth=min(request.depth, settings.recursion_max_depth), max_papers=settings.recursion_max_papers)
     can_expand = policy.can_expand(reference_id, request.depth)
-    expansion = _expand_reference(reference, store) if request.expand and can_expand else None
+    expansion = await _expand_reference(reference, store) if request.expand and can_expand else None
     return {
         "reference_id": reference_id,
         "reference": reference.model_dump(),
@@ -586,8 +562,8 @@ def _semantic_scholar_enrich(reference: PaperReference) -> PaperReference | None
         return None
 
 
-def _expand_reference(reference: PaperReference, store: GraphStore) -> dict:
-    cached = _find_cached_reference_graph(reference, store)
+async def _expand_reference(reference: PaperReference, store: GraphStore) -> dict:
+    cached = await asyncio.to_thread(_find_cached_reference_graph, reference, store)
     if cached:
         return {"status": "cached", "paper_id": cached["paper_id"], "title": cached["title"]}
     if not reference.arxiv_id:
@@ -595,7 +571,8 @@ def _expand_reference(reference: PaperReference, store: GraphStore) -> dict:
 
     url = f"https://arxiv.org/pdf/{reference.arxiv_id}.pdf"
     try:
-        response = httpx.get(url, timeout=40, follow_redirects=True)
+        async with httpx.AsyncClient(timeout=40, follow_redirects=True) as client:
+            response = await client.get(url)
         response.raise_for_status()
     except httpx.HTTPError as exc:
         logger.warning("arXiv PDF download failed for %s: %s", reference.reference_id, exc)
@@ -608,7 +585,7 @@ def _expand_reference(reference: PaperReference, store: GraphStore) -> dict:
         tmp.write(data)
         tmp_path = Path(tmp.name)
     try:
-        parsed = PdfParser().parse(tmp_path)
+        parsed = await asyncio.to_thread(PdfParser().parse, tmp_path)
     except Exception as exc:  # noqa: BLE001 - reference expansion should not break citation analysis
         logger.warning("Recursive reference parse failed for %s: %s", reference.reference_id, exc)
         return {"status": "failed", "reason": f"Failed to parse referenced PDF: {exc}"}
@@ -624,11 +601,13 @@ def _expand_reference(reference: PaperReference, store: GraphStore) -> dict:
         }
     )
     try:
-        graph = _analyze_and_build_graph(parsed)
+        graph = await _analyze_and_build_graph(parsed)
     except (ContributionEvidenceAssignmentError, GraphBuildError) as exc:
         return {"status": "failed", "reason": str(exc)}
-    store.save_paper(parsed, graph)
-    store.save_source_document(parsed.paper_id, f"{reference.arxiv_id}.pdf", "application/pdf", data)
+    await asyncio.to_thread(store.save_paper, parsed, graph)
+    await asyncio.to_thread(
+        store.save_source_document, parsed.paper_id, f"{reference.arxiv_id}.pdf", "application/pdf", data
+    )
     return {
         "status": "expanded",
         "paper_id": parsed.paper_id,

@@ -1,4 +1,4 @@
-import threading
+import asyncio
 
 from agent_framework import ChatResponse, Content, Message
 from pydantic import BaseModel
@@ -72,7 +72,7 @@ def test_assigner_selects_evidence_per_contribution():
         ]
     )
 
-    assigned = ContributionEvidenceAssigner(chat_client=client).assign(parsed, units)
+    assigned = asyncio.run(ContributionEvidenceAssigner(chat_client=client).assign(parsed, units))
     by_id = {unit.semantic_unit_id: unit for unit in assigned}
 
     assert by_id["unit-motivation"].properties["contribution_unit_ids"] == ["unit-contribution"]
@@ -87,10 +87,11 @@ def test_assigner_warms_cache_then_runs_remaining_in_parallel_with_limit():
         title="TinyLUT",
         abstract="A compact lookup-table method.",
     )
+    # 1 warm-up call + 6 parallel calls: the semaphore must cap concurrency at 5.
     units = [
         *[
             _unit(f"unit-contribution-{index}", "contribution", f"Contribution {index}", 1)
-            for index in range(6)
+            for index in range(7)
         ],
         _unit("unit-method", "method", "Separable mapping", 2),
     ]
@@ -100,30 +101,27 @@ def test_assigner_warms_cache_then_runs_remaining_in_parallel_with_limit():
             self.active = 0
             self.max_active = 0
             self.calls = 0
-            self.lock = threading.Lock()
-            self.first_done = threading.Event()
-            self.five_active = threading.Event()
+            self.first_done = asyncio.Event()
+            self.five_active = asyncio.Event()
 
         async def get_response(self, messages=None, *, stream=False, options=None, **kwargs):
-            with self.lock:
-                self.calls += 1
-                call_index = self.calls
-                self.active += 1
-                self.max_active = max(self.max_active, self.active)
-                if self.active == 5:
-                    self.five_active.set()
+            self.calls += 1
+            call_index = self.calls
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            if self.active == 5:
+                self.five_active.set()
             if call_index > 1:
                 assert self.first_done.is_set(), "parallel batch started before warm-up call finished"
-                self.five_active.wait(timeout=1)
-            with self.lock:
-                self.active -= 1
+                await asyncio.wait_for(self.five_active.wait(), timeout=1)
+            self.active -= 1
             if call_index == 1:
                 self.first_done.set()
             return _response(ContributionEvidenceSelectionOutput.model_validate({"evidence": []}))
 
     client = TrackingChatClient()
 
-    ContributionEvidenceAssigner(chat_client=client).assign(parsed, units)
+    asyncio.run(ContributionEvidenceAssigner(chat_client=client).assign(parsed, units))
 
-    assert client.calls == 6
+    assert client.calls == 7
     assert client.max_active == 5

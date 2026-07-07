@@ -60,7 +60,7 @@ docker-compose.yml
 - `graph/schema.py`：Paper Argument Graph 的 Pydantic 模型和枚举，包括 `NodeType`、`EdgeType`、`GraphNode`、`GraphEdge`、`PaperArgumentGraph`。节点和边通过 `semantic_unit_ids` 溯源。
 - `graph/graph_builder.py`：从 `ParsedPaper.semantic_units` 构建 PAG。为每个 contribution 生成节点和 why/how/proof facet 节点，再按 `properties.contribution_unit_ids` 把 evidence 节点挂到对应 facet 下。
 - `graph/graph_validator.py`：贡献完整度评分，检查每个 contribution 是否有 motivation/gap、method/module、equation、experiment/result、reference 类型邻居。
-- `analyzers/llm.py`：analyzers 共享的 agent-framework chat client 工厂、结构化输出 options 和同步运行 helper。
+- `analyzers/llm.py`：analyzers 共享的 agent-framework chat client 工厂、结构化输出 options 和 `run_structured` async helper。
 - `analyzers/semantic_unit_slicer.py`：多模态语义切分器，把页面图片发给 LLM 并把返回的 text/bbox locator 解析成 `PageSourceLocation`。
 - `analyzers/contribution_evidence_assigner.py`：LLM evidence→contribution 分配器，按 contribution 并行调用。
 - `storage/graph_store.py`：`GraphStore` 抽象及 PostgreSQL/内存两个实现，负责论文、图、semantic units、references 和源 PDF 的持久化。

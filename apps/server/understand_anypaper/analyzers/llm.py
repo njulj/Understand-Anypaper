@@ -1,7 +1,5 @@
 """Shared agent-framework chat client and options for LLM-backed analyzers."""
 
-import asyncio
-import threading
 from typing import Any, TypeVar
 
 from agent_framework import Agent, Message
@@ -50,19 +48,17 @@ def structured_output_options(
     return options
 
 
-def run_structured(
+async def run_structured(
     agent: Agent,
     messages: str | Message,
     output_model: type[OutputT],
     prompt_cache_key: str | None = None,
 ) -> OutputT:
-    """Run an agent from synchronous pipeline code and return its typed output."""
+    """Run an agent and return its typed structured output."""
     try:
-        response = _run_blocking(
-            agent.run(
-                messages,
-                options=structured_output_options(output_model, prompt_cache_key),
-            )
+        response = await agent.run(
+            messages,
+            options=structured_output_options(output_model, prompt_cache_key),
         )
         value = response.value
     except AgentFrameworkException as exc:
@@ -70,27 +66,3 @@ def run_structured(
     if not isinstance(value, output_model):
         raise LlmError(f"{agent.name} returned no structured value")
     return value
-
-
-def _run_blocking(coro):
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-
-    result = None
-    error: BaseException | None = None
-
-    def runner() -> None:
-        nonlocal result, error
-        try:
-            result = asyncio.run(coro)
-        except BaseException as exc:  # noqa: BLE001 - re-raised on caller thread
-            error = exc
-
-    thread = threading.Thread(target=runner, daemon=True)
-    thread.start()
-    thread.join()
-    if error is not None:
-        raise error
-    return result

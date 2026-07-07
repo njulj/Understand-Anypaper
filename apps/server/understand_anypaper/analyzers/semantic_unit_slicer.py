@@ -161,12 +161,12 @@ class SemanticUnitSlicer:
     def available(self) -> bool:
         return self._chat_client is not None or bool(self._config.openai_api_key)
 
-    def slice_semantic_units(self, parsed: ParsedPaper) -> list[SemanticUnit] | None:
+    async def slice_semantic_units(self, parsed: ParsedPaper) -> list[SemanticUnit] | None:
         if not self.available or not parsed.pages:
             return None
 
         try:
-            output = self._run(parsed)
+            output = await self._run(parsed)
         except LlmError as exc:
             logger.warning("LLM semantic slicing failed: %s", exc)
             return None
@@ -174,7 +174,7 @@ class SemanticUnitSlicer:
         if not self._has_contribution(output):
             logger.error("LLM semantic slicing returned no contribution units; retrying once")
             try:
-                output = self._run(parsed, _CONTRIBUTION_REQUIRED_RETRY_PROMPT)
+                output = await self._run(parsed, _CONTRIBUTION_REQUIRED_RETRY_PROMPT)
             except LlmError as exc:
                 logger.warning("LLM semantic slicing failed: %s", exc)
                 return None
@@ -183,7 +183,7 @@ class SemanticUnitSlicer:
 
         return self._semantic_units_from_output(parsed, output)
 
-    def _run(self, parsed: ParsedPaper, retry_instruction: str = "") -> SemanticSliceOutput:
+    async def _run(self, parsed: ParsedPaper, retry_instruction: str = "") -> SemanticSliceOutput:
         session_id = f"semantic-slice:{parsed.paper_id}"
         agent = Agent(
             client=self._chat_client or create_chat_client(self._config, session_id=session_id),
@@ -204,7 +204,7 @@ class SemanticUnitSlicer:
             )
             contents.append(Content.from_data(page.image_data, page.image_mime_type))
         contents.append(Content.from_text(self._text_prompt(parsed, retry_instruction)))
-        return run_structured(
+        return await run_structured(
             agent,
             Message(role="user", contents=contents),
             SemanticSliceOutput,
