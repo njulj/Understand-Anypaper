@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO)
 
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
-logging.getLogger("httpx.HTTP").setLevel(logging.WARNING)
+logging.getLogger("httpx.HTTP Request").setLevel(logging.WARNING)
 
 configure_observability()
 

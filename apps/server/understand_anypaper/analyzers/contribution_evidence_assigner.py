@@ -178,6 +178,8 @@ class ContributionEvidenceAssigner:
                 prompt,
                 ContributionEvidenceSelectionOutput,
                 prompt_cache_key=session_id,
+                timeout_seconds=self._config.llm_request_timeout_seconds,
+                base_url=self._config.openai_base_url,
             )
         except LlmError as exc:
             raise ContributionEvidenceAssignmentError(str(exc)) from exc

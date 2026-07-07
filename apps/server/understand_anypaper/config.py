@@ -22,6 +22,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("PAG_OPENAI_BASE_URL", "OPENAI_BASE_URL"),
     )
     openai_model: str = "gpt-4o-mini"
+    llm_request_timeout_seconds: float = 180
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
 

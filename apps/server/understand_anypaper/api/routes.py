@@ -17,7 +17,10 @@ from understand_anypaper.analyzers.contribution_evidence_assigner import (
     ContributionEvidenceAssigner,
     ContributionEvidenceAssignmentError,
 )
-from understand_anypaper.analyzers.semantic_unit_slicer import SemanticUnitSlicer
+from understand_anypaper.analyzers.semantic_unit_slicer import (
+    SemanticUnitSlicer,
+    SemanticUnitSlicingError,
+)
 from understand_anypaper.config import settings
 from understand_anypaper.graph.graph_builder import GraphBuildError, PaperArgumentGraphBuilder
 from understand_anypaper.graph.graph_validator import GraphValidator
@@ -78,9 +81,12 @@ class GraphPatchRequest(BaseModel):
 
 
 async def _slice_semantic_units(parsed: ParsedPaper) -> list[SemanticUnit]:
-    units = await SemanticUnitSlicer().slice_semantic_units(parsed)
+    try:
+        units = await SemanticUnitSlicer().slice_semantic_units(parsed)
+    except SemanticUnitSlicingError as exc:
+        raise GraphBuildError(str(exc)) from exc
     if not units:
-        raise GraphBuildError("LLM semantic slicing is required to build a Paper Argument Graph")
+        raise GraphBuildError("LLM semantic slicing returned no usable semantic units")
     return units
 
 

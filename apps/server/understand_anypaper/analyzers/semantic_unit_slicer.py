@@ -161,25 +161,29 @@ class SemanticUnitSlicer:
     def available(self) -> bool:
         return self._chat_client is not None or bool(self._config.openai_api_key)
 
-    async def slice_semantic_units(self, parsed: ParsedPaper) -> list[SemanticUnit] | None:
-        if not self.available or not parsed.pages:
-            return None
+    async def slice_semantic_units(self, parsed: ParsedPaper) -> list[SemanticUnit]:
+        if not self.available:
+            raise SemanticUnitSlicingError(
+                "LLM semantic slicing requires OPENAI_API_KEY or PAG_OPENAI_API_KEY"
+            )
+        if not parsed.pages:
+            raise SemanticUnitSlicingError("LLM semantic slicing requires rendered document pages")
 
         try:
             output = await self._run(parsed)
         except LlmError as exc:
-            logger.warning("LLM semantic slicing failed: %s", exc)
-            return None
+            raise SemanticUnitSlicingError(f"LLM semantic slicing failed: {exc}") from exc
 
         if not self._has_contribution(output):
             logger.error("LLM semantic slicing returned no contribution units; retrying once")
             try:
                 output = await self._run(parsed, _CONTRIBUTION_REQUIRED_RETRY_PROMPT)
             except LlmError as exc:
-                logger.warning("LLM semantic slicing failed: %s", exc)
-                return None
+                raise SemanticUnitSlicingError(f"LLM semantic slicing failed: {exc}") from exc
             if not self._has_contribution(output):
-                return None
+                raise SemanticUnitSlicingError(
+                    "LLM semantic slicing returned no contribution units after retry"
+                )
 
         return self._semantic_units_from_output(parsed, output)
 
@@ -209,6 +213,8 @@ class SemanticUnitSlicer:
             Message(role="user", contents=contents),
             SemanticSliceOutput,
             prompt_cache_key=session_id,
+            timeout_seconds=self._config.llm_request_timeout_seconds,
+            base_url=self._config.openai_base_url,
         )
 
     @staticmethod
@@ -233,14 +239,16 @@ class SemanticUnitSlicer:
         self,
         parsed: ParsedPaper,
         output: SemanticSliceOutput,
-    ) -> list[SemanticUnit] | None:
+    ) -> list[SemanticUnit]:
         units: list[SemanticUnit] = []
+        rejected_units = 0
         prefix = parsed.paper_id[:8]
         doc = self._open_pdf(parsed)
         try:
             for index, item in enumerate(output.semantic_units, start=1):
                 source_location = self._clean_source_location(parsed, item.source_location, doc)
                 if source_location is None:
+                    rejected_units += 1
                     continue
                 units.append(
                     SemanticUnit(
@@ -257,7 +265,14 @@ class SemanticUnitSlicer:
         finally:
             if doc is not None:
                 doc.close()
-        return units or None
+        if not units:
+            raise SemanticUnitSlicingError(
+                "LLM semantic slicing produced no usable source locations "
+                f"({rejected_units} semantic units were rejected)"
+            )
+        if rejected_units:
+            logger.warning("Dropped %s semantic units with unusable source locations", rejected_units)
+        return units
 
     @staticmethod
     def _has_contribution(output: SemanticSliceOutput) -> bool:
@@ -319,26 +334,26 @@ class SemanticUnitSlicer:
         page = doc.load_page(item.page - 1)
         start_rects = self._search_anchor_rects(page, start_text, "start")
         if not start_rects:
-            return None
+            return self._fallback_text_anchor_location(parsed, item, doc, start_text, end_text)
         end_rects = self._search_anchor_rects(page, end_text, "end") if end_text else []
 
         words = page.get_text("words", sort=True)
         selection = self._word_range_for_anchor_rects(words, start_rects, end_rects)
         if selection is None:
-            return None
+            return self._fallback_text_anchor_location(parsed, item, doc, start_text, end_text)
         start_index, end_index = selection
         extracted_text = self._text_from_words(words[start_index : end_index + 1])
         if not self._text_contains_anchor(extracted_text, start_text):
-            return None
+            return self._fallback_text_anchor_location(parsed, item, doc, start_text, end_text)
         if end_text and not self._text_contains_anchor(extracted_text, end_text):
-            return None
+            return self._fallback_text_anchor_location(parsed, item, doc, start_text, end_text)
 
         rect = self._rect_for_word_range(words, start_index, end_index)
         if rect is None:
-            return None
+            return self._fallback_text_anchor_location(parsed, item, doc, start_text, end_text)
         bbox = self._rect_to_normalized_bbox(page, rect)
         if bbox is None:
-            return None
+            return self._fallback_text_anchor_location(parsed, item, doc, start_text, end_text)
         return PageSourceLocation(
             page=item.page,
             bbox=bbox,
@@ -346,6 +361,36 @@ class SemanticUnitSlicer:
             start_text=start_text,
             end_text=end_text,
             extraction_method="pymupdf_text_anchors",
+        )
+
+    def _fallback_text_anchor_location(
+        self,
+        parsed: ParsedPaper,
+        item: SemanticUnitSourceLocationOutput,
+        doc: fitz.Document | None,
+        start_text: str,
+        end_text: str,
+    ) -> PageSourceLocation | None:
+        if item.page < 1:
+            return None
+        if doc is None:
+            plain_text = parsed.metadata.get("plain_text")
+            extracted_text = plain_text[:4000] if isinstance(plain_text, str) else ""
+        elif item.page <= doc.page_count:
+            extracted_text = re.sub(
+                r"\s+",
+                " ",
+                doc.load_page(item.page - 1).get_text("text"),
+            ).strip()[:4000]
+        else:
+            return None
+        return PageSourceLocation(
+            page=item.page,
+            bbox=[0.0, 0.0, 1.0, 1.0],
+            extracted_text=extracted_text,
+            start_text=start_text,
+            end_text=end_text,
+            extraction_method="unresolved_text_anchors",
         )
 
     @staticmethod
@@ -492,3 +537,7 @@ class SemanticUnitSlicer:
         )
         text = page.get_text("text", clip=rect)
         return re.sub(r"\s+", " ", text).strip()
+
+
+class SemanticUnitSlicingError(RuntimeError):
+    pass
