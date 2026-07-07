@@ -29,10 +29,15 @@ You receive:
 - all semantic evidence units extracted from the paper,
 - one target contribution unit.
 
-Select every evidence unit that directly helps explain this contribution: motivation,
-gap, method, equation, figure, experiment, table, result, conclusion, background, or
-reference context. Use semantic relevance, not textual proximity. It is valid to return
-an empty evidence list if none of the evidence units support this contribution.
+Select every non-contribution evidence unit that directly helps explain this
+contribution. Relevant evidence may include motivation, problem, gap, background,
+prior work, definitions, observations, design rationale, method overviews,
+method components, algorithms, implementation details, training/inference
+strategies, equations, figures, experimental setup, datasets, metrics, baselines,
+experiments, ablations, tables, results, qualitative results, efficiency analysis,
+extensions, conclusions, or reference context. Use semantic relevance, not textual
+proximity. It is valid to return an empty evidence list if none of the evidence
+units support this contribution.
 
 Use only the provided semantic_unit_id values. Do not select contribution units. Return
 JSON matching the schema.
@@ -171,6 +176,8 @@ class ContributionEvidenceAssigner:
             agent,
             prompt,
             ContributionEvidenceSelectionOutput,
+            base_url=self._config.openai_base_url,
+            prompt_cache_key=f"evidence-assignment:{contribution.paper_id}",
         )
 
     def _base_context(self, parsed: ParsedPaper, evidence_units: list[SemanticUnit]) -> str:

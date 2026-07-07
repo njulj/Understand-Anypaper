@@ -3,6 +3,36 @@ from dataclasses import dataclass
 from understand_anypaper.graph.schema import NodeType, PaperArgumentGraph
 
 
+MOTIVATION_TYPES = {
+    NodeType.MOTIVATION,
+    NodeType.PROBLEM,
+    NodeType.RESEARCH_GAP,
+    NodeType.PRIOR_WORK,
+    NodeType.OBSERVATION,
+    NodeType.DESIGN_RATIONALE,
+}
+METHOD_TYPES = {
+    NodeType.METHOD,
+    NodeType.MODULE,
+    NodeType.ALGORITHM,
+    NodeType.IMPLEMENTATION,
+    NodeType.TRAINING,
+    NodeType.INFERENCE,
+    NodeType.EXTENSION,
+}
+EXPERIMENTAL_EVIDENCE_TYPES = {
+    NodeType.EXPERIMENT,
+    NodeType.DATASET,
+    NodeType.METRIC,
+    NodeType.BASELINE,
+    NodeType.ABLATION,
+    NodeType.RESULT,
+    NodeType.QUALITATIVE_RESULT,
+    NodeType.EFFICIENCY,
+    NodeType.TABLE,
+}
+
+
 @dataclass(frozen=True)
 class CompletenessScore:
     contribution_id: str
@@ -41,10 +71,10 @@ class GraphValidator:
             scores.append(
                 CompletenessScore(
                     contribution_id=contribution.id,
-                    motivation=1.0 if NodeType.MOTIVATION in types or NodeType.RESEARCH_GAP in types else 0.0,
-                    method=1.0 if NodeType.METHOD in types or NodeType.MODULE in types else 0.0,
+                    motivation=1.0 if types & MOTIVATION_TYPES else 0.0,
+                    method=1.0 if types & METHOD_TYPES else 0.0,
                     equations=1.0 if NodeType.EQUATION in types else 0.0,
-                    experimental_evidence=1.0 if NodeType.EXPERIMENT in types or NodeType.RESULT in types else 0.0,
+                    experimental_evidence=1.0 if types & EXPERIMENTAL_EVIDENCE_TYPES else 0.0,
                     references=1.0 if NodeType.REFERENCE in types else 0.0,
                 )
             )

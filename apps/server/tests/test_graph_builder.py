@@ -83,3 +83,50 @@ def test_evidence_assignment_is_required():
         assert "missing LLM contribution assignment" in str(exc)
     else:
         raise AssertionError("Graph builder should reject unassigned evidence")
+
+
+def test_expanded_semantic_roles_are_routed_to_argument_facets():
+    parsed = ParsedPaper(
+        paper_id="paper-12345678",
+        title="TinyLUT",
+        semantic_units=[
+            _unit("unit-contribution", "contribution", "TinyLUT contribution", 1),
+            _unit("unit-problem", "problem", "Edge device constraint", 1, ["unit-contribution"]),
+            _unit("unit-prior", "prior_work", "SR-LUT caches outputs", 2, ["unit-contribution"]),
+            _unit("unit-component", "method_component", "Complementary indexing", 3, ["unit-contribution"]),
+            _unit("unit-algorithm", "algorithm", "Hierarchical lookup", 4, ["unit-contribution"]),
+            _unit("unit-dataset", "dataset", "Five SR benchmarks", 5, ["unit-contribution"]),
+            _unit("unit-ablation", "ablation", "Indexing pattern study", 6, ["unit-contribution"]),
+            _unit("unit-efficiency", "efficiency_analysis", "Energy cost advantage", 7, ["unit-contribution"]),
+        ],
+    )
+
+    graph = PaperArgumentGraphBuilder().build(parsed)
+    by_id = {node.id: node for node in graph.nodes}
+    contribution = next(node for node in graph.nodes if node.node_type == NodeType.CONTRIBUTION)
+    facets = {
+        by_id[edge.target_node_id].node_type: edge.target_node_id
+        for edge in graph.edges
+        if edge.source_node_id == contribution.id
+    }
+
+    assert by_id["unit-problem"].node_type == NodeType.PROBLEM
+    assert by_id["unit-prior"].node_type == NodeType.PRIOR_WORK
+    assert by_id["unit-component"].node_type == NodeType.MODULE
+    assert by_id["unit-algorithm"].node_type == NodeType.ALGORITHM
+    assert by_id["unit-dataset"].node_type == NodeType.DATASET
+    assert by_id["unit-ablation"].node_type == NodeType.ABLATION
+    assert by_id["unit-efficiency"].node_type == NodeType.EFFICIENCY
+
+    assert any(
+        edge.source_node_id == facets[NodeType.WHY] and edge.target_node_id == "unit-problem"
+        for edge in graph.edges
+    )
+    assert any(
+        edge.source_node_id == facets[NodeType.HOW] and edge.target_node_id == "unit-component"
+        for edge in graph.edges
+    )
+    assert any(
+        edge.source_node_id == facets[NodeType.PROOF] and edge.target_node_id == "unit-ablation"
+        for edge in graph.edges
+    )

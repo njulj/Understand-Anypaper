@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from enum import StrEnum
@@ -16,16 +17,36 @@ logger = logging.getLogger(__name__)
 
 SemanticRole = Literal[
     "contribution",
+    "claim",
     "motivation",
+    "problem",
     "gap",
-    "method",
-    "experiment",
-    "result",
-    "conclusion",
     "background",
+    "prior_work",
+    "definition",
+    "observation",
+    "design_rationale",
+    "method",
+    "method_overview",
+    "method_component",
+    "algorithm",
+    "implementation_detail",
+    "training_strategy",
+    "inference_strategy",
     "equation",
     "figure",
     "table",
+    "experimental_setup",
+    "dataset",
+    "metric",
+    "baseline",
+    "experiment",
+    "ablation",
+    "result",
+    "qualitative_result",
+    "efficiency_analysis",
+    "extension",
+    "conclusion",
     "reference",
 ]
 
@@ -108,14 +129,60 @@ class SemanticSliceOutput(BaseModel):
     semantic_units: list[SemanticUnitOutput]
 
 
+class SemanticUnitSlicingError(RuntimeError):
+    """Raised when semantic unit slicing fails before usable units are produced."""
+
+
+_ROLE_DEFINITIONS = """\
+- contribution: an author-claimed contribution, achievement, or explicit contribution-list item.
+- claim: an important author assertion that is not itself a contribution or measured result.
+- motivation: why the authors care about the problem or design goal.
+- problem: the task, setting, practical constraint, or problem formulation being addressed.
+- gap: a limitation, failure, missing capability, or unresolved trade-off in prior work.
+- background: general domain context needed to understand the paper.
+- prior_work: a sentence describing a specific previous method, family of methods, or cited work.
+- definition: a definition of a concept, operator, notation, task, or metric.
+- observation: an empirical or conceptual observation that motivates a design choice.
+- design_rationale: why a proposed method component is designed a certain way.
+- method: legacy broad method tag; prefer one of the more specific method roles below when possible.
+- method_overview: a high-level description of the proposed approach or pipeline.
+- method_component: a concrete module, architecture block, indexing pattern, mechanism, or data flow.
+- algorithm: an ordered procedure, retrieval process, optimization process, or pseudocode-like step.
+- implementation_detail: hyperparameters, optimizer, loss, sampling interval, data type, storage detail, or engineering choice.
+- training_strategy: how the model/LUT is trained or finetuned.
+- inference_strategy: how the trained/cached method is used at test time.
+- equation: a displayed or inline formula and its immediate mathematical meaning.
+- figure: a figure or figure caption as a visual evidence unit.
+- table: a table or table caption as a structured evidence unit.
+- experimental_setup: evaluation protocol, hardware, task setup, train/test split, or comparison setup.
+- dataset: dataset names, sizes, sources, or dataset construction.
+- metric: evaluation metric or measurement definition.
+- baseline: compared method, baseline variant, or comparison group.
+- experiment: an experiment being run, excluding its numeric outcome.
+- ablation: an ablation factor, controlled variant, or component-effect study.
+- result: quantitative outcome, measured improvement, or table-backed finding.
+- qualitative_result: visual-quality finding or figure-backed perceptual comparison.
+- efficiency_analysis: runtime, energy, memory, LUT size, complexity, or deployment-efficiency evidence.
+- extension: applying or adapting the method to a second task/domain.
+- conclusion: final takeaway, implication, or closing summary.
+- reference: a bibliography entry only when it is cited by another semantic unit.
+"""
+
+
 _SEMANTIC_UNIT_SYSTEM_PROMPT = f"""\
 You are a paper extractor in Understand-Anypaper, a project that generates a graph to help user learn/understand a paper.
 You output **semantic units** in the paper. A sementic unit is a part of continuous text (or figure, or table) that has some semantic meaning, e.g. a method or a previous work, or a gap between vision and reality.
 
 ## Finding semantic units
 
-Any description of a method, a contribution etc. (full list of roles below) should be made into a semantic unit,
-even if something else describe the same concept.
+Aim to cover every argument-bearing sentence in the abstract and body. It is OK for
+the output to be verbose: the UI can show contribution and method nodes first, then
+let users expand evidence layer by layer.
+
+Any description of a method, contribution, previous work, setup, etc. (full list of roles below)
+should be made into a semantic unit, even if the same concept was already described somewhere else.
+
+A description of a method is an SU. A formula that describes an algorithm is an SU. A paragraph that explains a formula is an SU.
 
 ## Determining boundary of semantic units
 
@@ -124,18 +191,7 @@ Do not make "a summary of contributions" as a semantic unit.
 
 ## Types(role) of semantic units to extract
 
-- contribution: an author-claimed contribution or achievement.
-- method: how the work implements a contribution: architecture, module design, etc.
-- motivation: why the authors did something
-- gap: a limitation, failure, missing capability, or unresolved trade-off in prior work.
-- experiment
-- result
-- conclusion
-- background: related works, sota performance, etc.
-- equation
-- figure
-- table
-- reference. Only include a biblography if it's referred to in another semantic unit. For example, citing DDPM in the background of Flux. Don't blindly output every single reference.
+{_ROLE_DEFINITIONS}
 
 Return JSON. Schema:
 {SemanticUnitOutput.model_json_schema()}
@@ -185,16 +241,32 @@ class SemanticUnitSlicer:
         if not parsed.pages:
             raise RuntimeError("LLM semantic slicing requires rendered document pages")
 
-        output = await self._run(parsed)
+        output = await self._run_with_timeout(parsed)
         if not self._has_contribution(output):
             logger.error("LLM semantic slicing returned no contribution units; retrying once")
-            output = await self._run(parsed, _CONTRIBUTION_REQUIRED_RETRY_PROMPT)
+            output = await self._run_with_timeout(parsed, _CONTRIBUTION_REQUIRED_RETRY_PROMPT)
             if not self._has_contribution(output):
-                raise RuntimeError(
+                raise SemanticUnitSlicingError(
                     "LLM semantic slicing returned no contribution units after retry"
                 )
 
         return self._semantic_units_from_output(parsed, output)
+
+    async def _run_with_timeout(
+        self,
+        parsed: ParsedPaper,
+        retry_instruction: str = "",
+    ) -> SemanticSliceOutput:
+        try:
+            return await asyncio.wait_for(
+                self._run(parsed, retry_instruction),
+                timeout=self._config.llm_request_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            raise SemanticUnitSlicingError(
+                f"LLM semantic slicing timed out after "
+                f"{self._config.llm_request_timeout_seconds:g} seconds"
+            ) from exc
 
     async def _run(self, parsed: ParsedPaper, retry_instruction: str = "") -> SemanticSliceOutput:
         session_id = f"semantic-slice:{parsed.paper_id}"
@@ -221,6 +293,8 @@ class SemanticUnitSlicer:
             agent,
             Message(role="user", contents=contents),
             SemanticSliceOutput,
+            base_url=self._config.openai_base_url,
+            prompt_cache_key=session_id,
         )
 
     @staticmethod
