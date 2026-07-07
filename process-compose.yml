@@ -20,10 +20,23 @@ processes:
       postgresql:
         condition: process_healthy
 
+  phoenix:
+    command: |
+      mkdir -p data/phoenix
+      exec env PHOENIX_WORKING_DIR="$PWD/data/phoenix" uvx --from arize-phoenix phoenix serve
+    readiness_probe:
+      exec:
+        command: curl -fsS http://127.0.0.1:$PHOENIX_PORT >/dev/null
+      initial_delay_seconds: 3
+      period_seconds: 2
+      failure_threshold: 150
+    availability:
+      restart: "always"
+
   server:
     command: |
       cd apps/server
-      exec env DATABASE_URL="postgresql+psycopg://understand:understand@localhost:$PGPORT/understand_anypaper" uv run uvicorn understand_anypaper.main:app --host 0.0.0.0 --port $API_PORT --reload
+      exec env DATABASE_URL="postgresql+psycopg://understand:understand@localhost:$PGPORT/understand_anypaper" OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="http://localhost:$PHOENIX_PORT/v1/traces" OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf" OTEL_SERVICE_NAME="understand-anypaper-server" ENABLE_SENSITIVE_DATA="true" uv run uvicorn understand_anypaper.main:app --host 0.0.0.0 --port $API_PORT --reload
     depends_on:
       init-db:
         condition: process_completed_successfully
