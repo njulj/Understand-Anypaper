@@ -2,9 +2,10 @@ import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
+from agent_framework import Agent, SupportsChatGetResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from understand_anypaper.analyzers.structured_agent import StructuredAgent, StructuredAgentError
+from understand_anypaper.analyzers.llm import LlmError, create_chat_client, run_structured
 from understand_anypaper.config import Settings, settings
 from understand_anypaper.parser.models import ParsedPaper, SemanticUnit
 
@@ -50,19 +51,14 @@ class ContributionEvidenceAssigner:
     def __init__(
         self,
         config: Settings = settings,
-        agent: StructuredAgent | None = None,
+        chat_client: SupportsChatGetResponse | None = None,
     ) -> None:
         self._config = config
-        self._agent_injected = agent is not None
-        self._agent = agent or StructuredAgent(
-            name="ContributionEvidenceAssigner",
-            instructions=_ASSIGNER_INSTRUCTIONS,
-            config=config,
-        )
+        self._chat_client = chat_client
 
     @property
     def available(self) -> bool:
-        return self._agent_injected or bool(self._config.openai_api_key)
+        return self._chat_client is not None or bool(self._config.openai_api_key)
 
     def assign(self, parsed: ParsedPaper, semantic_units: list[SemanticUnit]) -> list[SemanticUnit]:
         if not self.available:
@@ -154,13 +150,20 @@ class ContributionEvidenceAssigner:
         contribution: SemanticUnit,
     ) -> ContributionEvidenceSelectionOutput:
         prompt = f"{base_context}\n\nTARGET_CONTRIBUTION:\n{self._unit_json(contribution)}"
+        session_id = f"evidence-assignment:{parsed.paper_id}"
         try:
-            return self._agent.run(
+            agent = Agent(
+                client=self._chat_client or create_chat_client(self._config, session_id=session_id),
+                name="ContributionEvidenceAssigner",
+                instructions=_ASSIGNER_INSTRUCTIONS,
+            )
+            return run_structured(
+                agent,
                 prompt,
                 ContributionEvidenceSelectionOutput,
-                prompt_cache_key=f"evidence-assignment:{parsed.paper_id}",
+                prompt_cache_key=session_id,
             )
-        except StructuredAgentError as exc:
+        except LlmError as exc:
             raise ContributionEvidenceAssignmentError(str(exc)) from exc
 
     def _base_context(self, parsed: ParsedPaper, evidence_units: list[SemanticUnit]) -> str:

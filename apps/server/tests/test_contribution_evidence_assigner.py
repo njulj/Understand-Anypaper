@@ -1,5 +1,6 @@
 import threading
 
+from agent_framework import ChatResponse, Content, Message
 from pydantic import BaseModel
 
 from understand_anypaper.analyzers.contribution_evidence_assigner import (
@@ -9,16 +10,22 @@ from understand_anypaper.analyzers.contribution_evidence_assigner import (
 from understand_anypaper.parser.models import PageSourceLocation, ParsedPaper, SemanticUnit
 
 
-class FakeAgent:
+def _response(output: BaseModel) -> ChatResponse:
+    return ChatResponse(
+        messages=[Message(role="assistant", contents=[Content.from_text(output.model_dump_json())])]
+    )
+
+
+class FakeChatClient:
     def __init__(self, outputs: list[BaseModel]) -> None:
         self.outputs = outputs
         self.prompts: list[str] = []
         self.cache_keys: list[str | None] = []
 
-    def run(self, prompt: str, output_model: type[BaseModel], prompt_cache_key: str | None = None):
-        self.prompts.append(prompt)
-        self.cache_keys.append(prompt_cache_key)
-        return self.outputs.pop(0)
+    async def get_response(self, messages=None, *, stream=False, options=None, **kwargs):
+        self.prompts.append("\n".join(message.text for message in messages))
+        self.cache_keys.append(options.get("prompt_cache_key"))
+        return _response(self.outputs.pop(0))
 
 
 def _unit(unit_id: str, role: str, title: str, page: int) -> SemanticUnit:
@@ -44,7 +51,7 @@ def test_assigner_selects_evidence_per_contribution():
         _unit("unit-motivation", "motivation", "Mobile demand", 1),
         _unit("unit-method", "method", "Separable mapping", 2),
     ]
-    agent = FakeAgent(
+    client = FakeChatClient(
         [
             ContributionEvidenceSelectionOutput.model_validate(
                 {
@@ -65,13 +72,13 @@ def test_assigner_selects_evidence_per_contribution():
         ]
     )
 
-    assigned = ContributionEvidenceAssigner(agent=agent).assign(parsed, units)
+    assigned = ContributionEvidenceAssigner(chat_client=client).assign(parsed, units)
     by_id = {unit.semantic_unit_id: unit for unit in assigned}
 
     assert by_id["unit-motivation"].properties["contribution_unit_ids"] == ["unit-contribution"]
     assert by_id["unit-method"].properties["contribution_unit_ids"] == ["unit-contribution"]
-    assert agent.cache_keys == ["evidence-assignment:paper-12345678"]
-    assert "TARGET_CONTRIBUTION" in agent.prompts[0]
+    assert client.cache_keys == ["evidence-assignment:paper-12345678"]
+    assert "TARGET_CONTRIBUTION" in client.prompts[0]
 
 
 def test_assigner_warms_cache_then_runs_remaining_in_parallel_with_limit():
@@ -88,7 +95,7 @@ def test_assigner_warms_cache_then_runs_remaining_in_parallel_with_limit():
         _unit("unit-method", "method", "Separable mapping", 2),
     ]
 
-    class TrackingAgent:
+    class TrackingChatClient:
         def __init__(self) -> None:
             self.active = 0
             self.max_active = 0
@@ -97,12 +104,7 @@ def test_assigner_warms_cache_then_runs_remaining_in_parallel_with_limit():
             self.first_done = threading.Event()
             self.five_active = threading.Event()
 
-        def run(
-            self,
-            prompt: str,
-            output_model: type[BaseModel],
-            prompt_cache_key: str | None = None,
-        ):
+        async def get_response(self, messages=None, *, stream=False, options=None, **kwargs):
             with self.lock:
                 self.calls += 1
                 call_index = self.calls
@@ -117,11 +119,11 @@ def test_assigner_warms_cache_then_runs_remaining_in_parallel_with_limit():
                 self.active -= 1
             if call_index == 1:
                 self.first_done.set()
-            return ContributionEvidenceSelectionOutput.model_validate({"evidence": []})
+            return _response(ContributionEvidenceSelectionOutput.model_validate({"evidence": []}))
 
-    agent = TrackingAgent()
+    client = TrackingChatClient()
 
-    ContributionEvidenceAssigner(agent=agent).assign(parsed, units)
+    ContributionEvidenceAssigner(chat_client=client).assign(parsed, units)
 
-    assert agent.calls == 6
-    assert agent.max_active == 5
+    assert client.calls == 6
+    assert client.max_active == 5

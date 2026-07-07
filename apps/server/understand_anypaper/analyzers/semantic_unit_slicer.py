@@ -1,5 +1,3 @@
-import base64
-import json
 import logging
 import re
 from enum import StrEnum
@@ -7,10 +5,10 @@ from typing import Annotated, Literal
 from uuid import uuid4
 
 import fitz
-import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from agent_framework import Agent, Content, Message, SupportsChatGetResponse
+from pydantic import BaseModel, ConfigDict, Field
 
-from understand_anypaper.analyzers.structured_agent import StructuredAgent, StructuredAgentError
+from understand_anypaper.analyzers.llm import LlmError, create_chat_client, run_structured
 from understand_anypaper.config import Settings, settings
 from understand_anypaper.parser.models import PageSourceLocation, ParsedPaper, SemanticUnit
 
@@ -154,19 +152,14 @@ class SemanticUnitSlicer:
     def __init__(
         self,
         config: Settings = settings,
-        agent: StructuredAgent | None = None,
+        chat_client: SupportsChatGetResponse | None = None,
     ) -> None:
         self._config = config
-        self._agent_injected = agent is not None
-        self._agent = agent or StructuredAgent(
-            name="SemanticUnitSlicer",
-            instructions=_SEMANTIC_UNIT_SYSTEM_PROMPT,
-            config=config,
-        )
+        self._chat_client = chat_client
 
     @property
     def available(self) -> bool:
-        return self._agent_injected or bool(self._config.openai_api_key)
+        return self._chat_client is not None or bool(self._config.openai_api_key)
 
     def slice_semantic_units(self, parsed: ParsedPaper) -> list[SemanticUnit] | None:
         if not self.available or not parsed.pages:
@@ -174,7 +167,7 @@ class SemanticUnitSlicer:
 
         try:
             output = self._run(parsed)
-        except StructuredAgentError as exc:
+        except LlmError as exc:
             logger.warning("LLM semantic slicing failed: %s", exc)
             return None
 
@@ -182,7 +175,7 @@ class SemanticUnitSlicer:
             logger.error("LLM semantic slicing returned no contribution units; retrying once")
             try:
                 output = self._run(parsed, _CONTRIBUTION_REQUIRED_RETRY_PROMPT)
-            except StructuredAgentError as exc:
+            except LlmError as exc:
                 logger.warning("LLM semantic slicing failed: %s", exc)
                 return None
             if not self._has_contribution(output):
@@ -191,81 +184,32 @@ class SemanticUnitSlicer:
         return self._semantic_units_from_output(parsed, output)
 
     def _run(self, parsed: ParsedPaper, retry_instruction: str = "") -> SemanticSliceOutput:
-        if not self._agent_injected and any(page.image_data for page in parsed.pages):
-            return self._run_multimodal(parsed, retry_instruction)
-        return self._agent.run(
-            self._text_prompt(parsed, retry_instruction),
-            SemanticSliceOutput,
-            prompt_cache_key=f"semantic-slice:{parsed.paper_id}",
+        session_id = f"semantic-slice:{parsed.paper_id}"
+        agent = Agent(
+            client=self._chat_client or create_chat_client(self._config, session_id=session_id),
+            name="SemanticUnitSlicer",
+            instructions=_SEMANTIC_UNIT_SYSTEM_PROMPT,
         )
-
-    def _run_multimodal(self, parsed: ParsedPaper, retry_instruction: str = "") -> SemanticSliceOutput:
         # Page images form the stable (cacheable) prefix; the text prompt goes
         # last because it varies between the first attempt and the retry.
-        content: list[dict] = []
+        contents: list[Content] = []
         for page in parsed.pages:
             if not page.image_data:
                 continue
-            encoded = base64.b64encode(page.image_data).decode("ascii")
-            content.append(
-                {
-                    "type": "text",
-                    "text": (
-                        f"PAGE {page.page}: PDF size={page.width:.1f}x{page.height:.1f}; "
-                        f"image size={page.image_width}x{page.image_height}."
-                    ),
-                }
-            )
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{page.image_mime_type};base64,{encoded}"},
-                }
-            )
-        content.append({"type": "text", "text": self._text_prompt(parsed, retry_instruction)})
-
-        payload = {
-            "model": self._config.openai_model,
-            "messages": [
-                {"role": "system", "content": _SEMANTIC_UNIT_SYSTEM_PROMPT},
-                {"role": "user", "content": content},
-            ],
-            "temperature": 0,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "SemanticSliceOutput",
-                    "strict": True,
-                    "schema": SemanticSliceOutput.model_json_schema(),
-                },
-            },
-        }
-        url = f"{self._config.openai_base_url.rstrip('/')}/chat/completions"
-        try:
-            with httpx.Client(timeout=180) as client:
-                response = client.post(
-                    url,
-                    headers={
-                        "Authorization": f"Bearer {self._config.openai_api_key}",
-                        # OpenRouter session affinity: retries reuse the same
-                        # provider and hit its cached image prefix.
-                        "x-session-id": f"semantic-slice:{parsed.paper_id}"[:256],
-                    },
-                    json=payload,
+            contents.append(
+                Content.from_text(
+                    f"PAGE {page.page}: PDF size={page.width:.1f}x{page.height:.1f}; "
+                    f"image size={page.image_width}x{page.image_height}."
                 )
-                response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise StructuredAgentError(f"OpenAI multimodal request failed: {exc}") from exc
-
-        try:
-            message = response.json()["choices"][0]["message"]["content"]
-            data = json.loads(message if isinstance(message, str) else message[0]["text"])
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-            raise StructuredAgentError("OpenAI multimodal response did not contain valid JSON") from exc
-        validated = self._validated_output(data)
-        if validated is None:
-            raise StructuredAgentError("OpenAI multimodal response did not match semantic slice schema")
-        return validated
+            )
+            contents.append(Content.from_data(page.image_data, page.image_mime_type))
+        contents.append(Content.from_text(self._text_prompt(parsed, retry_instruction)))
+        return run_structured(
+            agent,
+            Message(role="user", contents=contents),
+            SemanticSliceOutput,
+            prompt_cache_key=session_id,
+        )
 
     @staticmethod
     def _text_prompt(parsed: ParsedPaper, retry_instruction: str = "") -> str:
@@ -314,16 +258,6 @@ class SemanticUnitSlicer:
             if doc is not None:
                 doc.close()
         return units or None
-
-    @staticmethod
-    def _validated_output(payload: dict | None) -> SemanticSliceOutput | None:
-        if not payload:
-            return None
-        try:
-            return SemanticSliceOutput.model_validate(payload)
-        except ValidationError as exc:
-            logger.warning("LLM semantic slicing returned invalid structured output: %s", exc)
-            return None
 
     @staticmethod
     def _has_contribution(output: SemanticSliceOutput) -> bool:

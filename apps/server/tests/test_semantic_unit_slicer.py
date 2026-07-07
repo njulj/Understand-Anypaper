@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 
 import fitz
+from agent_framework import ChatResponse, Content, Message
 
 from understand_anypaper.analyzers.semantic_unit_slicer import (
     SemanticSliceOutput,
@@ -9,14 +10,17 @@ from understand_anypaper.analyzers.semantic_unit_slicer import (
 from understand_anypaper.parser.models import DocumentPage, ParsedPaper
 
 
-class FakeAgent:
+class FakeChatClient:
     def __init__(self, outputs: list[BaseModel]) -> None:
         self.outputs = outputs
         self.prompts: list[str] = []
 
-    def run(self, prompt: str, output_model: type[BaseModel], prompt_cache_key: str | None = None):
-        self.prompts.append(prompt)
-        return self.outputs.pop(0)
+    async def get_response(self, messages=None, *, stream=False, options=None, **kwargs):
+        self.prompts.append("\n".join(message.text for message in messages))
+        payload = self.outputs.pop(0).model_dump_json()
+        return ChatResponse(
+            messages=[Message(role="assistant", contents=[Content.from_text(payload)])]
+        )
 
 
 def test_normalize_bbox_clamps_and_rounds():
@@ -39,7 +43,7 @@ def test_slice_semantic_units_uses_agent_output():
         title="TinyLUT",
         pages=[DocumentPage(page=1, width=612, height=792)],
     )
-    agent = FakeAgent(
+    client = FakeChatClient(
         [
             SemanticSliceOutput.model_validate(
                 {
@@ -66,13 +70,13 @@ def test_slice_semantic_units_uses_agent_output():
         ]
     )
 
-    units = SemanticUnitSlicer(agent=agent).slice_semantic_units(parsed)
+    units = SemanticUnitSlicer(chat_client=client).slice_semantic_units(parsed)
 
     assert units
     assert units[0].role == "contribution"
     assert units[0].source_location.bbox == [0.1, 0.1, 0.2, 0.8]
     assert units[0].created_by == "semantic-unit-slicer-agent"
-    assert agent.prompts
+    assert client.prompts
 
 
 def test_slice_semantic_units_prefers_text_anchors_for_text_roles():
@@ -91,7 +95,7 @@ def test_slice_semantic_units_prefers_text_anchors_for_text_roles():
         source_bytes=source_bytes,
         source_media_type="application/pdf",
     )
-    agent = FakeAgent(
+    client = FakeChatClient(
         [
             SemanticSliceOutput.model_validate(
                 {
@@ -116,7 +120,7 @@ def test_slice_semantic_units_prefers_text_anchors_for_text_roles():
         ]
     )
 
-    units = SemanticUnitSlicer(agent=agent).slice_semantic_units(parsed)
+    units = SemanticUnitSlicer(chat_client=client).slice_semantic_units(parsed)
 
     assert units
     location = units[0].source_location
@@ -142,7 +146,7 @@ def test_text_anchor_resolution_uses_end_anchor_after_start_anchor():
         source_bytes=source_bytes,
         source_media_type="application/pdf",
     )
-    agent = FakeAgent(
+    client = FakeChatClient(
         [
             SemanticSliceOutput.model_validate(
                 {
@@ -167,7 +171,7 @@ def test_text_anchor_resolution_uses_end_anchor_after_start_anchor():
         ]
     )
 
-    units = SemanticUnitSlicer(agent=agent).slice_semantic_units(parsed)
+    units = SemanticUnitSlicer(chat_client=client).slice_semantic_units(parsed)
 
     assert units
     assert "Target starts here" in units[0].source_location.extracted_text
