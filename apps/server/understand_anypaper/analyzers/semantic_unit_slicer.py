@@ -175,9 +175,8 @@ You output **semantic units** in the paper. A sementic unit is a part of continu
 
 ## Finding semantic units
 
-Aim to cover every argument-bearing sentence in the abstract and body. It is OK for
-the output to be verbose: the UI can show contribution and method nodes first, then
-let users expand evidence layer by layer.
+Almost every single sentence should belong to a semantic unit (although a SU can contain multiple sentences). It is OK for
+the output to be verbose: the UI can show contribution and method nodes first, then let users expand evidence layer by layer.
 
 Any description of a method, contribution, previous work, setup, etc. (full list of roles below)
 should be made into a semantic unit, even if the same concept was already described somewhere else.
