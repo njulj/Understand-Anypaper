@@ -1,12 +1,12 @@
 import logging
 import re
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Literal, Self
 from uuid import uuid4
 
 import fitz
 from agent_framework import Agent, Content, Message, SupportsChatGetResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from understand_anypaper.analyzers.llm import LlmError, create_chat_client, run_structured
 from understand_anypaper.config import Settings, settings
@@ -35,40 +35,63 @@ class SourceLocatorKind(StrEnum):
     BBOX = "bbox"
 
 
-class TextSourceLocator(BaseModel):
+class SourceLocatorOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal[SourceLocatorKind.TEXT]
+    kind: SourceLocatorKind
     start_text: str = Field(
         description=(
-            "Exact visible text copied from the beginning of the semantic unit span."
+            "For kind=text, exact visible text copied from the beginning of the semantic "
+            "unit span. For kind=bbox, use an empty string."
         ),
     )
     end_text: str = Field(
         description=(
-            "Exact visible text copied from the end of the semantic unit span."
+            "For kind=text, exact visible text copied from the end of the semantic unit "
+            "span. For kind=bbox, use an empty string."
         ),
     )
+    x: float = Field(
+        description=(
+            "For kind=bbox, normalized left coordinate on the page image. "
+            "For kind=text, use 0."
+        ),
+    )
+    y: float = Field(
+        description=(
+            "For kind=bbox, normalized top coordinate on the page image. "
+            "For kind=text, use 0."
+        ),
+    )
+    width: float = Field(
+        description="For kind=bbox, normalized width on the page image. For kind=text, use 0.",
+    )
+    height: float = Field(
+        description="For kind=bbox, normalized height on the page image. For kind=text, use 0.",
+    )
 
-
-class BboxSourceLocator(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    kind: Literal[SourceLocatorKind.BBOX]
-    x: float = Field(ge=0, le=1, description="Normalized left coordinate on the page image.")
-    y: float = Field(ge=0, le=1, description="Normalized top coordinate on the page image.")
-    width: float = Field(gt=0, le=1, description="Normalized width on the page image.")
-    height: float = Field(gt=0, le=1, description="Normalized height on the page image.")
-
-
-SourceLocator = Annotated[TextSourceLocator | BboxSourceLocator, Field(discriminator="kind")]
+    @model_validator(mode="after")
+    def validate_kind_fields(self) -> Self:
+        if self.kind == SourceLocatorKind.TEXT:
+            if not self.start_text.strip():
+                raise ValueError("text locator requires start_text")
+            return self
+        if not 0 <= self.x <= 1:
+            raise ValueError("bbox locator x must be between 0 and 1")
+        if not 0 <= self.y <= 1:
+            raise ValueError("bbox locator y must be between 0 and 1")
+        if not 0 < self.width <= 1:
+            raise ValueError("bbox locator width must be greater than 0 and at most 1")
+        if not 0 < self.height <= 1:
+            raise ValueError("bbox locator height must be greater than 0 and at most 1")
+        return self
 
 
 class SemanticUnitSourceLocationOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    page: int = Field(ge=1, description="1-indexed page number.")
-    locator: SourceLocator = Field(
+    page: int = Field(description="1-indexed page number.")
+    locator: SourceLocatorOutput = Field(
         description="How to locate this semantic unit source on the page.",
     )
 
@@ -82,7 +105,7 @@ class SemanticUnitOutput(BaseModel):
     source_location: SemanticUnitSourceLocationOutput = Field(
         description="The page location where this semantic unit appears.",
     )
-    confidence: float = Field(ge=0, le=1)
+    confidence: float
 
 
 class SemanticSliceOutput(BaseModel):
@@ -132,8 +155,9 @@ When outputting source locations:
   multiple places, output separate semantic units instead of multiple locations.
 - For pure text roles, use locator.kind="text" with exact start_text and end_text anchors copied
   from the paper text on that page. The anchors should be short, distinctive visible strings
-  at the beginning and ending of the semantic unit span.
+  at the beginning and ending of the semantic unit span. Also set x=0, y=0, width=0, height=0.
 - For figure and table roles, use locator.kind="bbox" with normalized x, y, width, and height.
+  Also set start_text="" and end_text="".
 """
 
 
@@ -293,7 +317,7 @@ class SemanticUnitSlicer:
         valid_pages = {page.page: page for page in parsed.pages}
         if item.page not in valid_pages:
             return None
-        if isinstance(item.locator, TextSourceLocator):
+        if item.locator.kind == SourceLocatorKind.TEXT:
             return self._source_location_from_text_anchors(parsed, item, doc)
         bbox = self._bbox_locator_to_normalized(item.locator)
         if bbox is None:
@@ -312,7 +336,7 @@ class SemanticUnitSlicer:
         item: SemanticUnitSourceLocationOutput,
         doc: fitz.Document | None,
     ) -> PageSourceLocation | None:
-        if not isinstance(item.locator, TextSourceLocator):
+        if item.locator.kind != SourceLocatorKind.TEXT:
             return None
         start_text = self._normalize_anchor(item.locator.start_text)
         end_text = self._normalize_anchor(item.locator.end_text)
@@ -403,8 +427,8 @@ class SemanticUnitSlicer:
         return [round(ymin, 5), round(xmin, 5), round(ymax, 5), round(xmax, 5)]
 
     @classmethod
-    def _bbox_locator_to_normalized(cls, locator: SourceLocator) -> list[float] | None:
-        if not isinstance(locator, BboxSourceLocator):
+    def _bbox_locator_to_normalized(cls, locator: SourceLocatorOutput) -> list[float] | None:
+        if locator.kind != SourceLocatorKind.BBOX:
             return None
         return cls._normalize_bbox(
             [

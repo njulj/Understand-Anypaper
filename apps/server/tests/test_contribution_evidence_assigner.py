@@ -7,6 +7,7 @@ from understand_anypaper.analyzers.contribution_evidence_assigner import (
     ContributionEvidenceAssigner,
     ContributionEvidenceSelectionOutput,
 )
+from understand_anypaper.config import Settings
 from understand_anypaper.parser.models import PageSourceLocation, ParsedPaper, SemanticUnit
 
 
@@ -72,7 +73,12 @@ def test_assigner_selects_evidence_per_contribution():
         ]
     )
 
-    assigned = asyncio.run(ContributionEvidenceAssigner(chat_client=client).assign(parsed, units))
+    assigned = asyncio.run(
+        ContributionEvidenceAssigner(
+            config=Settings(PAG_OPENAI_BASE_URL="https://api.openai.com/v1"),
+            chat_client=client,
+        ).assign(parsed, units)
+    )
     by_id = {unit.semantic_unit_id: unit for unit in assigned}
 
     assert by_id["unit-motivation"].properties["contribution_unit_ids"] == ["unit-contribution"]

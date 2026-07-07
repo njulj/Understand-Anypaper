@@ -6,6 +6,7 @@ from typing import Any, TypeVar
 from agent_framework import Agent, Message
 from agent_framework.exceptions import AgentFrameworkException
 from agent_framework.openai import OpenAIChatCompletionClient
+from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
 
 from understand_anypaper.config import Settings, settings
@@ -26,12 +27,19 @@ def create_chat_client(
     default_headers = None
     if session_id and "openrouter.ai" not in config.openai_base_url:
         default_headers = {"x-session-id": session_id[:256]}
-    return OpenAIChatCompletionClient(
-        model=config.openai_model,
-        api_key=config.openai_api_key,
-        base_url=config.openai_base_url,
-        default_headers=default_headers,
-    )
+    client_kwargs: dict[str, Any] = {
+        "model": config.openai_model,
+        "async_client": AsyncOpenAI(
+            api_key=config.openai_api_key,
+            base_url=config.openai_base_url,
+            default_headers=default_headers,
+            timeout=config.llm_request_timeout_seconds,
+            max_retries=0,
+        ),
+    }
+    if default_headers:
+        client_kwargs["default_headers"] = default_headers
+    return OpenAIChatCompletionClient(**client_kwargs)
 
 
 def structured_output_options(
@@ -39,14 +47,18 @@ def structured_output_options(
     prompt_cache_key: str | None = None,
     base_url: str | None = None,
 ) -> dict[str, Any]:
+    openrouter = bool(base_url and "openrouter.ai" in base_url)
     options: dict[str, Any] = {
         "response_format": output_model,
         "temperature": 0,
-        "store": False,
     }
-    if base_url and "openrouter.ai" in base_url:
+    if openrouter:
         options["extra_body"] = {"provider": {"require_parameters": True}}
-    if prompt_cache_key and (not base_url or "openrouter.ai" not in base_url):
+    else:
+        # Chat Completions is stateless by default. Keep explicit OpenAI storage
+        # disabled, but do not send this Responses-era field to OpenRouter.
+        options["store"] = False
+    if prompt_cache_key and not openrouter:
         options["prompt_cache_key"] = prompt_cache_key
         options["prompt_cache_retention"] = "24h"
     return options
@@ -61,35 +73,19 @@ async def run_structured(
     base_url: str | None = None,
 ) -> OutputT:
     """Run an agent and return its typed structured output."""
-    timeout = timeout_seconds or settings.llm_request_timeout_seconds
-    try:
-        response = await asyncio.wait_for(
-            agent.run(
-                messages,
-                options=structured_output_options(output_model, prompt_cache_key, base_url),
-            ),
-            timeout=timeout,
-        )
-        value = response.value
-    except TimeoutError as exc:
-        raise LlmError(f"{agent.name} request timed out after {timeout:g}s") from exc
-    except AgentFrameworkException as exc:
-        raise LlmError(f"{agent.name} request failed: {exc}") from exc
-    except (ValueError, ValidationError) as exc:
-        value = _parse_structured_text_response(output_model, getattr(response, "text", ""))
-        if value is None:
-            raise LlmError(
-                f"{agent.name} returned invalid structured value: {exc}; "
-                f"response preview={_response_preview(getattr(response, 'text', ''))}"
-            ) from exc
-    if not isinstance(value, output_model):
-        value = _parse_structured_text_response(output_model, getattr(response, "text", ""))
-    if not isinstance(value, output_model):
-        raise LlmError(
-            f"{agent.name} returned no structured value; "
-            f"response preview={_response_preview(getattr(response, 'text', ''))}"
-        )
-    return value
+    # timeout = timeout_seconds or settings.llm_request_timeout_seconds
+
+    response = await agent.run(
+        messages,
+        # options=structured_output_options(output_model, prompt_cache_key, base_url),
+        options = {
+            "response_format": output_model
+        }
+    )
+
+    assert response.value, "Model didn't output valid json"
+
+    return response.value
 
 
 def _parse_structured_text_response(

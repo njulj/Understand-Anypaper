@@ -31,6 +31,13 @@ class FakeAgent:
         )
 
 
+class RaisingAgent:
+    name = "RaisingAgent"
+
+    async def run(self, messages, options=None):
+        raise ValueError("provider request failed")
+
+
 def test_run_structured_parses_json_text_when_value_is_missing():
     output = asyncio.run(run_structured(FakeAgent('{"name":"paper","count":2}'), "", DemoOutput))
 
@@ -48,6 +55,11 @@ def test_run_structured_parses_fenced_json_text_when_value_is_missing():
 def test_run_structured_reports_response_preview_for_unparseable_text():
     with pytest.raises(LlmError, match="response preview='not json'"):
         asyncio.run(run_structured(FakeAgent("not json"), "", DemoOutput))
+
+
+def test_run_structured_reports_failure_before_response():
+    with pytest.raises(LlmError, match="failed before returning a response: provider request failed"):
+        asyncio.run(run_structured(RaisingAgent(), "", DemoOutput))
 
 
 def test_create_chat_client_uses_chat_completions_api():
@@ -73,4 +85,4 @@ def test_openrouter_structured_options_stay_stateless():
 
     assert options["extra_body"] == {"provider": {"require_parameters": True}}
     assert "prompt_cache_key" not in options
-    assert options["store"] is False
+    assert "store" not in options

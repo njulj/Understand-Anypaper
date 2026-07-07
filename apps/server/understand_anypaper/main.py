@@ -4,12 +4,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from understand_anypaper.api.routes import router
 from understand_anypaper.observability import configure_observability
 import logging
+import uvicorn
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.WARNING)
 
-logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
-logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
-logging.getLogger("httpx.HTTP Request").setLevel(logging.WARNING)
+logging.getLogger("understand_anypaper").setLevel(logging.INFO)
 
 configure_observability()
 
@@ -27,3 +26,6 @@ app.include_router(router)
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
