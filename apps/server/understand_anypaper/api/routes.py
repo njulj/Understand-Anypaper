@@ -13,16 +13,10 @@ from fastapi import APIRouter, File, HTTPException, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from understand_anypaper.analyzers.contribution_evidence_assigner import (
-    ContributionEvidenceAssigner,
-    ContributionEvidenceAssignmentError,
-)
-from understand_anypaper.analyzers.semantic_unit_slicer import (
-    SemanticUnitSlicer,
-    SemanticUnitSlicingError,
-)
+from understand_anypaper.analyzers.contribution_evidence_assigner import ContributionEvidenceAssigner
+from understand_anypaper.analyzers.semantic_unit_slicer import SemanticUnitSlicer
 from understand_anypaper.config import settings
-from understand_anypaper.graph.graph_builder import GraphBuildError, PaperArgumentGraphBuilder
+from understand_anypaper.graph.graph_builder import PaperArgumentGraphBuilder
 from understand_anypaper.graph.graph_validator import GraphValidator
 from understand_anypaper.graph.schema import GraphEdge, GraphNode, PaperArgumentGraph
 from understand_anypaper.parser.models import PaperReference, ParsedPaper, SemanticUnit
@@ -81,12 +75,9 @@ class GraphPatchRequest(BaseModel):
 
 
 async def _slice_semantic_units(parsed: ParsedPaper) -> list[SemanticUnit]:
-    try:
-        units = await SemanticUnitSlicer().slice_semantic_units(parsed)
-    except SemanticUnitSlicingError as exc:
-        raise GraphBuildError(str(exc)) from exc
+    units = await SemanticUnitSlicer().slice_semantic_units(parsed)
     if not units:
-        raise GraphBuildError("LLM semantic slicing returned no usable semantic units")
+        raise RuntimeError("LLM semantic slicing returned no usable semantic units")
     return units
 
 
@@ -188,8 +179,6 @@ async def upload_paper(file: Annotated[UploadFile, File(...)]) -> StreamingRespo
                 "Graph ready.",
                 graph=graph.model_dump(mode="json"),
             )
-        except (ContributionEvidenceAssignmentError, GraphBuildError) as exc:
-            yield _upload_progress_line("error", 100, str(exc))
         except Exception as exc:  # noqa: BLE001 - preserve the progress stream contract for unexpected failures
             logger.exception("Unexpected paper upload failure")
             yield _upload_progress_line("error", 100, f"Upload failed: {exc}")
@@ -608,7 +597,7 @@ async def _expand_reference(reference: PaperReference, store: GraphStore) -> dic
     )
     try:
         graph = await _analyze_and_build_graph(parsed)
-    except (ContributionEvidenceAssignmentError, GraphBuildError) as exc:
+    except Exception as exc:  # noqa: BLE001 - reference expansion reports failures per reference
         return {"status": "failed", "reason": str(exc)}
     await asyncio.to_thread(store.save_paper, parsed, graph)
     await asyncio.to_thread(

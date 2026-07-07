@@ -1,14 +1,14 @@
 import logging
 import re
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 from uuid import uuid4
 
 import fitz
 from agent_framework import Agent, Content, Message, SupportsChatGetResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from understand_anypaper.analyzers.llm import LlmError, create_chat_client, run_structured
+from understand_anypaper.analyzers.llm import create_chat_client, run_structured
 from understand_anypaper.config import Settings, settings
 from understand_anypaper.parser.models import PageSourceLocation, ParsedPaper, SemanticUnit
 
@@ -28,6 +28,8 @@ SemanticRole = Literal[
     "table",
     "reference",
 ]
+
+NormalizedFloat = Annotated[float, Field(ge=0, le=1)]
 
 
 class SourceLocatorKind(StrEnum):
@@ -51,22 +53,22 @@ class SourceLocatorOutput(BaseModel):
             "span. For kind=bbox, use an empty string."
         ),
     )
-    x: float = Field(
+    x: NormalizedFloat = Field(
         description=(
             "For kind=bbox, normalized left coordinate on the page image. "
             "For kind=text, use 0."
         ),
     )
-    y: float = Field(
+    y: NormalizedFloat = Field(
         description=(
             "For kind=bbox, normalized top coordinate on the page image. "
             "For kind=text, use 0."
         ),
     )
-    width: float = Field(
+    width: NormalizedFloat = Field(
         description="For kind=bbox, normalized width on the page image. For kind=text, use 0.",
     )
-    height: float = Field(
+    height: NormalizedFloat = Field(
         description="For kind=bbox, normalized height on the page image. For kind=text, use 0.",
     )
 
@@ -76,14 +78,6 @@ class SourceLocatorOutput(BaseModel):
             if not self.start_text.strip():
                 raise ValueError("text locator requires start_text")
             return self
-        if not 0 <= self.x <= 1:
-            raise ValueError("bbox locator x must be between 0 and 1")
-        if not 0 <= self.y <= 1:
-            raise ValueError("bbox locator y must be between 0 and 1")
-        if not 0 < self.width <= 1:
-            raise ValueError("bbox locator width must be greater than 0 and at most 1")
-        if not 0 < self.height <= 1:
-            raise ValueError("bbox locator height must be greater than 0 and at most 1")
         return self
 
 
@@ -187,25 +181,16 @@ class SemanticUnitSlicer:
 
     async def slice_semantic_units(self, parsed: ParsedPaper) -> list[SemanticUnit]:
         if not self.available:
-            raise SemanticUnitSlicingError(
-                "LLM semantic slicing requires OPENAI_API_KEY or PAG_OPENAI_API_KEY"
-            )
+            raise RuntimeError("LLM semantic slicing requires OPENAI_API_KEY or PAG_OPENAI_API_KEY")
         if not parsed.pages:
-            raise SemanticUnitSlicingError("LLM semantic slicing requires rendered document pages")
+            raise RuntimeError("LLM semantic slicing requires rendered document pages")
 
-        try:
-            output = await self._run(parsed)
-        except LlmError as exc:
-            raise SemanticUnitSlicingError(f"LLM semantic slicing failed: {exc}") from exc
-
+        output = await self._run(parsed)
         if not self._has_contribution(output):
             logger.error("LLM semantic slicing returned no contribution units; retrying once")
-            try:
-                output = await self._run(parsed, _CONTRIBUTION_REQUIRED_RETRY_PROMPT)
-            except LlmError as exc:
-                raise SemanticUnitSlicingError(f"LLM semantic slicing failed: {exc}") from exc
+            output = await self._run(parsed, _CONTRIBUTION_REQUIRED_RETRY_PROMPT)
             if not self._has_contribution(output):
-                raise SemanticUnitSlicingError(
+                raise RuntimeError(
                     "LLM semantic slicing returned no contribution units after retry"
                 )
 
@@ -236,9 +221,6 @@ class SemanticUnitSlicer:
             agent,
             Message(role="user", contents=contents),
             SemanticSliceOutput,
-            prompt_cache_key=session_id,
-            timeout_seconds=self._config.llm_request_timeout_seconds,
-            base_url=self._config.openai_base_url,
         )
 
     @staticmethod
@@ -290,7 +272,7 @@ class SemanticUnitSlicer:
             if doc is not None:
                 doc.close()
         if not units:
-            raise SemanticUnitSlicingError(
+            raise RuntimeError(
                 "LLM semantic slicing produced no usable source locations "
                 f"({rejected_units} semantic units were rejected)"
             )
@@ -561,7 +543,3 @@ class SemanticUnitSlicer:
         )
         text = page.get_text("text", clip=rect)
         return re.sub(r"\s+", " ", text).strip()
-
-
-class SemanticUnitSlicingError(RuntimeError):
-    pass

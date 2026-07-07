@@ -5,10 +5,6 @@ from understand_anypaper.graph.schema import EdgeType, GraphEdge, GraphNode, Nod
 from understand_anypaper.parser.models import ParsedPaper, SemanticUnit
 
 
-class GraphBuildError(RuntimeError):
-    pass
-
-
 class PaperArgumentGraphBuilder:
     """Builds a PAG from LLM-sliced semantic units.
 
@@ -41,7 +37,7 @@ class PaperArgumentGraphBuilder:
 
         contributions = units_by_role.get("contribution", [])
         if not contributions:
-            raise GraphBuildError("LLM semantic slicing produced no contribution units")
+            raise ValueError("LLM semantic slicing produced no contribution units")
 
         contribution_ids: dict[str, str] = {}
         facet_ids: dict[str, dict[str, str]] = {}
@@ -136,7 +132,7 @@ class PaperArgumentGraphBuilder:
     def _semantic_units(self, parsed: ParsedPaper) -> list[SemanticUnit]:
         if parsed.semantic_units:
             return parsed.semantic_units
-        raise GraphBuildError("Semantic units are required to build a Paper Argument Graph")
+        raise ValueError("Semantic units are required to build a Paper Argument Graph")
 
     def _node_from_unit(
         self,
@@ -171,7 +167,7 @@ class PaperArgumentGraphBuilder:
     ) -> list[str]:
         explicit_ids = unit.properties.get("contribution_unit_ids")
         if not isinstance(explicit_ids, list):
-            raise GraphBuildError(
+            raise ValueError(
                 f"Semantic unit {unit.semantic_unit_id} is missing LLM contribution assignment"
             )
         targets = [
@@ -180,7 +176,7 @@ class PaperArgumentGraphBuilder:
             if isinstance(item, str) and item in contribution_ids
         ]
         if len(targets) != len([item for item in explicit_ids if isinstance(item, str)]):
-            raise GraphBuildError(
+            raise ValueError(
                 f"Semantic unit {unit.semantic_unit_id} references an unknown contribution"
             )
         return targets

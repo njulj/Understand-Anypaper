@@ -1,16 +1,12 @@
 import asyncio
 import json
-import logging
 
 from agent_framework import Agent, SupportsChatGetResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from understand_anypaper.analyzers.llm import LlmError, create_chat_client, run_structured
+from understand_anypaper.analyzers.llm import create_chat_client, run_structured
 from understand_anypaper.config import Settings, settings
 from understand_anypaper.parser.models import ParsedPaper, SemanticUnit
-
-logger = logging.getLogger(__name__)
-
 
 class EvidenceSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -66,12 +62,12 @@ class ContributionEvidenceAssigner:
         semantic_units: list[SemanticUnit],
     ) -> list[SemanticUnit]:
         if not self.available:
-            raise ContributionEvidenceAssignmentError("LLM contribution evidence assignment is required")
+            raise RuntimeError("LLM contribution evidence assignment is required")
 
         contributions = [unit for unit in semantic_units if unit.role == "contribution"]
         evidence_units = [unit for unit in semantic_units if unit.role != "contribution"]
         if not contributions:
-            raise ContributionEvidenceAssignmentError("No contribution units are available")
+            raise RuntimeError("No contribution units are available")
         if not evidence_units:
             return semantic_units
 
@@ -88,7 +84,7 @@ class ContributionEvidenceAssigner:
         for contribution, output in zip(contributions, outputs, strict=True):
             for selected in output.evidence:
                 if selected.semantic_unit_id not in evidence_ids:
-                    raise ContributionEvidenceAssignmentError(
+                    raise ValueError(
                         f"LLM selected unknown evidence unit: {selected.semantic_unit_id}"
                     )
                 contribution_ids_by_evidence[selected.semantic_unit_id].append(
@@ -137,7 +133,7 @@ class ContributionEvidenceAssigner:
         # first so it writes the provider prompt cache; the parallel remainder
         # then reuses the cached prefix instead of racing before it exists.
         first = await self._select_evidence_for_contribution(
-            client, session_id, base_context, contributions[0]
+            client, base_context, contributions[0]
         )
         rest = contributions[1:]
         if not rest:
@@ -148,7 +144,7 @@ class ContributionEvidenceAssigner:
         async def bounded(unit: SemanticUnit) -> ContributionEvidenceSelectionOutput:
             async with semaphore:
                 return await self._select_evidence_for_contribution(
-                    client, session_id, base_context, unit
+                    client, base_context, unit
                 )
 
         # return_exceptions lets every request finish before the first error is
@@ -162,27 +158,20 @@ class ContributionEvidenceAssigner:
     async def _select_evidence_for_contribution(
         self,
         client: SupportsChatGetResponse,
-        session_id: str,
         base_context: str,
         contribution: SemanticUnit,
     ) -> ContributionEvidenceSelectionOutput:
         prompt = f"{base_context}\n\nTARGET_CONTRIBUTION:\n{self._unit_json(contribution)}"
-        try:
-            agent = Agent(
-                client=client,
-                name="ContributionEvidenceAssigner",
-                instructions=_ASSIGNER_INSTRUCTIONS,
-            )
-            return await run_structured(
-                agent,
-                prompt,
-                ContributionEvidenceSelectionOutput,
-                prompt_cache_key=session_id,
-                timeout_seconds=self._config.llm_request_timeout_seconds,
-                base_url=self._config.openai_base_url,
-            )
-        except LlmError as exc:
-            raise ContributionEvidenceAssignmentError(str(exc)) from exc
+        agent = Agent(
+            client=client,
+            name="ContributionEvidenceAssigner",
+            instructions=_ASSIGNER_INSTRUCTIONS,
+        )
+        return await run_structured(
+            agent,
+            prompt,
+            ContributionEvidenceSelectionOutput,
+        )
 
     def _base_context(self, parsed: ParsedPaper, evidence_units: list[SemanticUnit]) -> str:
         payload = {
@@ -208,7 +197,3 @@ class ContributionEvidenceAssigner:
     @classmethod
     def _unit_json(cls, unit: SemanticUnit) -> str:
         return json.dumps(cls._unit_payload(unit), ensure_ascii=False)
-
-
-class ContributionEvidenceAssignmentError(RuntimeError):
-    pass
