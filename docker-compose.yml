@@ -10,18 +10,31 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./apps/server/sql/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    environment:
+      PHOENIX_WORKING_DIR: /mnt/data
+    ports:
+      - "6006:6006"
+    volumes:
+      - phoenixdata:/mnt/data
   server:
     build: ./apps/server
     environment:
       DATABASE_URL: postgresql+psycopg://understand:understand@db:5432/understand_anypaper
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://phoenix:6006/v1/traces
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_SERVICE_NAME: understand-anypaper-server
+      ENABLE_SENSITIVE_DATA: "true"
     volumes:
       - ./data/documents:/app/data/documents
     ports:
       - "8000:8000"
     depends_on:
       - db
+      - phoenix
   web:
     build: ./apps/web
     environment:
@@ -32,3 +45,4 @@ services:
       - server
 volumes:
   pgdata:
+  phoenixdata:

@@ -54,6 +54,7 @@ docker-compose.yml
 
 - `main.py`：FastAPI 应用入口，配置 CORS、挂载 API router，并提供 `/health`。
 - `config.py`：`pydantic-settings` 配置入口。默认值包括数据库 URL、递归深度/数量限制和 OpenAI/embedding 配置。
+- `observability.py`：LLM 可观测性入口。当环境里配置了 `OTEL_EXPORTER_OTLP_*` endpoint 时，安装 OTel providers 把 agent-framework 自带的 LLM span 导出到 Arize Phoenix（或任意 OTLP 后端）；未配置时完全不生效。
 - `api/routes.py`：当前所有 REST API。上传接口以 NDJSON 流返回处理进度，图数据通过 `GraphStore` 持久化。
 - `parser/models.py`：解析和语义切分数据模型。`DocumentPage` 表示渲染后的页面图片元数据，`PageSourceLocation` 表示 semantic unit 的 `page + bbox + extracted_text`，`SemanticUnit` 表示 LLM 切出的论证语义单元。
 - `parser/pdf_parser.py`：parser facade。对 PDF 用 PyMuPDF 渲染页面图片，并提取 title/abstract/reference 元数据；semantic role 和 evidence bbox 由多模态 LLM 负责。`.txt`/`.md` 仍作为文本 fallback。
@@ -85,3 +86,4 @@ docker-compose.yml
 
 - 我们仍处于早期阶段，如果要修改数据库格式，直接把旧的库删了就行，不用考虑migration
 - 开发环境和开发服务器使用devbox管理,比如`devbox services restart`
+- `devbox services up` 会顺带启动 Arize Phoenix（http://localhost:6006），server 的每次 LLM 调用都会以 trace 形式出现在里面（含 prompt/response，`ENABLE_SENSITIVE_DATA=true`），调试 prompt 时先看它

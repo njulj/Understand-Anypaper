@@ -10,6 +10,7 @@
     "PGPORT": "5432",
     "API_PORT": "8000",
     "WEB_PORT": "5173",
+    "PHOENIX_PORT": "6006",
     "PAG_DOCUMENT_STORE_DIR": "$PWD/data/documents"
   }
 }
