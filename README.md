@@ -2,7 +2,9 @@
 
 Understand Anypaper turns research papers into an interactive **Paper Argument Graph (PAG)**: a directed, evidence-backed graph that connects each contribution with its motivation, research gap, method, equations, figures, experiments, results, conclusions, and references.
 
-<img width="4528" height="2652" alt="image" src="https://github.com/user-attachments/assets/16a0857e-476f-4338-b406-ad187ba9748d" />
+<img width="3394" height="1940" alt="image" src="https://github.com/user-attachments/assets/e02b1854-1b46-445f-b4ce-9d4fc2c457cc" />
+<img width="3394" height="1940" alt="image" src="https://github.com/user-attachments/assets/c7ba7435-a302-467b-a1d4-1e36f54c3b95" />
+
 
 ## Quick start
 
