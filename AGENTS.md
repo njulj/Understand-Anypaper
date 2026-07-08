@@ -87,3 +87,17 @@ docker-compose.yml
 - 我们仍处于早期阶段，如果要修改数据库格式，直接把旧的库删了就行，不用考虑migration
 - 开发环境和开发服务器使用devbox管理,比如`devbox services restart`
 - `devbox services up` 会顺带启动 Arize Phoenix（http://localhost:6006），server 的每次 LLM 调用都会以 trace 形式出现在里面（含 prompt/response，`ENABLE_SENSITIVE_DATA=true`），调试 prompt 时先看它
+
+## 切换模型
+
+不同模型输出图像坐标的方式不一样：
+
+| Model Family | Inherent Grounding? | Coordinate Scale | Box Array Sequence | Core Quirk / Feature |
+|---|---|---|---|---|
+| Gemini (Flash/Pro) | Yes | Integer Grid (0–1000) | [ymin, xmin, ymax, xmax] | Inverted matrix order. |
+| Claude (Anthropic) | Yes | Absolute Pixels | [xmin, ymin, xmax, ymax] | Requires tracking image resize factors. |
+| Qwen-VL (Alibaba) | Yes | Integer Grid (0–1000) | [xmin, ymin, xmax, ymax] | Encloses bounding boxes in native <box> tags. |
+| Xiaomi (Mimo) | Yes | Normalized Floats (0.0–1.0) | [xmin, ymin, xmax, ymax] | Native support for decimal float coordinates. |
+| OpenAI (GPT-4o) | No | N/A | N/A | Typically hallucinates coordinates; requires an external object detector. |
+
+目前是对着`gemini-3-flash`优化的。如果要换模型，除了可能要改prompt外，还需要在`apps/server/understand_anypaper/analyzers/semantic_unit_slicer.py`中修改坐标的输出/解析方式。

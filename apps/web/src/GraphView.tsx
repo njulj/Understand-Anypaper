@@ -253,6 +253,7 @@ export function GraphView({ graph, selectedNodeId, query, onSelectNode, subtitle
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mindRef = useRef<jsMind | null>(null);
   const onSelectNodeRef = useRef(onSelectNode);
+  const syncingSelectionRef = useRef(false);
   const mind = useMemo(() => graphToMind(graph, subtitles), [graph, subtitles]);
 
   const matchedIds = useMemo(() => {
@@ -309,7 +310,9 @@ export function GraphView({ graph, selectedNodeId, query, onSelectNode, subtitle
     jm.show(mind);
     jm.expand_all();
     jm.add_event_listener((type, data) => {
-      if (type === jsMind.event_type.select && data.node) onSelectNodeRef.current(data.node);
+      if (type === jsMind.event_type.select && data.node && !syncingSelectionRef.current) {
+        onSelectNodeRef.current(data.node);
+      }
     });
 
     return () => {
@@ -322,11 +325,18 @@ export function GraphView({ graph, selectedNodeId, query, onSelectNode, subtitle
   useEffect(() => {
     const jm = mindRef.current;
     if (!jm) return;
-    if (selectedNodeId && jm.get_node(selectedNodeId)) {
-      jm.select_node(selectedNodeId);
-      jm.scroll_node_to_center(selectedNodeId);
-    } else {
-      jm.select_clear();
+    syncingSelectionRef.current = true;
+    try {
+      if (selectedNodeId && jm.get_node(selectedNodeId)) {
+        jm.select_node(selectedNodeId);
+        jm.scroll_node_to_center(selectedNodeId);
+      } else {
+        jm.select_clear();
+      }
+    } finally {
+      window.setTimeout(() => {
+        syncingSelectionRef.current = false;
+      }, 0);
     }
     setMindNodeClasses(jm, graph, selectedNodeId, matchedIds);
   }, [graph, matchedIds, selectedNodeId]);

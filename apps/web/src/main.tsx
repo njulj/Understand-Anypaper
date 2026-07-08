@@ -307,6 +307,13 @@ function App() {
     setSelectedNodeId(nodeId);
   }
 
+  function returnToPaperOverview() {
+    if (!graph) return;
+    const paperNode = graph.nodes.find((node) => node.node_type === 'Paper');
+    setFocusedContributionId(null);
+    setSelectedNodeId(paperNode?.id ?? graph.nodes[0]?.id ?? null);
+  }
+
   function handleGraphNodeSelect(nodeId: string) {
     const node = graph?.nodes.find((item) => item.id === nodeId);
     if (!focusedContributionId && node?.node_type === 'Contribution') {
@@ -714,7 +721,7 @@ function App() {
                           type="button"
                           className="crumb-link"
                           title="Back to paper overview"
-                          onClick={() => setFocusedContributionId(null)}
+                          onClick={returnToPaperOverview}
                         >
                           <ArrowLeft size={14} />
                           <span>{paperTitle}</span>

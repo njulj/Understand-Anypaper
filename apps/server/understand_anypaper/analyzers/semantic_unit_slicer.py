@@ -50,7 +50,7 @@ SemanticRole = Literal[
     "reference",
 ]
 
-NormalizedFloat = Annotated[float, Field(ge=0, le=1)]
+PageCoordinate = Annotated[int, Field(ge=0, le=1000)]
 
 
 class SourceLocatorKind(StrEnum):
@@ -74,23 +74,29 @@ class SourceLocatorOutput(BaseModel):
             "span. For kind=bbox, use an empty string."
         ),
     )
-    x: NormalizedFloat = Field(
+    x: PageCoordinate = Field(
         description=(
-            "For kind=bbox, normalized left coordinate on the page image. "
+            "For kind=bbox, left coordinate on the page image using a 0-1000 scale. "
             "For kind=text, use 0."
         ),
     )
-    y: NormalizedFloat = Field(
+    y: PageCoordinate = Field(
         description=(
-            "For kind=bbox, normalized top coordinate on the page image. "
+            "For kind=bbox, top coordinate on the page image using a 0-1000 scale. "
             "For kind=text, use 0."
         ),
     )
-    width: NormalizedFloat = Field(
-        description="For kind=bbox, normalized width on the page image. For kind=text, use 0.",
+    width: PageCoordinate = Field(
+        description=(
+            "For kind=bbox, width on the page image using a 0-1000 scale. "
+            "For kind=text, use 0."
+        ),
     )
-    height: NormalizedFloat = Field(
-        description="For kind=bbox, normalized height on the page image. For kind=text, use 0.",
+    height: PageCoordinate = Field(
+        description=(
+            "For kind=bbox, height on the page image using a 0-1000 scale. "
+            "For kind=text, use 0."
+        ),
     )
 
     @model_validator(mode="after")
@@ -118,7 +124,7 @@ class SemanticUnitOutput(BaseModel):
     title: str = Field(description="Short graph-node title for this semantic unit.")
     text: str = Field(description="Concise faithful restatement of this unit.")
     source_location: SemanticUnitSourceLocationOutput = Field(
-        description="The page location where this semantic unit appears.",
+        description="The page location where this semantic unit appears. You can describe location by either text matching or bounding box, but not both. For text content, use text matching. Set kind=text and fill start_text and end_text. For formulas, figures and tables, use bounding box. Set kind=bbox and fill x, y, width, height.",
     )
     confidence: float
 
@@ -135,6 +141,7 @@ class SemanticUnitSlicingError(RuntimeError):
 
 _ROLE_DEFINITIONS = """\
 - contribution: an author-claimed contribution, achievement, or explicit contribution-list item.
+  Make it a concrete claim/effect/design contribution, not just a framework or method name.
 - claim: an important author assertion that is not itself a contribution or measured result.
 - motivation: why the authors care about the problem or design goal.
 - problem: the task, setting, practical constraint, or problem formulation being addressed.
@@ -171,22 +178,89 @@ _ROLE_DEFINITIONS = """\
 
 _SEMANTIC_UNIT_SYSTEM_PROMPT = f"""\
 You are a paper extractor in Understand-Anypaper, a project that generates a graph to help user learn/understand a paper.
-You output **semantic units** in the paper. A sementic unit is a part of continuous text (or figure, or table) that has some semantic meaning, e.g. a method or a previous work, or a gap between vision and reality.
+You output **semantic units** in the paper. A semantic unit is a part of continuous text (or figure, or table) that has some semantic meaning, e.g. a method or a previous work, or a gap between vision and reality.
 
 ## Finding semantic units
 
-Almost every single sentence should belong to a semantic unit (although a SU can contain multiple sentences). It is OK for
-the output to be verbose: the UI can show contribution and method nodes first, then let users expand evidence layer by layer.
+Produce a dense extraction, not a paper summary. Almost every argument-bearing sentence
+in the abstract and main body should belong to a semantic unit. It is OK for the output
+to be verbose: the UI can show contribution and method nodes first, then let users
+expand evidence layer by layer.
 
 Any description of a method, contribution, previous work, setup, etc. (full list of roles below)
 should be made into a semantic unit, even if the same concept was already described somewhere else.
 
-A description of a method is an SU. A formula that describes an algorithm is an SU. A paragraph that explains a formula is an SU.
+A description of a method is an SU. A formula that describes an algorithm is an SU.
+A paragraph that explains a formula is an SU. A figure/table/caption that explains,
+compares, or proves something is an SU.
+
+For a full conference paper, sparse output such as 10-20 units is usually wrong. As a
+calibration target:
+- extract about 6-12 text units from each dense text page;
+- extract every displayed equation as an equation unit;
+- extract every proposed-method figure as a figure unit;
+- extract every performance, runtime, energy, or ablation table as a table unit;
+- extract the sentence(s) that interpret each important figure/table as result,
+  qualitative_result, efficiency_analysis, ablation, or design_rationale units.
 
 ## Determining boundary of semantic units
 
-Semantic units should be a single thing, e.g. one contribution, or one method, or one experiment.
-Do not make "a summary of contributions" as a semantic unit.
+Semantic units should be a single thing, e.g. one contribution, one method component,
+one equation, one figure, one table, one experiment, one measured result, or one design
+rationale. Prefer sentence-level units. Use two adjacent sentences only when the second
+sentence cannot be understood without the first.
+
+Do not make "a summary of contributions" as a semantic unit. If the paper has a
+contribution list, split it into one semantic unit per numbered/bulleted contribution.
+
+## Contribution quality
+
+Contribution nodes must be informative graph nodes. Do not title a contribution with
+only the method/framework name, such as "MuLUT framework" or "Proposed method".
+Instead, title the concrete author-claimed contribution, such as:
+- "Complementary indexing patterns enable multiple LUT cooperation"
+- "Cascaded LUTs use re-indexing for hierarchical indexing"
+- "MuLUT improves SR-LUT by up to 1.1 dB while preserving efficiency"
+- "MuLUT extends to demosaicing with large gains over SR-LUT"
+
+If a contribution sentence mainly reports a measurement, it may still be a contribution
+when the authors present it as a main achievement, but also extract the detailed table
+or result sentence as proof evidence.
+
+## Proposed-method coverage
+
+For each proposed method or method section, extract a small subgraph worth of units:
+- one method_overview unit for the section-level idea;
+- one method_component unit for each named module, indexing pattern, branch, block,
+  mechanism, network structure, or pipeline stage;
+- one algorithm or inference_strategy unit for each ordered retrieval/caching/indexing
+  procedure;
+- one training_strategy or implementation_detail unit for training, finetuning,
+  sampling, losses, optimizers, quantization, or hyperparameters;
+- one equation unit for each displayed formula and one nearby explanation unit when
+  the text defines variables or explains why the formula matters;
+- one figure unit for each method figure, including the caption and what the figure
+  visually explains.
+
+## Proof coverage
+
+Treat evaluation tables and figures as first-class proof nodes. Every table comparing
+methods, reporting runtime/energy, or showing ablations must be extracted as a table
+unit with a bbox. The restatement should say what claim the table supports. For example,
+a "Table 1" comparing many methods across benchmark datasets should become a table
+unit whose text says that it is the standard-benchmark performance comparison and that
+it supports the restoration-performance proof.
+
+Also extract the nearby prose that interprets the table as result, efficiency_analysis,
+baseline, metric, dataset, experimental_setup, or ablation units. Do not rely on one
+table node alone to represent all experimental evidence.
+
+## What to skip
+
+Skip author lists, affiliations, acknowledgments, pure section headings, page headers,
+page numbers, copyright text, and bibliography entries unless a bibliography entry is
+needed as a cited reference node. Do not skip abstract/introduction claims, method
+captions, equations, or table captions.
 
 ## Types(role) of semantic units to extract
 
@@ -197,7 +271,10 @@ Return JSON. Schema:
 
 When outputting coordinates:
 - page numbers are 1-indexed.
-- bbox coordinates are normalized on the rendered page image, where x/y is the top-left corner.
+- bbox coordinates use a 0-1000 scale on the rendered page image, where x/y is the
+  top-left corner. For example, x=100, y=200, width=300, height=150 means the box
+  starts 10% from the left, 20% from the top, spans 30% page width, and spans 15%
+  page height.
 
 When outputting source locations:
 - Each semantic unit must have exactly one source_location. If the same idea appears in
@@ -205,7 +282,7 @@ When outputting source locations:
 - For pure text roles, use locator.kind="text" with exact start_text and end_text anchors copied
   from the paper text on that page. The anchors should be short, distinctive visible strings
   at the beginning and ending of the semantic unit span. Also set x=0, y=0, width=0, height=0.
-- For figure and table roles, use locator.kind="bbox" with normalized x, y, width, and height.
+- For figure and table roles, use locator.kind="bbox" with 0-1000 x, y, width, and height.
   Also set start_text="" and end_text="".
 """
 
@@ -216,6 +293,24 @@ Your previous semantic slicing did not include any contribution role. Re-slice t
 paper and include at least one contribution unit when the paper contains author-claimed
 contribution evidence, especially explicit contribution lists introduced by phrases such
 as "the main contributions are", "our contributions", "we propose", or "we introduce".
+"""
+
+
+def _dense_extraction_retry_prompt(previous_count: int, expected_count: int) -> str:
+    return f"""\
+Your previous semantic slicing returned only {previous_count} semantic units, which is
+too sparse for this paper. Re-slice the same paper and return at least {expected_count}
+units unless the paper is genuinely very short.
+
+Important missing coverage to fix:
+- split contribution lists into concrete contribution units, not framework-name nodes;
+- include proposed-method descriptions, method components, algorithms, implementation
+  details, training/finetuning details, formulas, and method figures;
+- include evaluation tables as table units with bbox locators;
+- if the paper contains a Table 1 comparing many methods on benchmark datasets, include
+  that Table 1 as a table unit and phrase its text as proof evidence for performance;
+- include prose that interprets tables/figures as result, efficiency_analysis,
+  qualitative_result, or ablation units.
 """
 
 
@@ -248,6 +343,24 @@ class SemanticUnitSlicer:
                 raise SemanticUnitSlicingError(
                     "LLM semantic slicing returned no contribution units after retry"
                 )
+
+        expected_units = self._minimum_expected_units(parsed)
+        if (
+            self._chat_client is None
+            and expected_units
+            and len(output.semantic_units) < expected_units
+        ):
+            previous_count = len(output.semantic_units)
+            logger.warning(
+                "LLM semantic slicing returned only %s units; retrying for dense extraction",
+                previous_count,
+            )
+            dense_output = await self._run_with_timeout(
+                parsed,
+                _dense_extraction_retry_prompt(previous_count, expected_units),
+            )
+            if self._has_contribution(dense_output) and len(dense_output.semantic_units) > previous_count:
+                output = dense_output
 
         return self._semantic_units_from_output(parsed, output)
 
@@ -303,8 +416,14 @@ class SemanticUnitSlicer:
             f"image={page.image_width or 'none'}x{page.image_height or 'none'}"
             for page in parsed.pages
         )
-        plain_text = parsed.metadata.get("plain_text")
-        text_context = f"\n\nPlain text source:\n{plain_text[:20000]}" if isinstance(plain_text, str) else ""
+        plain_text = SemanticUnitSlicer._plain_text_context(parsed)
+        text_context = (
+            "\n\nPage-numbered plain text source for coverage. Use page images for "
+            "figure/table bboxes and visual layout; use this text to avoid skipping "
+            f"sentences:\n{plain_text}"
+            if plain_text
+            else ""
+        )
         retry = f"\n\n{retry_instruction}" if retry_instruction else ""
         return (
             f"Title: {parsed.title}\n"
@@ -313,6 +432,35 @@ class SemanticUnitSlicer:
             f"{text_context}"
             f"{retry}"
         )
+
+    @staticmethod
+    def _plain_text_context(parsed: ParsedPaper, max_chars: int = 60000) -> str:
+        plain_text = parsed.metadata.get("plain_text")
+        if isinstance(plain_text, str) and plain_text.strip():
+            return plain_text[:max_chars]
+        if parsed.source_media_type != "application/pdf" or not parsed.source_bytes:
+            return ""
+        try:
+            doc = fitz.open(stream=parsed.source_bytes, filetype="pdf")
+        except Exception:
+            logger.exception("Failed to open PDF for semantic slicing text context")
+            return ""
+        chunks: list[str] = []
+        total = 0
+        try:
+            for page_index, page in enumerate(doc, start=1):
+                text = re.sub(r"\s+", " ", page.get_text("text")).strip()
+                if not text:
+                    continue
+                chunk = f"[PAGE {page_index}] {text}"
+                remaining = max_chars - total
+                if remaining <= 0:
+                    break
+                chunks.append(chunk[:remaining])
+                total += min(len(chunk), remaining)
+        finally:
+            doc.close()
+        return "\n\n".join(chunks)
 
     def _semantic_units_from_output(
         self,
@@ -356,6 +504,12 @@ class SemanticUnitSlicer:
     @staticmethod
     def _has_contribution(output: SemanticSliceOutput) -> bool:
         return any(unit.role == "contribution" for unit in output.semantic_units)
+
+    @staticmethod
+    def _minimum_expected_units(parsed: ParsedPaper) -> int:
+        if parsed.source_media_type != "application/pdf" or len(parsed.pages) < 4:
+            return 0
+        return min(80, max(24, len(parsed.pages) * 4))
 
     @staticmethod
     def _open_pdf(parsed: ParsedPaper) -> fitz.Document | None:
@@ -411,13 +565,30 @@ class SemanticUnitSlicer:
             return None
 
         page = doc.load_page(item.page - 1)
-        start_rects = self._search_anchor_rects(page, start_text, "start")
-        if not start_rects:
-            return self._fallback_text_anchor_location(parsed, item, doc, start_text, end_text)
-        end_rects = self._search_anchor_rects(page, end_text, "end") if end_text else []
-
         words = page.get_text("words", sort=True)
-        selection = self._word_range_for_anchor_rects(words, start_rects, end_rects)
+        normalized_word_stream = self._normalized_word_stream(words)
+        start_spans = self._word_spans_for_anchor(
+            page,
+            words,
+            start_text,
+            "start",
+            normalized_word_stream,
+        )
+        if not start_spans:
+            return self._fallback_text_anchor_location(parsed, item, doc, start_text, end_text)
+        end_spans = (
+            self._word_spans_for_anchor(
+                page,
+                words,
+                end_text,
+                "end",
+                normalized_word_stream,
+            )
+            if end_text
+            else []
+        )
+
+        selection = self._word_range_for_anchor_spans(words, start_spans, end_spans)
         if selection is None:
             return self._fallback_text_anchor_location(parsed, item, doc, start_text, end_text)
         start_index, end_index = selection
@@ -487,16 +658,21 @@ class SemanticUnitSlicer:
             return None
         return cls._normalize_bbox(
             [
-                locator.y,
-                locator.x,
-                locator.y + locator.height,
-                locator.x + locator.width,
+                locator.y / 1000,
+                locator.x / 1000,
+                (locator.y + locator.height) / 1000,
+                (locator.x + locator.width) / 1000,
             ]
         )
 
     @staticmethod
     def _normalize_anchor(value: str) -> str:
         return re.sub(r"\s+", " ", value).strip()
+
+    @staticmethod
+    def _normalize_text_for_anchor_match(value: str) -> str:
+        text = re.sub(r"\s+", " ", value).strip().casefold()
+        return re.sub(r"(?<=[^\W\d_])-\s+(?=[^\W\d_])", "", text)
 
     @staticmethod
     def _anchor_candidates(value: str, edge: Literal["start", "end"]) -> list[str]:
@@ -525,6 +701,26 @@ class SemanticUnitSlicer:
         return []
 
     @classmethod
+    def _word_spans_for_anchor(
+        cls,
+        page: fitz.Page,
+        words: list[tuple],
+        anchor: str,
+        edge: Literal["start", "end"],
+        normalized_word_stream: tuple[str, list[int | None]] | None = None,
+    ) -> list[tuple[int, int]]:
+        rects = cls._search_anchor_rects(page, anchor, edge)
+        spans = cls._word_spans_intersecting_rects(words, rects)
+        if spans:
+            return spans
+        return cls._word_spans_from_normalized_anchor(
+            words,
+            anchor,
+            edge,
+            normalized_word_stream,
+        )
+
+    @classmethod
     def _word_range_for_anchor_rects(
         cls,
         words: list[tuple],
@@ -543,6 +739,85 @@ class SemanticUnitSlicer:
             if span_end >= start_index:
                 return start_index, max(span_end, start_index)
         return None
+
+    @classmethod
+    def _word_range_for_anchor_spans(
+        cls,
+        words: list[tuple],
+        start_spans: list[tuple[int, int]],
+        end_spans: list[tuple[int, int]],
+    ) -> tuple[int, int] | None:
+        if not words or not start_spans:
+            return None
+        start_index = start_spans[0][0]
+        if not end_spans:
+            return start_index, start_spans[0][1]
+        for span_start, span_end in end_spans:
+            if span_end >= start_index:
+                return start_index, max(span_end, start_index)
+        return None
+
+    @classmethod
+    def _word_spans_from_normalized_anchor(
+        cls,
+        words: list[tuple],
+        anchor: str,
+        edge: Literal["start", "end"],
+        normalized_word_stream: tuple[str, list[int | None]] | None = None,
+    ) -> list[tuple[int, int]]:
+        text, char_word_indices = normalized_word_stream or cls._normalized_word_stream(words)
+        if not text:
+            return []
+        spans: list[tuple[int, int]] = []
+        for candidate in cls._anchor_candidates(anchor, edge):
+            needle = cls._normalize_text_for_anchor_match(candidate)
+            if not needle:
+                continue
+            start = 0
+            while True:
+                match_start = text.find(needle, start)
+                if match_start < 0:
+                    break
+                match_end = match_start + len(needle)
+                word_indices = [
+                    index
+                    for index in char_word_indices[match_start:match_end]
+                    if index is not None
+                ]
+                if word_indices:
+                    spans.append((min(word_indices), max(word_indices)))
+                start = match_start + 1
+        return sorted(set(spans))
+
+    @classmethod
+    def _normalized_word_stream(cls, words: list[tuple]) -> tuple[str, list[int | None]]:
+        chars: list[str] = []
+        char_word_indices: list[int | None] = []
+        for word_index, word in enumerate(words):
+            word_text = str(word[4]).strip().casefold()
+            if not word_text:
+                continue
+            if chars:
+                if cls._should_join_hyphenated_words(chars, word_text):
+                    chars.pop()
+                    char_word_indices.pop()
+                else:
+                    chars.append(" ")
+                    char_word_indices.append(None)
+            for character in word_text:
+                chars.append(character)
+                char_word_indices.append(word_index)
+        return "".join(chars), char_word_indices
+
+    @staticmethod
+    def _should_join_hyphenated_words(chars: list[str], next_word: str) -> bool:
+        return (
+            len(chars) >= 2
+            and chars[-1] == "-"
+            and chars[-2].isalpha()
+            and bool(next_word)
+            and next_word[0].isalpha()
+        )
 
     @staticmethod
     def _word_spans_intersecting_rects(
@@ -575,11 +850,9 @@ class SemanticUnitSlicer:
 
     @staticmethod
     def _text_contains_anchor(text: str, anchor: str) -> bool:
-        return re.sub(r"\s+", " ", anchor).strip().casefold() in re.sub(
-            r"\s+",
-            " ",
-            text,
-        ).strip().casefold()
+        return SemanticUnitSlicer._normalize_text_for_anchor_match(
+            anchor
+        ) in SemanticUnitSlicer._normalize_text_for_anchor_match(text)
 
     @classmethod
     def _rect_to_normalized_bbox(cls, page: fitz.Page, rect: fitz.Rect) -> list[float] | None:

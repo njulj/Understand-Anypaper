@@ -1,6 +1,6 @@
 # 项目进度
 
-更新日期：2026-07-02
+更新日期：2026-07-08
 
 ## 总体状态
 
@@ -53,8 +53,10 @@
 - [x] 参考文献列表抽取已实现（`[n]` 编号切分 + 年份/DOI/arXiv/标题/作者解析）
 - [x] citation mention 抽取已实现（`[n]`/`[n,m]`/`[n-m]` → 所在句子 + 意图分类）
 - [x] 版面双栏阅读顺序重排已实现基础启发式
+- [ ] LLM semantic unit 的 text anchor 定位仍需增强：当前 `PageSourceLocation` 只支持单页单 bbox，遇到跨页 semantic unit、标题被 PyMuPDF 拆成多个 rect、双栏阅读顺序不稳定时会 fallback 到整页
 - [ ] 跨页段落合并未实现
-- [ ] 图片/表格内容本身未抽取（只有 caption）
+
+
 
 ## Graph
 
@@ -101,7 +103,6 @@
 - [x] embedding 模型配置已定义（`PAG_EMBEDDING_MODEL` / `PAG_EMBEDDING_DIMENSIONS`）
 - [x] PDF 解析依赖 `pymupdf` 已接入
 - [x] Crossref 已接入（reference resolve）
-- [ ] Codex CLI 未接入实际调用（规划定位：不替代主流水线；用于后期 agent + skill 微调、复杂 evidence linking、递归引用分析和图谱一致性修正建议）
 - [x] Semantic Scholar / arXiv 服务已接入（Semantic Scholar 元数据补全；arXiv PDF 递归扩展）
 
 ## 分析架构规划
@@ -128,3 +129,27 @@
 - [ ] 将高级分析设计成候选 patch 流程：agent/skill 只提出新增、删除、改边、合并等修正建议，经用户确认或 API 记录后应用
 - [x] 引用论文递归分析（arXiv 拉取 PDF → 复用同一管线；Semantic Scholar 做元数据补全）
 - [x] 手动添加节点/边的 UI
+
+## 仍然存在的bug
+
+### 图表定位
+
+模型会输出论文中图表或者表格的坐标，但现在看来，网页上渲染的框框有些漂移，没有覆盖到原图表，可能是解析/渲染出现了错误，需要修复一下。
+
+### Semantic Unit Source 定位
+
+LLM 现在为文本 semantic unit 输出 `page + start_text + end_text`，后端用 PyMuPDF 在对应页面上把文本锚点解析成 bbox。这个方案已经能处理普通同页文本，但在 MuLUT 这类双栏论文里暴露了几个问题：
+
+- PDF 文本层和视觉文本不总一致。例：视觉上是 `structure inside the image.`，PyMuPDF 词流可能是 `structure inside the im- age.`。这类软换行连字符需要 dehyphenation-aware matching。
+- PyMuPDF `page.search_for()` 返回的是 rect 列表，不是“一个逻辑匹配”。例：`3.3 Parallelizing LUTs` 会被拆成 `3.3` 和 `Parallelizing LUTs` 两个 rect；如果直接把每个 rect 当候选 span，会只抽到 `3.3`，导致 start anchor 校验失败。
+- 当前模型和 schema 都假设一个 semantic unit 只有一个 `page + bbox`。例：`start_text = "3.3 Parallelizing LUTs"` 在第 5 页，`end_text = "complement each other."` 在第 6 页，真实语义单元跨页，单页定位无法表达。
+- 双栏 PDF 中 `page.get_text("words", sort=True)` 的排序可能按纵向位置交错左右栏。若 semantic unit 跨栏或页面上有图表插入，简单 top-to-bottom 排序会破坏阅读顺序。
+
+可能方案：
+
+1. 短期修复同页匹配：以 PyMuPDF word stream 为主构造 normalized searchable text，并保存字符偏移到 word index 的映射；匹配成功后用原始 word bbox union 得到高亮区域。这样可以统一处理标题多 rect、跨行文本、`im- age` vs `image` 等问题。`page.search_for()` 只作为 fast path 或辅助调试，不作为最终逻辑 span 的唯一来源。
+2. 增强同页阅读顺序：用 `get_text("words")` 的 block/line/word metadata 或 `get_text("dict")` 的 block/line/span 结构做列检测。常见双栏页按左栏 top-to-bottom、右栏 top-to-bottom 构造匹配词流，避免左右栏交错。
+3. 支持跨页 source：把 `SemanticUnit.source_location: PageSourceLocation` 升级为 `source_locations: list[PageSourceLocation]`，允许一个 semantic unit 拥有多个 page-local bbox。单页 unit 仍返回长度为 1 的列表；跨页 unit 可在每页保存局部 bbox 和 extracted_text。
+4. 调整 LLM prompt 和校验：要求模型尽量按页边界切分 semantic unit；如果确实跨页，则允许返回多段 location。短期在 schema 未升级前，提示模型避免 start/end 跨页，并让后端检测到“start 在当前页、end 在下一页”时返回可诊断的 fallback reason。
+5. 前端适配多 bbox：PDF Reader 高亮 evidence 时遍历 `source_locations`，在每个页面绘制局部 bbox；Inspector 展示跨页 evidence 的页码范围和每页文本片段。
+6. 或者完全抛弃`start_text` `end_text`，一切都由模型输出坐标。
