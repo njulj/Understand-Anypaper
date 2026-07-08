@@ -2,13 +2,12 @@ name: Docker Images
 
 on:
   push:
-    branches:
-      - main
     tags:
-      - "v*"
+      - "*"
   pull_request:
-    branches:
-      - main
+    types:
+      - synchronize
+      - labeled
   workflow_dispatch:
 
 permissions:
@@ -22,6 +21,10 @@ jobs:
   build-and-publish:
     name: Build and publish ${{ matrix.image.name }}
     runs-on: ubuntu-latest
+    if: |-
+      github.event_name != 'pull_request' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'run_workflow') ||
+      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run_workflow'))
     strategy:
       fail-fast: false
       matrix:
