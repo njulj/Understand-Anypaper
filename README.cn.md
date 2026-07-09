@@ -6,6 +6,8 @@ Understand Anypaper 帮助你阅读研究论文。它会把论文转换成一个
 
 它不是再给你一份线性摘要，而是展示论文里的想法如何相互连接：作者提出了什么主张，为什么这个主张重要，作者如何实现它，又用哪些证据来支持它。
 
+[Screencast_20260709_175345_github.webm](https://github.com/user-attachments/assets/a3382678-4e64-4f9a-a2ff-e11821fdd92c)
+
 <img width="3394" height="1940" alt="image" src="https://github.com/user-attachments/assets/e02b1854-1b46-445f-b4ce-9d4fc2c457cc" />
 <img width="3394" height="1940" alt="image" src="https://github.com/user-attachments/assets/c7ba7435-a302-467b-a1d4-1e36f54c3b95" />
 
