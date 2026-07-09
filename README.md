@@ -6,6 +6,9 @@ Understand Anypaper helps you read research papers by turning them into an inter
 
 Instead of giving you another linear summary, it shows how the paper's ideas are connected: what the authors claim, why the claim matters, how they implement it, and what evidence supports it.
 
+[Screencast_20260709_175345_github.webm](https://github.com/user-attachments/assets/a3382678-4e64-4f9a-a2ff-e11821fdd92c)
+
+
 <img width="3394" height="1940" alt="image" src="https://github.com/user-attachments/assets/e02b1854-1b46-445f-b4ce-9d4fc2c457cc" />
 <img width="3394" height="1940" alt="image" src="https://github.com/user-attachments/assets/c7ba7435-a302-467b-a1d4-1e36f54c3b95" />
 
