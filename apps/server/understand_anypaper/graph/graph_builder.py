@@ -186,8 +186,13 @@ class PaperArgumentGraphBuilder:
         units: list[SemanticUnit],
     ) -> list[tuple[int, int]]:
         pages = sorted({
-            unit.source_location.page
+            page
             for unit in units
+            for page in (
+                [segment.page for segment in unit.source_location.segments]
+                if unit.source_location.segments
+                else [unit.source_location.page]
+            )
         })
         return [(page, page) for page in pages]
 

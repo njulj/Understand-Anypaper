@@ -298,6 +298,69 @@ def test_text_anchor_resolution_uses_end_anchor_after_start_anchor():
     assert "Result appears here" in units[0].source_location.extracted_text
 
 
+def test_slice_semantic_units_resolves_cross_page_text_anchor_segments():
+    doc = fitz.open()
+    page1 = doc.new_page(width=612, height=792)
+    page2 = doc.new_page(width=612, height=792)
+    page1.insert_text(
+        (72, 96),
+        "We propose a compact pipeline that starts here and continues",
+    )
+    page2.insert_text(
+        (72, 96),
+        "across the next page before ending with strong gains.",
+    )
+    source_bytes = doc.tobytes()
+    doc.close()
+    parsed = ParsedPaper(
+        paper_id="paper",
+        title="TinyLUT",
+        pages=[
+            DocumentPage(page=1, width=612, height=792),
+            DocumentPage(page=2, width=612, height=792),
+        ],
+        source_bytes=source_bytes,
+        source_media_type="application/pdf",
+    )
+    client = FakeChatClient(
+        [
+            SemanticSliceOutput.model_validate(
+                {
+                    "semantic_units": [
+                        {
+                            "role": "contribution",
+                            "title": "Cross-page contribution",
+                            "text": "The contribution span crosses a page boundary.",
+                            "source_location": {
+                                "page": 1,
+                                "locator": {
+                                    "kind": "text",
+                                    "start_text": "starts here",
+                                    "end_text": "strong gains.",
+                                    "x": 0,
+                                    "y": 0,
+                                    "width": 0,
+                                    "height": 0,
+                                },
+                            },
+                            "confidence": 0.9,
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+
+    units = asyncio.run(SemanticUnitSlicer(chat_client=client).slice_semantic_units(parsed))
+
+    assert units
+    location = units[0].source_location
+    assert location.extraction_method == "pymupdf_text_anchors_cross_page"
+    assert [segment.page for segment in location.segments] == [1, 2]
+    assert "starts here and continues" in location.extracted_text
+    assert "ending with strong gains." in location.extracted_text
+
+
 def test_unresolved_text_anchors_fall_back_to_page_location():
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)

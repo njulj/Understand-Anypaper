@@ -31,13 +31,17 @@ export type PaperArgumentGraph = {
   edges: GraphEdge[];
 };
 
-export type PageSourceLocation = {
+export type PageSourceSegment = {
   page: number;
   bbox: number[];
   extracted_text: string;
   start_text: string;
   end_text: string;
   extraction_method: string;
+};
+
+export type PageSourceLocation = PageSourceSegment & {
+  segments: PageSourceSegment[];
 };
 
 export type SemanticUnit = {

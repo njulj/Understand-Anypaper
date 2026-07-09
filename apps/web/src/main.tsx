@@ -20,6 +20,8 @@ import {
   GraphNode,
   PaperArgumentGraph,
   GraphEdge,
+  PageSourceLocation,
+  PageSourceSegment,
   PaperDocumentInfo,
   PaperSummary,
   SemanticUnit,
@@ -126,6 +128,17 @@ function owningContributionId(graph: PaperArgumentGraph, nodeId: string): string
   return null;
 }
 
+function sourceSegments(location: PageSourceLocation): PageSourceSegment[] {
+  return location.segments.length ? location.segments : [location];
+}
+
+function sourcePageLabel(location: PageSourceLocation): string {
+  const pages = [...new Set(sourceSegments(location).map((segment) => segment.page))].sort((a, b) => a - b);
+  if (!pages.length) return 'p.?';
+  if (pages.length === 1) return `p.${pages[0]}`;
+  return `pp.${pages[0]}-${pages[pages.length - 1]}`;
+}
+
 function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const blockRefs = useRef(new Map<string, HTMLElement>());
@@ -190,10 +203,12 @@ function App() {
     [semanticUnits],
   );
   const unitsByPage = useMemo(() => {
-    const grouped = new Map<number, SemanticUnit[]>();
+    const grouped = new Map<number, { unit: SemanticUnit; segment: PageSourceSegment; segmentIndex: number }[]>();
     for (const unit of semanticUnits) {
-      const page = unit.source_location.page;
-      grouped.set(page, [...(grouped.get(page) ?? []), unit]);
+      sourceSegments(unit.source_location).forEach((segment, segmentIndex) => {
+        const page = segment.page;
+        grouped.set(page, [...(grouped.get(page) ?? []), { unit, segment, segmentIndex }]);
+      });
     }
     return grouped;
   }, [semanticUnits]);
@@ -646,16 +661,17 @@ function App() {
                     loading="lazy"
                   />
                   <div className="bbox-layer">
-                    {(unitsByPage.get(page.page) ?? []).map((unit) => {
+                    {(unitsByPage.get(page.page) ?? []).map(({ unit, segment, segmentIndex }) => {
                       const unitId = unit.semantic_unit_id;
-                      const { bbox, extracted_text } = unit.source_location;
+                      const { bbox, extracted_text } = segment;
                       if (bbox.length !== 4) return null;
                       const [ymin, xmin, ymax, xmax] = bbox;
                       const highlighted = selectedUnitIds.has(unitId);
                       return (
                         <button
-                          key={unitId}
+                          key={`${unitId}:${segmentIndex}`}
                           ref={(el) => {
+                            if (segmentIndex !== 0) return;
                             if (el) blockRefs.current.set(unitId, el);
                             else blockRefs.current.delete(unitId);
                           }}
@@ -693,7 +709,7 @@ function App() {
                   >
                     <header>
                       <span className="role-tag">{unit.role}</span>
-                      <span>p.{unit.source_location.page}</span>
+                      <span>{sourcePageLabel(unit.source_location)}</span>
                     </header>
                     <p>{unit.text}</p>
                   </div>
@@ -798,7 +814,7 @@ function App() {
                           className="evidence-chip"
                           onClick={() => scrollToUnit(unitId)}
                         >
-                          {unit ? `${unit.role} · p.${unit.source_location.page}` : unitId}
+                          {unit ? `${unit.role} · ${sourcePageLabel(unit.source_location)}` : unitId}
                         </button>
                       );
                     })}
