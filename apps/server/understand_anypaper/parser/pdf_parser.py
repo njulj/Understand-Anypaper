@@ -42,7 +42,8 @@ class PdfParser:
         body_size = self._body_font_size(raw_blocks)
         reference_lines: list[str] = []
         in_references = False
-        body_texts: list[str] = []
+        body_blocks: list[dict] = []
+        page_heights = {page.page: page.height for page in pages}
 
         for raw in raw_blocks:
             text = raw["text"].strip()
@@ -55,8 +56,15 @@ class PdfParser:
             if in_references:
                 reference_lines.append(text)
                 continue
-            body_texts.append(re.sub(r"\s+", " ", text))
+            body_blocks.append(
+                {
+                    **raw,
+                    "text": re.sub(r"\s+", " ", text),
+                }
+            )
 
+        body_paragraphs = self._merge_body_blocks(body_blocks, page_heights, body_size)
+        body_texts = [paragraph["text"] for paragraph in body_paragraphs]
         abstract = self._detect_abstract(body_texts)
         references = self._parse_reference_entries(reference_lines, prefix)
         return ParsedPaper(
@@ -65,6 +73,17 @@ class PdfParser:
             abstract=abstract,
             pages=pages,
             references=references,
+            metadata={
+                "plain_text": "\n\n".join(body_texts),
+                "page_texts": {
+                    str(page): "\n\n".join(
+                        paragraph["text"]
+                        for paragraph in body_paragraphs
+                        if page in paragraph["pages"]
+                    )
+                    for page in sorted(page_heights)
+                },
+            },
             source_bytes=source_bytes,
             source_media_type="application/pdf",
         )
@@ -182,6 +201,90 @@ class PdfParser:
             if text.lower().startswith("abstract"):
                 return text[len("abstract"):].lstrip(" .:—-")[:2000]
         return texts[0][:1000] if texts else ""
+
+    @classmethod
+    def _merge_body_blocks(
+        cls,
+        blocks: list[dict],
+        page_heights: dict[int, float],
+        body_size: float,
+    ) -> list[dict]:
+        paragraphs: list[dict] = []
+        for block in blocks:
+            text = block["text"].strip()
+            if not text:
+                continue
+            if not paragraphs:
+                paragraphs.append({"pages": [block["page"]], "text": text, "bbox": block["bbox"]})
+                continue
+            previous = paragraphs[-1]
+            if cls._should_merge_blocks(previous, block, page_heights, body_size):
+                previous["text"] = cls._join_paragraph_text(previous["text"], text)
+                if block["page"] not in previous["pages"]:
+                    previous["pages"].append(block["page"])
+                previous["bbox"] = block["bbox"]
+            else:
+                paragraphs.append({"pages": [block["page"]], "text": text, "bbox": block["bbox"]})
+        return paragraphs
+
+    @classmethod
+    def _should_merge_blocks(
+        cls,
+        previous: dict,
+        current: dict,
+        page_heights: dict[int, float],
+        body_size: float,
+    ) -> bool:
+        previous_text = previous["text"].strip()
+        current_text = current["text"].strip()
+        if not previous_text or not current_text:
+            return False
+
+        prev_page = previous["pages"][-1]
+        curr_page = current["page"]
+        prev_bbox = previous["bbox"]
+        curr_bbox = current["bbox"]
+        same_page = prev_page == curr_page
+        consecutive_page = curr_page == prev_page + 1
+        if not same_page and not consecutive_page:
+            return False
+
+        if same_page:
+            vertical_gap = max(0.0, float(curr_bbox[1]) - float(prev_bbox[3]))
+            if vertical_gap > max(18.0, body_size * 2.6):
+                return False
+        else:
+            prev_height = page_heights.get(prev_page, 0.0)
+            curr_height = page_heights.get(curr_page, 0.0)
+            if prev_height > 0 and float(prev_bbox[3]) < prev_height * 0.72:
+                return False
+            if curr_height > 0 and float(curr_bbox[1]) > curr_height * 0.28:
+                return False
+
+        return cls._looks_like_paragraph_continuation(previous_text, current_text)
+
+    @staticmethod
+    def _looks_like_paragraph_continuation(previous_text: str, current_text: str) -> bool:
+        if previous_text.endswith("-"):
+            return True
+        if re.search(r"[.!?][\"')\]]?$", previous_text):
+            return False
+        first = current_text[:1]
+        if first and (first.islower() or first.isdigit()):
+            return True
+        return bool(
+            re.match(
+                r"^(and|or|but|because|which|that|where|when|while|with|without|to|for|of|in|on|by)\b",
+                current_text,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _join_paragraph_text(previous_text: str, current_text: str) -> str:
+        if previous_text.endswith("-"):
+            return previous_text[:-1] + current_text.lstrip()
+        return f"{previous_text.rstrip()} {current_text.lstrip()}".strip()
 
     # ----------------------------------------------------------- text / md
 

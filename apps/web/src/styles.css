@@ -163,6 +163,16 @@ button:disabled {
   background: var(--accent-strong);
 }
 
+.subtle-action {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text);
+}
+
+.subtle-action:hover {
+  background: var(--panel-soft);
+}
+
 .workspace {
   height: calc(100vh - 64px);
   display: grid;
@@ -702,17 +712,46 @@ button:disabled {
   font-size: 13px;
 }
 
+.settings-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .edit-form input,
 .edit-form textarea,
 .manual-form input,
 .manual-form textarea,
-.manual-form select {
+.manual-form select,
+.settings-form input {
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--panel);
   color: var(--text);
   resize: vertical;
+}
+
+.settings-form input,
+.edit-form input,
+.edit-form textarea,
+.manual-form input,
+.manual-form textarea,
+.manual-form select,
+.paper-select {
+  outline: none;
+}
+
+.settings-form input:focus,
+.edit-form input:focus,
+.edit-form textarea:focus,
+.manual-form input:focus,
+.manual-form textarea:focus,
+.manual-form select:focus,
+.paper-select:focus {
+  border-color: color-mix(in srgb, var(--accent) 75%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .manual-form .primary-action {
@@ -855,6 +894,77 @@ button:disabled {
 .toolbar-actions .danger-icon-action:hover:not(:disabled) {
   background: color-mix(in srgb, var(--danger) 16%, transparent);
   color: var(--danger);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(13, 18, 27, 0.42);
+  backdrop-filter: blur(10px);
+}
+
+.settings-modal {
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 22px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--panel);
+  box-shadow: 0 26px 80px rgba(15, 23, 42, 0.2);
+}
+
+.settings-modal-header,
+.settings-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-modal-header h2 {
+  margin: 4px 0 0;
+  font-size: 22px;
+}
+
+.settings-modal-copy {
+  margin: 12px 0 18px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.settings-form {
+  display: grid;
+  gap: 14px;
+}
+
+.secret-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.secret-input .icon-action {
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+}
+
+.secret-input .icon-action:hover {
+  background: var(--panel-soft);
+  color: var(--accent);
+}
+
+.settings-modal-footer {
+  margin-top: 22px;
+  justify-content: flex-end;
 }
 
 .edge-item span {

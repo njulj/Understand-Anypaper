@@ -2,7 +2,7 @@ import logging
 
 import httpx
 
-from understand_anypaper.config import Settings, settings
+from understand_anypaper.config import Settings, apply_desktop_api_overrides, settings
 
 logger = logging.getLogger(__name__)
 
@@ -15,9 +15,11 @@ class EmbeddingClient:
 
     @property
     def available(self) -> bool:
+        apply_desktop_api_overrides(self._config)
         return bool(self._config.openai_api_key)
 
     def embed(self, texts: list[str]) -> list[list[float]] | None:
+        apply_desktop_api_overrides(self._config)
         if not self.available or not texts:
             return None
         try:

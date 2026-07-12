@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from understand_anypaper.analyzers.contribution_evidence_assigner import ContributionEvidenceAssigner
 from understand_anypaper.analyzers.semantic_unit_slicer import SemanticUnitSlicer
-from understand_anypaper.config import settings
+from understand_anypaper.config import apply_desktop_api_overrides, settings
 from understand_anypaper.graph.graph_builder import PaperArgumentGraphBuilder
 from understand_anypaper.graph.graph_validator import GraphValidator
 from understand_anypaper.graph.schema import GraphEdge, GraphNode, PaperArgumentGraph
@@ -102,6 +102,7 @@ def _upload_progress_line(event: str, progress: int, message: str, **payload: ob
 
 @router.post("/papers")
 async def upload_paper(file: Annotated[UploadFile, File(...)]) -> StreamingResponse:
+    apply_desktop_api_overrides(settings)
     suffix = Path(file.filename or "paper.pdf").suffix
     media_type = "application/pdf" if suffix.lower() == ".pdf" else (file.content_type or "application/octet-stream")
     data = await file.read()

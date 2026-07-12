@@ -4,7 +4,10 @@ __pycache__/
 .venv/
 node_modules/
 dist/
+release/
 .env
 .devbox/
 .DS_Store
 data/
+apps/web/backend/
+.tmp/

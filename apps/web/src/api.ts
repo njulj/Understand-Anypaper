@@ -31,13 +31,17 @@ export type PaperArgumentGraph = {
   edges: GraphEdge[];
 };
 
-export type PageSourceLocation = {
+export type PageSourceSegment = {
   page: number;
   bbox: number[];
   extracted_text: string;
   start_text: string;
   end_text: string;
   extraction_method: string;
+};
+
+export type PageSourceLocation = PageSourceSegment & {
+  segments: PageSourceSegment[];
 };
 
 export type SemanticUnit = {
@@ -79,7 +83,16 @@ export type PatchOperation = {
   edge?: Partial<GraphEdge>;
 };
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
+function resolveApiBaseUrl(): string {
+  const desktopApiBaseUrl =
+    typeof window !== 'undefined' ? window.pagDesktop?.apiBaseUrl ?? undefined : undefined;
+  return (desktopApiBaseUrl ?? import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000').replace(
+    /\/$/,
+    '',
+  );
+}
+
+const API_BASE_URL = resolveApiBaseUrl();
 
 export type UploadProgress = {
   loaded: number;

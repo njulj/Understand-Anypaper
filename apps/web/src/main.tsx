@@ -4,6 +4,8 @@ import {
   AlertCircle,
   ArrowLeft,
   CheckCircle2,
+  Eye,
+  EyeOff,
   FileImage,
   FileText,
   GitBranch,
@@ -12,6 +14,7 @@ import {
   Plus,
   Save,
   Search,
+  Settings2,
   Trash2,
   UploadCloud,
   X,
@@ -20,6 +23,8 @@ import {
   GraphNode,
   PaperArgumentGraph,
   GraphEdge,
+  PageSourceLocation,
+  PageSourceSegment,
   PaperDocumentInfo,
   PaperSummary,
   SemanticUnit,
@@ -66,6 +71,12 @@ const EDGE_TYPE_OPTIONS = [
   'CONTRASTS_WITH',
   'DESCRIBES',
 ];
+
+const DEFAULT_DESKTOP_API_CONFIG: DesktopApiConfig = {
+  openaiApiKey: '',
+  openaiBaseUrl: 'https://api.openai.com/v1',
+  openaiModel: 'gpt-4o-mini',
+};
 
 function isNavigationEdge(edge: GraphEdge): boolean {
   return edge.edge_type !== 'NEXT' && edge.edge_type !== 'PREVIOUS';
@@ -126,6 +137,17 @@ function owningContributionId(graph: PaperArgumentGraph, nodeId: string): string
   return null;
 }
 
+function sourceSegments(location: PageSourceLocation): PageSourceSegment[] {
+  return location.segments.length ? location.segments : [location];
+}
+
+function sourcePageLabel(location: PageSourceLocation): string {
+  const pages = [...new Set(sourceSegments(location).map((segment) => segment.page))].sort((a, b) => a - b);
+  if (!pages.length) return 'p.?';
+  if (pages.length === 1) return `p.${pages[0]}`;
+  return `pp.${pages[0]}-${pages[pages.length - 1]}`;
+}
+
 function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const blockRefs = useRef(new Map<string, HTMLElement>());
@@ -152,6 +174,16 @@ function App() {
   const [newEdgeTargetId, setNewEdgeTargetId] = useState('');
   const [newEdgeType, setNewEdgeType] = useState('SUPPORTED_BY');
   const [newEdgeEvidenceId, setNewEdgeEvidenceId] = useState('');
+  const [desktopSettingsOpen, setDesktopSettingsOpen] = useState(false);
+  const [desktopSettingsSaving, setDesktopSettingsSaving] = useState(false);
+  const [showDesktopApiKey, setShowDesktopApiKey] = useState(false);
+  const [desktopSettings, setDesktopSettings] = useState<DesktopApiConfig>(DEFAULT_DESKTOP_API_CONFIG);
+  const [desktopSettingsDraft, setDesktopSettingsDraft] = useState<DesktopApiConfig>(
+    DEFAULT_DESKTOP_API_CONFIG,
+  );
+
+  const desktopBridge = window.pagDesktop;
+  const isDesktopApp = Boolean(desktopBridge?.isDesktopApp);
 
   const selectedNode = graph?.nodes.find((node) => node.id === selectedNodeId) ?? null;
   const focusedContribution = graph?.nodes.find((node) => node.id === focusedContributionId) ?? null;
@@ -190,10 +222,12 @@ function App() {
     [semanticUnits],
   );
   const unitsByPage = useMemo(() => {
-    const grouped = new Map<number, SemanticUnit[]>();
+    const grouped = new Map<number, { unit: SemanticUnit; segment: PageSourceSegment; segmentIndex: number }[]>();
     for (const unit of semanticUnits) {
-      const page = unit.source_location.page;
-      grouped.set(page, [...(grouped.get(page) ?? []), unit]);
+      sourceSegments(unit.source_location).forEach((segment, segmentIndex) => {
+        const page = segment.page;
+        grouped.set(page, [...(grouped.get(page) ?? []), { unit, segment, segmentIndex }]);
+      });
     }
     return grouped;
   }, [semanticUnits]);
@@ -229,6 +263,17 @@ function App() {
       })
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    if (!desktopBridge?.getApiConfig) return;
+    desktopBridge
+      .getApiConfig()
+      .then((config) => {
+        setDesktopSettings(config);
+        setDesktopSettingsDraft(config);
+      })
+      .catch(() => undefined);
+  }, [desktopBridge]);
 
   useEffect(() => {
     if (!selectedNode) return;
@@ -505,6 +550,38 @@ function App() {
     }
   }
 
+  function openDesktopSettings() {
+    setDesktopSettingsDraft(desktopSettings);
+    setShowDesktopApiKey(false);
+    setDesktopSettingsOpen(true);
+  }
+
+  function closeDesktopSettings() {
+    if (desktopSettingsSaving) return;
+    setDesktopSettingsDraft(desktopSettings);
+    setShowDesktopApiKey(false);
+    setDesktopSettingsOpen(false);
+  }
+
+  async function saveDesktopSettings() {
+    if (!desktopBridge?.saveApiConfig) return;
+    setDesktopSettingsSaving(true);
+    try {
+      const savedConfig = await desktopBridge.saveApiConfig(desktopSettingsDraft);
+      setDesktopSettings(savedConfig);
+      setDesktopSettingsDraft(savedConfig);
+      setShowDesktopApiKey(false);
+      setDesktopSettingsOpen(false);
+      setStatus('ready');
+      setMessage('Saved desktop API settings. Future uploads will use the updated provider configuration.');
+    } catch (error) {
+      setStatus('error');
+      setMessage(error instanceof Error ? error.message : 'Failed to save desktop API settings.');
+    } finally {
+      setDesktopSettingsSaving(false);
+    }
+  }
+
   function nodeLabel(nodeId: string): string {
     return graph?.nodes.find((node) => node.id === nodeId)?.title ?? nodeId;
   }
@@ -560,6 +637,18 @@ function App() {
           >
             <Trash2 size={16} />
           </button>
+          {isDesktopApp ? (
+            <button
+              className="icon-action toolbar-icon-action"
+              type="button"
+              title="API settings"
+              aria-label="API settings"
+              onClick={openDesktopSettings}
+              disabled={status === 'uploading' || saving}
+            >
+              <Settings2 size={16} />
+            </button>
+          ) : null}
           <label className="search-box" aria-label="Search graph nodes">
             <Search size={16} />
             <input
@@ -646,16 +735,17 @@ function App() {
                     loading="lazy"
                   />
                   <div className="bbox-layer">
-                    {(unitsByPage.get(page.page) ?? []).map((unit) => {
+                    {(unitsByPage.get(page.page) ?? []).map(({ unit, segment, segmentIndex }) => {
                       const unitId = unit.semantic_unit_id;
-                      const { bbox, extracted_text } = unit.source_location;
+                      const { bbox, extracted_text } = segment;
                       if (bbox.length !== 4) return null;
                       const [ymin, xmin, ymax, xmax] = bbox;
                       const highlighted = selectedUnitIds.has(unitId);
                       return (
                         <button
-                          key={unitId}
+                          key={`${unitId}:${segmentIndex}`}
                           ref={(el) => {
+                            if (segmentIndex !== 0) return;
                             if (el) blockRefs.current.set(unitId, el);
                             else blockRefs.current.delete(unitId);
                           }}
@@ -693,7 +783,7 @@ function App() {
                   >
                     <header>
                       <span className="role-tag">{unit.role}</span>
-                      <span>p.{unit.source_location.page}</span>
+                      <span>{sourcePageLabel(unit.source_location)}</span>
                     </header>
                     <p>{unit.text}</p>
                   </div>
@@ -798,7 +888,7 @@ function App() {
                           className="evidence-chip"
                           onClick={() => scrollToUnit(unitId)}
                         >
-                          {unit ? `${unit.role} · p.${unit.source_location.page}` : unitId}
+                          {unit ? `${unit.role} · ${sourcePageLabel(unit.source_location)}` : unitId}
                         </button>
                       );
                     })}
@@ -960,6 +1050,108 @@ function App() {
           )}
         </aside>
       </section>
+      {desktopSettingsOpen ? (
+        <div className="modal-backdrop" role="presentation" onClick={closeDesktopSettings}>
+          <section
+            className="settings-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="api-settings-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="settings-modal-header">
+              <div>
+                <span className="eyebrow">Desktop</span>
+                <h2 id="api-settings-title">API Settings</h2>
+              </div>
+              <button
+                type="button"
+                className="icon-action"
+                aria-label="Close API settings"
+                onClick={closeDesktopSettings}
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <p className="settings-modal-copy">
+              These values are stored locally for the desktop app and used for future uploads.
+            </p>
+            <div className="settings-form">
+              <label>
+                API Key
+                <div className="secret-input">
+                  <input
+                    type={showDesktopApiKey ? 'text' : 'password'}
+                    value={desktopSettingsDraft.openaiApiKey}
+                    onChange={(event) =>
+                      setDesktopSettingsDraft((current) => ({
+                        ...current,
+                        openaiApiKey: event.target.value,
+                      }))
+                    }
+                    placeholder="sk-..."
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <button
+                    type="button"
+                    className="icon-action"
+                    aria-label={showDesktopApiKey ? 'Hide API key' : 'Show API key'}
+                    onClick={() => setShowDesktopApiKey((current) => !current)}
+                  >
+                    {showDesktopApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+              </label>
+              <label>
+                Base URL
+                <input
+                  type="url"
+                  value={desktopSettingsDraft.openaiBaseUrl}
+                  onChange={(event) =>
+                    setDesktopSettingsDraft((current) => ({
+                      ...current,
+                      openaiBaseUrl: event.target.value,
+                    }))
+                  }
+                  placeholder="https://api.openai.com/v1"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </label>
+              <label>
+                Model
+                <input
+                  type="text"
+                  value={desktopSettingsDraft.openaiModel}
+                  onChange={(event) =>
+                    setDesktopSettingsDraft((current) => ({
+                      ...current,
+                      openaiModel: event.target.value,
+                    }))
+                  }
+                  placeholder="gpt-4o-mini"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </label>
+            </div>
+            <div className="settings-modal-footer">
+              <button type="button" className="danger-action subtle-action" onClick={closeDesktopSettings}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary-action"
+                onClick={saveDesktopSettings}
+                disabled={desktopSettingsSaving}
+              >
+                {desktopSettingsSaving ? <Loader2 className="spin" size={16} /> : <Save size={16} />} Save settings
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }

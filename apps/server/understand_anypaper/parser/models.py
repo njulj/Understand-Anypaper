@@ -13,7 +13,7 @@ class DocumentPage(BaseModel):
     image_data: bytes = Field(default=b"", exclude=True)
 
 
-class PageSourceLocation(BaseModel):
+class PageSourceSegment(BaseModel):
     page: int
     bbox: list[float] = Field(
         min_length=4,
@@ -24,6 +24,10 @@ class PageSourceLocation(BaseModel):
     start_text: str = ""
     end_text: str = ""
     extraction_method: str = "pymupdf_clip"
+
+
+class PageSourceLocation(PageSourceSegment):
+    segments: list[PageSourceSegment] = Field(default_factory=list)
 
 
 class SemanticUnit(BaseModel):

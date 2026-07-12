@@ -11,7 +11,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from understand_anypaper.analyzers.llm import create_chat_client, run_structured
 from understand_anypaper.config import Settings, settings
-from understand_anypaper.parser.models import PageSourceLocation, ParsedPaper, SemanticUnit
+from understand_anypaper.parser.models import (
+    PageSourceLocation,
+    PageSourceSegment,
+    ParsedPaper,
+    SemanticUnit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -565,7 +570,7 @@ class SemanticUnitSlicer:
             return None
 
         page = doc.load_page(item.page - 1)
-        words = page.get_text("words", sort=True)
+        words = self._ordered_page_words(page)
         normalized_word_stream = self._normalized_word_stream(words)
         start_spans = self._word_spans_for_anchor(
             page,
@@ -589,29 +594,31 @@ class SemanticUnitSlicer:
         )
 
         selection = self._word_range_for_anchor_spans(words, start_spans, end_spans)
-        if selection is None:
-            return self._fallback_text_anchor_location(parsed, item, doc, start_text, end_text)
-        start_index, end_index = selection
-        extracted_text = self._text_from_words(words[start_index : end_index + 1])
-        if not self._text_contains_anchor(extracted_text, start_text):
-            return self._fallback_text_anchor_location(parsed, item, doc, start_text, end_text)
-        if end_text and not self._text_contains_anchor(extracted_text, end_text):
-            return self._fallback_text_anchor_location(parsed, item, doc, start_text, end_text)
+        if selection is not None:
+            segment = self._page_source_segment_for_word_range(
+                item.page,
+                page,
+                words,
+                selection[0],
+                selection[1],
+                start_text=start_text,
+                end_text=end_text,
+                extraction_method="pymupdf_text_anchors",
+            )
+            if segment is not None:
+                return self._location_from_segments([segment], start_text=start_text, end_text=end_text)
 
-        rect = self._rect_for_word_range(words, start_index, end_index)
-        if rect is None:
-            return self._fallback_text_anchor_location(parsed, item, doc, start_text, end_text)
-        bbox = self._rect_to_normalized_bbox(page, rect)
-        if bbox is None:
-            return self._fallback_text_anchor_location(parsed, item, doc, start_text, end_text)
-        return PageSourceLocation(
-            page=item.page,
-            bbox=bbox,
-            extracted_text=extracted_text,
-            start_text=start_text,
-            end_text=end_text,
-            extraction_method="pymupdf_text_anchors",
+        cross_page = self._cross_page_source_location_from_text_anchors(
+            item,
+            doc,
+            words,
+            start_spans,
+            start_text,
+            end_text,
         )
+        if cross_page is not None:
+            return cross_page
+        return self._fallback_text_anchor_location(parsed, item, doc, start_text, end_text)
 
     def _fallback_text_anchor_location(
         self,
@@ -642,6 +649,83 @@ class SemanticUnitSlicer:
             end_text=end_text,
             extraction_method="unresolved_text_anchors",
         )
+
+    def _cross_page_source_location_from_text_anchors(
+        self,
+        item: SemanticUnitSourceLocationOutput,
+        doc: fitz.Document,
+        start_page_words: list[tuple],
+        start_spans: list[tuple[int, int]],
+        start_text: str,
+        end_text: str,
+    ) -> PageSourceLocation | None:
+        if not end_text or not start_spans:
+            return None
+        start_index = start_spans[0][0]
+        start_page = doc.load_page(item.page - 1)
+        segments: list[PageSourceSegment] = []
+        first_segment = self._page_source_segment_for_word_range(
+            item.page,
+            start_page,
+            start_page_words,
+            start_index,
+            len(start_page_words) - 1,
+            start_text=start_text,
+            end_text="",
+            extraction_method="pymupdf_text_anchors_cross_page",
+        )
+        if first_segment is None:
+            return None
+        segments.append(first_segment)
+
+        max_page = min(doc.page_count, item.page + 2)
+        for page_number in range(item.page + 1, max_page + 1):
+            page = doc.load_page(page_number - 1)
+            words = self._ordered_page_words(page)
+            if not words:
+                continue
+            normalized_word_stream = self._normalized_word_stream(words)
+            end_spans = self._word_spans_for_anchor(
+                page,
+                words,
+                end_text,
+                "end",
+                normalized_word_stream,
+            )
+            if end_spans:
+                final_segment = self._page_source_segment_for_word_range(
+                    page_number,
+                    page,
+                    words,
+                    0,
+                    end_spans[0][1],
+                    start_text="",
+                    end_text=end_text,
+                    extraction_method="pymupdf_text_anchors_cross_page",
+                )
+                if final_segment is None:
+                    return None
+                segments.append(final_segment)
+                return self._location_from_segments(
+                    segments,
+                    start_text=start_text,
+                    end_text=end_text,
+                    extraction_method="pymupdf_text_anchors_cross_page",
+                )
+
+            middle_segment = self._page_source_segment_for_word_range(
+                page_number,
+                page,
+                words,
+                0,
+                len(words) - 1,
+                start_text="",
+                end_text="",
+                extraction_method="pymupdf_text_anchors_cross_page",
+            )
+            if middle_segment is not None:
+                segments.append(middle_segment)
+        return None
 
     @staticmethod
     def _normalize_bbox(value: list[float]) -> list[float] | None:
@@ -790,6 +874,72 @@ class SemanticUnitSlicer:
         return sorted(set(spans))
 
     @classmethod
+    def _ordered_page_words(cls, page: fitz.Page) -> list[tuple]:
+        words = list(page.get_text("words"))
+        if not words:
+            return []
+        blocks: dict[int, list[tuple]] = {}
+        for word in words:
+            block_index = int(word[5]) if len(word) > 5 else 0
+            blocks.setdefault(block_index, []).append(word)
+
+        block_items = []
+        for block_words in blocks.values():
+            x0 = min(float(word[0]) for word in block_words)
+            y0 = min(float(word[1]) for word in block_words)
+            x1 = max(float(word[2]) for word in block_words)
+            y1 = max(float(word[3]) for word in block_words)
+            block_items.append(
+                {
+                    "bbox": (x0, y0, x1, y1),
+                    "words": sorted(
+                        block_words,
+                        key=lambda word: (
+                            int(word[6]) if len(word) > 6 else 0,
+                            int(word[7]) if len(word) > 7 else 0,
+                            float(word[1]),
+                            float(word[0]),
+                        ),
+                    ),
+                }
+            )
+
+        if len(block_items) < 4:
+            return sorted(words, key=lambda word: (float(word[1]), float(word[0])))
+
+        page_width = float(page.rect.width)
+        page_height = float(page.rect.height)
+        mid_x = page_width / 2
+        narrow_blocks = [
+            block
+            for block in block_items
+            if (block["bbox"][2] - block["bbox"][0]) < page_width * 0.72
+        ]
+        left = [block for block in narrow_blocks if (block["bbox"][0] + block["bbox"][2]) / 2 < mid_x]
+        right = [block for block in narrow_blocks if (block["bbox"][0] + block["bbox"][2]) / 2 >= mid_x]
+        two_column = len(left) >= 2 and len(right) >= 2
+        if not two_column:
+            ordered_blocks = sorted(block_items, key=lambda block: (block["bbox"][1], block["bbox"][0]))
+        else:
+            def block_key(block: dict) -> tuple[int, float, float]:
+                x0, y0, x1, _ = block["bbox"]
+                width = x1 - x0
+                center_x = (x0 + x1) / 2
+                is_wide = width >= page_width * 0.72
+                if is_wide and y0 < page_height * 0.25:
+                    return (-1, y0, x0)
+                if is_wide:
+                    return (2, y0, x0)
+                return (0 if center_x < mid_x else 1, y0, x0)
+
+            ordered_blocks = sorted(block_items, key=block_key)
+
+        ordered_words: list[tuple] = []
+        for block in ordered_blocks:
+            ordered_words.extend(block["words"])
+        return ordered_words
+
+    @classmethod
     def _normalized_word_stream(cls, words: list[tuple]) -> tuple[str, list[int | None]]:
         chars: list[str] = []
         char_word_indices: list[int | None] = []
@@ -853,6 +1003,61 @@ class SemanticUnitSlicer:
         return SemanticUnitSlicer._normalize_text_for_anchor_match(
             anchor
         ) in SemanticUnitSlicer._normalize_text_for_anchor_match(text)
+
+    @classmethod
+    def _page_source_segment_for_word_range(
+        cls,
+        page_number: int,
+        page: fitz.Page,
+        words: list[tuple],
+        start_index: int,
+        end_index: int,
+        *,
+        start_text: str,
+        end_text: str,
+        extraction_method: str,
+    ) -> PageSourceSegment | None:
+        extracted_text = cls._text_from_words(words[start_index : end_index + 1])
+        if start_text and not cls._text_contains_anchor(extracted_text, start_text):
+            return None
+        if end_text and not cls._text_contains_anchor(extracted_text, end_text):
+            return None
+        rect = cls._rect_for_word_range(words, start_index, end_index)
+        if rect is None:
+            return None
+        bbox = cls._rect_to_normalized_bbox(page, rect)
+        if bbox is None:
+            return None
+        return PageSourceSegment(
+            page=page_number,
+            bbox=bbox,
+            extracted_text=extracted_text,
+            start_text=start_text,
+            end_text=end_text,
+            extraction_method=extraction_method,
+        )
+
+    @staticmethod
+    def _location_from_segments(
+        segments: list[PageSourceSegment],
+        *,
+        start_text: str,
+        end_text: str,
+        extraction_method: str | None = None,
+    ) -> PageSourceLocation | None:
+        if not segments:
+            return None
+        primary = segments[0]
+        combined_text = "\n\n".join(segment.extracted_text for segment in segments if segment.extracted_text).strip()
+        return PageSourceLocation(
+            page=primary.page,
+            bbox=primary.bbox,
+            extracted_text=combined_text or primary.extracted_text,
+            start_text=start_text,
+            end_text=end_text,
+            extraction_method=extraction_method or primary.extraction_method,
+            segments=segments,
+        )
 
     @classmethod
     def _rect_to_normalized_bbox(cls, page: fitz.Page, rect: fitz.Rect) -> list[float] | None:
