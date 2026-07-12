@@ -9,7 +9,7 @@ from agent_framework.openai import OpenAIChatCompletionClient
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-from understand_anypaper.config import Settings, settings
+from understand_anypaper.config import Settings, apply_desktop_api_overrides, settings
 
 OutputT = TypeVar("OutputT", bound=BaseModel)
 
@@ -41,6 +41,7 @@ def create_chat_client(
     config: Settings = settings,
     session_id: str | None = None,
 ) -> OpenAIChatCompletionClient:
+    apply_desktop_api_overrides(config)
     if not config.openai_api_key:
         raise RuntimeError("OpenAI API key is not configured")
 

@@ -1,7 +1,17 @@
 {
+  "name": "understand-anypaper-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "build": "tsc && vite build"
+    "doctor:bindings": "node ./scripts/ensure-vite-native.cjs",
+    "build": "npm run doctor:bindings && tsc && vite build --base ./",
+    "electron:dev": "electron .",
+    "electron:pack": "electron-builder --dir",
+    "electron:dist": "electron-builder",
+    "desktop:dist:mac": "bash ../../scripts/package-desktop-macos.sh",
+    "desktop:dist:win": "powershell -ExecutionPolicy Bypass -File ../../scripts/package-desktop-windows.ps1"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
@@ -16,6 +26,44 @@
   "devDependencies": {
     "@types/d3-force": "^3.0.0",
     "@types/react": "latest",
-    "@types/react-dom": "latest"
+    "@types/react-dom": "latest",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.aritxonly.understand-anypaper",
+    "productName": "Understand Anypaper",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "backend",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "asar": true,
+    "npmRebuild": false,
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    }
   }
 }
