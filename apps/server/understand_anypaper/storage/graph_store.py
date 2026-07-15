@@ -1,5 +1,6 @@
 import json
 import logging
+import sqlite3
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -141,6 +142,468 @@ class InMemoryGraphStore(GraphStore):
     def record_patch(self, paper_id: str, operations: list[dict]) -> str:
         patch_id = str(uuid4())
         self._patches.setdefault(paper_id, []).append({"id": patch_id, "operations": operations})
+        return patch_id
+
+    def vector_search(self, paper_id: str, query: str, limit: int = 10) -> list[tuple[str, float]]:
+        return []
+
+
+class SQLiteGraphStore(GraphStore):
+    def __init__(self, database_url: str) -> None:
+        self._path = self._database_path_from_url(database_url)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._initialize_schema()
+
+    @staticmethod
+    def _database_path_from_url(database_url: str) -> Path:
+        if not database_url.startswith("sqlite:///"):
+            raise ValueError(f"Unsupported SQLite database URL: {database_url}")
+        return Path(database_url.removeprefix("sqlite:///")).expanduser().resolve()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self._path)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def _initialize_schema(self) -> None:
+        with self._connect() as conn:
+            conn.executescript(
+                """
+                PRAGMA foreign_keys = ON;
+
+                CREATE TABLE IF NOT EXISTS papers (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    abstract TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS semantic_units (
+                    id TEXT PRIMARY KEY,
+                    paper_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    text TEXT NOT NULL DEFAULT '',
+                    source_location_json TEXT NOT NULL DEFAULT '{}',
+                    confidence REAL NOT NULL DEFAULT 0,
+                    created_by TEXT NOT NULL DEFAULT '',
+                    properties_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE TABLE IF NOT EXISTS nodes (
+                    id TEXT PRIMARY KEY,
+                    paper_id TEXT NOT NULL,
+                    node_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
+                    properties_json TEXT NOT NULL DEFAULT '{}',
+                    semantic_unit_ids_json TEXT NOT NULL DEFAULT '[]',
+                    page_ranges_json TEXT NOT NULL DEFAULT '[]',
+                    confidence REAL NOT NULL DEFAULT 0,
+                    source_type TEXT NOT NULL DEFAULT '',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    verified INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS edges (
+                    id TEXT PRIMARY KEY,
+                    paper_id TEXT NOT NULL,
+                    source_node_id TEXT NOT NULL,
+                    target_node_id TEXT NOT NULL,
+                    edge_type TEXT NOT NULL,
+                    semantic_unit_ids_json TEXT NOT NULL DEFAULT '[]',
+                    confidence REAL NOT NULL DEFAULT 0,
+                    inference_type TEXT NOT NULL DEFAULT '',
+                    properties_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE TABLE IF NOT EXISTS paper_references (
+                    id TEXT PRIMARY KEY,
+                    paper_id TEXT NOT NULL,
+                    raw_text TEXT NOT NULL,
+                    title TEXT,
+                    authors_json TEXT NOT NULL DEFAULT '[]',
+                    year INTEGER,
+                    doi TEXT,
+                    arxiv_id TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE TABLE IF NOT EXISTS graph_patches (
+                    id TEXT PRIMARY KEY,
+                    paper_id TEXT NOT NULL,
+                    operations_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+
+    def save_paper(self, parsed: ParsedPaper, graph: PaperArgumentGraph) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO papers (id, title, abstract, metadata_json)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    title = excluded.title,
+                    abstract = excluded.abstract,
+                    metadata_json = excluded.metadata_json
+                """,
+                (parsed.paper_id, parsed.title, parsed.abstract, json.dumps(parsed.metadata, default=str)),
+            )
+            for table in ("semantic_units", "nodes", "edges", "paper_references"):
+                conn.execute(f"DELETE FROM {table} WHERE paper_id = ?", (parsed.paper_id,))
+            for unit in parsed.semantic_units:
+                conn.execute(
+                    """
+                    INSERT INTO semantic_units
+                    (id, paper_id, role, title, text, source_location_json, confidence, created_by, properties_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        unit.semantic_unit_id,
+                        parsed.paper_id,
+                        unit.role,
+                        unit.title,
+                        unit.text,
+                        json.dumps(unit.source_location.model_dump()),
+                        unit.confidence,
+                        unit.created_by,
+                        json.dumps(unit.properties, default=str),
+                    ),
+                )
+            for node in graph.nodes:
+                conn.execute(
+                    """
+                    INSERT INTO nodes
+                    (id, paper_id, node_type, title, summary, properties_json, semantic_unit_ids_json, page_ranges_json,
+                     confidence, source_type, created_by, verified)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        node.id,
+                        node.paper_id,
+                        str(node.node_type),
+                        node.title,
+                        node.summary,
+                        json.dumps(node.properties, default=str),
+                        json.dumps(node.semantic_unit_ids),
+                        json.dumps([list(pair) for pair in node.page_ranges]),
+                        node.confidence,
+                        node.source_type,
+                        node.created_by,
+                        int(node.verified),
+                    ),
+                )
+            for edge in graph.edges:
+                conn.execute(
+                    """
+                    INSERT INTO edges
+                    (id, paper_id, source_node_id, target_node_id, edge_type, semantic_unit_ids_json, confidence,
+                     inference_type, properties_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        edge.id,
+                        edge.paper_id,
+                        edge.source_node_id,
+                        edge.target_node_id,
+                        str(edge.edge_type),
+                        json.dumps(edge.semantic_unit_ids),
+                        edge.confidence,
+                        edge.inference_type,
+                        json.dumps(edge.properties, default=str),
+                    ),
+                )
+            for reference in parsed.references:
+                conn.execute(
+                    """
+                    INSERT INTO paper_references
+                    (id, paper_id, raw_text, title, authors_json, year, doi, arxiv_id, metadata_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        reference.reference_id,
+                        parsed.paper_id,
+                        reference.raw_text,
+                        reference.title,
+                        json.dumps(reference.authors),
+                        reference.year,
+                        reference.doi,
+                        reference.arxiv_id,
+                        json.dumps({"marker": reference.marker}),
+                    ),
+                )
+
+    def save_source_document(self, paper_id: str, filename: str, media_type: str, data: bytes) -> None:
+        directory = Path(settings.document_store_dir).expanduser().resolve()
+        directory.mkdir(parents=True, exist_ok=True)
+        suffix = Path(filename).suffix.lower() or ".pdf"
+        path = directory / f"{paper_id}{suffix}"
+        path.write_bytes(data)
+        metadata = {
+            "source_document": {
+                "filename": filename,
+                "media_type": media_type,
+                "path": str(path),
+                "size": len(data),
+            }
+        }
+        with self._connect() as conn:
+            current = conn.execute("SELECT metadata_json FROM papers WHERE id = ?", (paper_id,)).fetchone()
+            current_metadata = _loads_json(current["metadata_json"], {}) if current else {}
+            current_metadata.update(metadata)
+            conn.execute(
+                "UPDATE papers SET metadata_json = ? WHERE id = ?",
+                (json.dumps(current_metadata, default=str), paper_id),
+            )
+
+    def get_source_document(self, paper_id: str) -> SourceDocument | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT metadata_json FROM papers WHERE id = ?", (paper_id,)).fetchone()
+        if row is None:
+            return None
+        source = (_loads_json(row["metadata_json"], {}) or {}).get("source_document") or {}
+        path_value = source.get("path")
+        if not path_value:
+            return None
+        path = Path(path_value)
+        if not path.exists() or not path.is_file():
+            return None
+        return SourceDocument(
+            filename=source.get("filename") or path.name,
+            media_type=source.get("media_type") or "application/octet-stream",
+            data=path.read_bytes(),
+        )
+
+    def list_papers(self) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, title, abstract, metadata_json, created_at FROM papers ORDER BY created_at DESC"
+            ).fetchall()
+        return [
+            {
+                "paper_id": row["id"],
+                "title": row["title"],
+                "abstract": row["abstract"],
+                "metadata": _loads_json(row["metadata_json"], {}),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def delete_paper(self, paper_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute("SELECT metadata_json FROM papers WHERE id = ?", (paper_id,)).fetchone()
+            if row is None:
+                return False
+            source = (_loads_json(row["metadata_json"], {}) or {}).get("source_document") or {}
+            conn.execute("DELETE FROM semantic_units WHERE paper_id = ?", (paper_id,))
+            conn.execute("DELETE FROM edges WHERE paper_id = ?", (paper_id,))
+            conn.execute("DELETE FROM nodes WHERE paper_id = ?", (paper_id,))
+            conn.execute("DELETE FROM paper_references WHERE paper_id = ?", (paper_id,))
+            conn.execute("DELETE FROM graph_patches WHERE paper_id = ?", (paper_id,))
+            conn.execute("DELETE FROM papers WHERE id = ?", (paper_id,))
+
+        source_path = source.get("path")
+        if source_path:
+            path = Path(source_path)
+            try:
+                if path.exists() and path.is_file():
+                    path.unlink()
+            except OSError as exc:
+                logger.warning("Failed to delete source document for %s: %s", paper_id, exc)
+        return True
+
+    def get_graph(self, paper_id: str) -> PaperArgumentGraph | None:
+        with self._connect() as conn:
+            exists = conn.execute("SELECT 1 FROM papers WHERE id = ?", (paper_id,)).fetchone()
+            if exists is None:
+                return None
+            node_rows = conn.execute(
+                """
+                SELECT id, node_type, title, summary, properties_json, semantic_unit_ids_json, page_ranges_json,
+                       confidence, source_type, created_by, verified
+                FROM nodes WHERE paper_id = ?
+                """,
+                (paper_id,),
+            ).fetchall()
+            edge_rows = conn.execute(
+                """
+                SELECT id, source_node_id, target_node_id, edge_type, semantic_unit_ids_json, confidence,
+                       inference_type, properties_json
+                FROM edges WHERE paper_id = ?
+                """,
+                (paper_id,),
+            ).fetchall()
+
+        nodes = [
+            GraphNode(
+                id=row["id"],
+                paper_id=paper_id,
+                node_type=row["node_type"],
+                title=row["title"],
+                summary=row["summary"],
+                confidence=row["confidence"],
+                source_type=row["source_type"],
+                semantic_unit_ids=_loads_json(row["semantic_unit_ids_json"], []),
+                page_ranges=[tuple(pair) for pair in _loads_json(row["page_ranges_json"], [])],
+                properties=_loads_json(row["properties_json"], {}),
+                created_by=row["created_by"],
+                verified=bool(row["verified"]),
+            )
+            for row in node_rows
+        ]
+        edges = [
+            GraphEdge(
+                id=row["id"],
+                paper_id=paper_id,
+                source_node_id=row["source_node_id"],
+                target_node_id=row["target_node_id"],
+                edge_type=row["edge_type"],
+                confidence=row["confidence"],
+                semantic_unit_ids=_loads_json(row["semantic_unit_ids_json"], []),
+                inference_type=row["inference_type"],
+                properties=_loads_json(row["properties_json"], {}),
+            )
+            for row in edge_rows
+        ]
+        return PaperArgumentGraph(paper_id=paper_id, nodes=nodes, edges=edges)
+
+    def replace_graph(self, paper_id: str, graph: PaperArgumentGraph) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM edges WHERE paper_id = ?", (paper_id,))
+            conn.execute("DELETE FROM nodes WHERE paper_id = ?", (paper_id,))
+            for node in graph.nodes:
+                conn.execute(
+                    """
+                    INSERT INTO nodes
+                    (id, paper_id, node_type, title, summary, properties_json, semantic_unit_ids_json, page_ranges_json,
+                     confidence, source_type, created_by, verified)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        node.id,
+                        node.paper_id,
+                        str(node.node_type),
+                        node.title,
+                        node.summary,
+                        json.dumps(node.properties, default=str),
+                        json.dumps(node.semantic_unit_ids),
+                        json.dumps([list(pair) for pair in node.page_ranges]),
+                        node.confidence,
+                        node.source_type,
+                        node.created_by,
+                        int(node.verified),
+                    ),
+                )
+            for edge in graph.edges:
+                conn.execute(
+                    """
+                    INSERT INTO edges
+                    (id, paper_id, source_node_id, target_node_id, edge_type, semantic_unit_ids_json, confidence,
+                     inference_type, properties_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        edge.id,
+                        edge.paper_id,
+                        edge.source_node_id,
+                        edge.target_node_id,
+                        str(edge.edge_type),
+                        json.dumps(edge.semantic_unit_ids),
+                        edge.confidence,
+                        edge.inference_type,
+                        json.dumps(edge.properties, default=str),
+                    ),
+                )
+
+    def get_semantic_units(self, paper_id: str) -> list[SemanticUnit]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, role, title, text, source_location_json, confidence, created_by, properties_json
+                FROM semantic_units WHERE paper_id = ? ORDER BY id
+                """,
+                (paper_id,),
+            ).fetchall()
+        return [
+            SemanticUnit(
+                semantic_unit_id=row["id"],
+                paper_id=paper_id,
+                role=row["role"],
+                title=row["title"],
+                text=row["text"],
+                source_location=PageSourceLocation(**_loads_json(row["source_location_json"], {})),
+                confidence=row["confidence"],
+                created_by=row["created_by"],
+                properties=_loads_json(row["properties_json"], {}),
+            )
+            for row in rows
+        ]
+
+    def get_references(self, paper_id: str) -> list[PaperReference]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, raw_text, title, authors_json, year, doi, arxiv_id, metadata_json
+                FROM paper_references WHERE paper_id = ? ORDER BY id
+                """,
+                (paper_id,),
+            ).fetchall()
+        return [self._reference_from_row(row) for row in rows]
+
+    def find_reference(self, reference_id: str) -> PaperReference | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, raw_text, title, authors_json, year, doi, arxiv_id, metadata_json
+                FROM paper_references WHERE id = ?
+                """,
+                (reference_id,),
+            ).fetchone()
+        return self._reference_from_row(row) if row is not None else None
+
+    @staticmethod
+    def _reference_from_row(row: sqlite3.Row) -> PaperReference:
+        metadata = _loads_json(row["metadata_json"], {})
+        return PaperReference(
+            reference_id=row["id"],
+            marker=metadata.get("marker"),
+            raw_text=row["raw_text"],
+            title=row["title"],
+            authors=_loads_json(row["authors_json"], []),
+            year=row["year"],
+            doi=row["doi"],
+            arxiv_id=row["arxiv_id"],
+        )
+
+    def update_reference(self, reference: PaperReference) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE paper_references
+                SET title = ?, authors_json = ?, year = ?, doi = ?, arxiv_id = ?
+                WHERE id = ?
+                """,
+                (
+                    reference.title,
+                    json.dumps(reference.authors),
+                    reference.year,
+                    reference.doi,
+                    reference.arxiv_id,
+                    reference.reference_id,
+                ),
+            )
+
+    def record_patch(self, paper_id: str, operations: list[dict]) -> str:
+        patch_id = str(uuid4())
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO graph_patches (id, paper_id, operations_json) VALUES (?, ?, ?)",
+                (patch_id, paper_id, json.dumps(operations, default=str)),
+            )
         return patch_id
 
     def vector_search(self, paper_id: str, query: str, limit: int = 10) -> list[tuple[str, float]]:
@@ -517,9 +980,12 @@ class PostgresGraphStore(GraphStore):
 
 
 def create_graph_store() -> GraphStore:
-    """Returns a Postgres-backed store when the database is reachable, else in-memory."""
+    """Returns a SQLite/Postgres-backed store when configured, else in-memory."""
     if settings.database_url in {"", "memory"}:
         return InMemoryGraphStore()
+    if settings.database_url.startswith("sqlite:///"):
+        logger.info("Using SQLite graph store at %s", settings.database_url)
+        return SQLiteGraphStore(settings.database_url)
     try:
         engine = create_engine(settings.database_url, pool_pre_ping=True, connect_args={"connect_timeout": 3})
         with engine.connect() as conn:
@@ -529,3 +995,15 @@ def create_graph_store() -> GraphStore:
     except SQLAlchemyError as exc:
         logger.warning("Database unavailable (%s); falling back to in-memory graph store", exc)
         return InMemoryGraphStore()
+
+
+def _loads_json(value: str | bytes | None, default):
+    if value in (None, "", b""):
+        return default
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse JSON payload from local store")
+        return default

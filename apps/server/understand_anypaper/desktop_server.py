@@ -26,9 +26,12 @@ def default_document_store_dir() -> Path:
 
 
 def configure_runtime_environment(args: argparse.Namespace) -> None:
-    os.environ.setdefault("DATABASE_URL", "memory")
     document_store_dir = Path(args.document_store_dir) if args.document_store_dir else default_document_store_dir()
-    os.environ["PAG_DOCUMENT_STORE_DIR"] = str(document_store_dir.resolve())
+    document_store_dir = document_store_dir.resolve()
+    workspace_root = document_store_dir.parent
+    default_database_url = f"sqlite:///{(workspace_root / 'uap.sqlite').as_posix()}"
+    os.environ.setdefault("DATABASE_URL", default_database_url)
+    os.environ["PAG_DOCUMENT_STORE_DIR"] = str(document_store_dir)
 
 
 def main(argv: Sequence[str] | None = None) -> None:

@@ -2,21 +2,27 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CLI_DIR="$ROOT_DIR/apps/cli"
 SERVER_DIR="$ROOT_DIR/apps/server"
 WEB_DIR="$ROOT_DIR/apps/web"
-BACKEND_DIR="$WEB_DIR/backend"
+RELEASE_DIR="$ROOT_DIR/release"
+STAGING_DIR="$RELEASE_DIR/staging"
+BACKEND_DIR="$STAGING_DIR/backend"
+LAUNCHER_DIR="$STAGING_DIR/launcher"
 PYINSTALLER_TMP="$ROOT_DIR/.tmp/pyinstaller/macos"
 UV_CACHE_DIR="$ROOT_DIR/.tmp/uv-cache"
+GO_CACHE_DIR="$ROOT_DIR/.tmp/go-build-cache/macos"
 MAC_SIGN_ENABLED="${PAG_MAC_SIGN:-0}"
 MAC_DMG_ENABLED="${PAG_MAC_DMG:-0}"
 REBUILD_BACKEND="${PAG_REBUILD_BACKEND:-0}"
 BACKEND_EXECUTABLE="$BACKEND_DIR/server"
+LAUNCHER_EXECUTABLE="$LAUNCHER_DIR/uap"
 BACKEND_STAMP_FILE="$BACKEND_DIR/.packaging-version"
-RELEASE_BACKEND_EXECUTABLE="$WEB_DIR/release/mac-arm64/Understand Anypaper.app/Contents/Resources/backend/server"
-RELEASE_BACKEND_STAMP_FILE="$WEB_DIR/release/mac-arm64/Understand Anypaper.app/Contents/Resources/backend/.packaging-version"
+RELEASE_BACKEND_EXECUTABLE="$RELEASE_DIR/mac-arm64/Understand Anypaper.app/Contents/Resources/backend/server"
+RELEASE_BACKEND_STAMP_FILE="$RELEASE_DIR/mac-arm64/Understand Anypaper.app/Contents/Resources/backend/.packaging-version"
 REQUIRED_BACKEND_PACKAGING_VERSION="desktop-backend-v3"
 
-mkdir -p "$BACKEND_DIR" "$PYINSTALLER_TMP" "$UV_CACHE_DIR"
+mkdir -p "$BACKEND_DIR" "$LAUNCHER_DIR" "$PYINSTALLER_TMP" "$UV_CACHE_DIR" "$GO_CACHE_DIR" "$RELEASE_DIR"
 
 if [[ ! -d "$WEB_DIR/node_modules" ]]; then
   npm --prefix "$WEB_DIR" install
@@ -76,6 +82,12 @@ if backend_rebuild_required; then
 else
   echo "Reusing existing packaged backend at $BACKEND_EXECUTABLE (set PAG_REBUILD_BACKEND=1 to rebuild)."
 fi
+
+echo "Building Go desktop launcher."
+(
+  cd "$CLI_DIR"
+  env GOCACHE="$GO_CACHE_DIR" go build -o "$LAUNCHER_EXECUTABLE" ./cmd
+)
 
 npm --prefix "$WEB_DIR" run build
 

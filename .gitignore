@@ -10,4 +10,5 @@ release/
 .DS_Store
 data/
 apps/web/backend/
+apps/web/launcher/
 .tmp/

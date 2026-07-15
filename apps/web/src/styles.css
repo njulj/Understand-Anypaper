@@ -942,6 +942,41 @@ button:disabled {
   gap: 14px;
 }
 
+.desktop-setup-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-soft);
+}
+
+.desktop-setup-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.desktop-setup-panel-header strong,
+.desktop-setup-grid strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.desktop-setup-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.desktop-setup-grid span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .secret-input {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

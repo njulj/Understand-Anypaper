@@ -7,6 +7,14 @@ declare global {
     openaiModel: string;
   }
 
+  interface DesktopSetupInfo {
+    workspaceDir: string;
+    launcherInstallDir: string;
+    launcherCommandPath: string;
+    launcherSourcePath: string;
+    initializedAt: string;
+  }
+
   interface Window {
     pagDesktop?: {
       apiBaseUrl?: string | null;
@@ -15,6 +23,7 @@ declare global {
       isDesktopApp: boolean;
       getApiConfig: () => Promise<DesktopApiConfig>;
       saveApiConfig: (config: DesktopApiConfig) => Promise<DesktopApiConfig>;
+      getSetupInfo: () => Promise<DesktopSetupInfo>;
     };
   }
 }

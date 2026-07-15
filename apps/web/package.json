@@ -34,7 +34,7 @@
     "appId": "com.aritxonly.understand-anypaper",
     "productName": "Understand Anypaper",
     "directories": {
-      "output": "release"
+      "output": "../../release"
     },
     "files": [
       "dist/**/*",
@@ -43,8 +43,15 @@
     ],
     "extraResources": [
       {
-        "from": "backend",
+        "from": "../../release/staging/backend",
         "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../../release/staging/launcher",
+        "to": "launcher",
         "filter": [
           "**/*"
         ]

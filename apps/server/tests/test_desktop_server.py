@@ -5,15 +5,15 @@ from understand_anypaper.config import Settings, apply_desktop_api_overrides
 from understand_anypaper.desktop_server import configure_runtime_environment
 
 
-def test_configure_runtime_environment_uses_memory_store_by_default(tmp_path, monkeypatch):
+def test_configure_runtime_environment_uses_workspace_sqlite_by_default(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("PAG_DOCUMENT_STORE_DIR", raising=False)
 
     configure_runtime_environment(Namespace(document_store_dir=None))
 
-    assert os.environ["DATABASE_URL"] == "memory"
-    assert os.environ["PAG_DOCUMENT_STORE_DIR"] == str(tmp_path / "data" / "documents")
+    assert os.environ["DATABASE_URL"] == f"sqlite:///{(tmp_path / 'data' / 'uap.sqlite').as_posix()}"
+    assert os.environ["PAG_DOCUMENT_STORE_DIR"] == str((tmp_path / "data" / "documents").resolve())
 
 
 def test_configure_runtime_environment_preserves_explicit_settings(tmp_path, monkeypatch):

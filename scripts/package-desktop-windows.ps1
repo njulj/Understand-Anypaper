@@ -1,22 +1,31 @@
 $ErrorActionPreference = "Stop"
 
 $RootDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$CliDir = Join-Path $RootDir "apps/cli"
 $ServerDir = Join-Path $RootDir "apps/server"
 $WebDir = Join-Path $RootDir "apps/web"
-$BackendDir = Join-Path $WebDir "backend"
+$ReleaseDir = Join-Path $RootDir "release"
+$StagingDir = Join-Path $ReleaseDir "staging"
+$BackendDir = Join-Path $StagingDir "backend"
+$LauncherDir = Join-Path $StagingDir "launcher"
 $PyInstallerTmp = Join-Path $RootDir ".tmp/pyinstaller/windows"
 $UvCacheDir = Join-Path $RootDir ".tmp/uv-cache"
+$GoCacheDir = Join-Path $RootDir ".tmp/go-build-cache/windows"
 $WindowsSignEnabled = $env:PAG_WINDOWS_SIGN
 $RebuildBackend = $env:PAG_REBUILD_BACKEND
 $BackendExecutable = Join-Path $BackendDir "server.exe"
+$LauncherExecutable = Join-Path $LauncherDir "uap.exe"
 $BackendStampFile = Join-Path $BackendDir ".packaging-version"
-$ReleaseBackendExecutable = Join-Path $WebDir "release/win-unpacked/resources/backend/server.exe"
-$ReleaseBackendStampFile = Join-Path $WebDir "release/win-unpacked/resources/backend/.packaging-version"
+$ReleaseBackendExecutable = Join-Path $ReleaseDir "win-unpacked/resources/backend/server.exe"
+$ReleaseBackendStampFile = Join-Path $ReleaseDir "win-unpacked/resources/backend/.packaging-version"
 $RequiredBackendPackagingVersion = "desktop-backend-v3"
 
 New-Item -ItemType Directory -Force -Path $BackendDir | Out-Null
+New-Item -ItemType Directory -Force -Path $LauncherDir | Out-Null
+New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
 New-Item -ItemType Directory -Force -Path $PyInstallerTmp | Out-Null
 New-Item -ItemType Directory -Force -Path $UvCacheDir | Out-Null
+New-Item -ItemType Directory -Force -Path $GoCacheDir | Out-Null
 
 if (!(Test-Path (Join-Path $WebDir "node_modules"))) {
   npm --prefix $WebDir install
@@ -82,6 +91,15 @@ if (Test-BackendRebuildRequired) {
 }
 else {
   Write-Host "Reusing existing packaged backend at $BackendExecutable (set PAG_REBUILD_BACKEND=1 to rebuild)."
+}
+
+$env:GOCACHE = $GoCacheDir
+Push-Location $CliDir
+try {
+  go build -o $LauncherExecutable ./cmd
+}
+finally {
+  Pop-Location
 }
 
 npm --prefix $WebDir run build
