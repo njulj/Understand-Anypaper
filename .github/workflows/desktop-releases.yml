@@ -25,6 +25,10 @@ jobs:
             os: windows-latest
             artifact_name: desktop-windows
             build_command: npm --prefix apps/web run desktop:dist:win
+          - name: linux
+            os: ubuntu-latest
+            artifact_name: desktop-linux
+            build_command: npm --prefix apps/web run desktop:dist:linux
 
     steps:
       - name: Checkout
@@ -70,6 +74,7 @@ jobs:
           compression-level: 0
           path: |
             release/*.dmg
+            release/*.AppImage
             release/*.zip
             release/*.exe
             release/*.blockmap
@@ -94,6 +99,7 @@ jobs:
         with:
           files: |
             release-artifacts/*.dmg
+            release-artifacts/*.AppImage
             release-artifacts/*.zip
             release-artifacts/*.exe
             release-artifacts/*.blockmap
