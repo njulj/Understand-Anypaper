@@ -59,8 +59,8 @@ devbox services up --background
 
 ## Desktop packaging
 
-The repo now includes an Electron shell for `apps/web` plus a PyInstaller-based
-desktop backend for `apps/server`.
+The repo now includes an Electron shell for `apps/web`, a Go desktop launcher in
+`apps/cli`, and a PyInstaller-based desktop backend for `apps/server`.
 
 ### Development
 
@@ -80,18 +80,35 @@ npm run electron:dev
 ```
 
 Electron dev mode reuses `http://127.0.0.1:5173` for the renderer and
-`http://127.0.0.1:8000` for the API by default.
+`http://127.0.0.1:8000` for the API by default. When
+`PAG_ELECTRON_SPAWN_BACKEND=1`, Electron now starts the backend through the Go
+launcher (`uap desktop run-backend`), which prefers a packaged backend
+executable and only falls back to `uv` in development. The desktop shell now
+stays resident in the tray/menu bar, so closing the window hides the workspace
+instead of shutting down the warmed backend.
 
 When running the packaged desktop app, OpenAI-compatible API settings can be
 managed from the in-app toolbar instead of relying on shell environment
 variables. The desktop shell stores those values locally and the backend picks
 them up for subsequent uploads.
 
+On the first packaged launch, Electron now performs a lightweight desktop
+onboarding flow before loading the web UI:
+
+- choose the local workspace location used for SQLite, uploaded documents,
+  cache, and logs
+- optionally install a reusable `uap` command wrapper into a user-selected
+  folder
+
+The main webpage is only shown after that initialization succeeds.
+
 ### Production desktop builds
 
-Desktop builds package the FastAPI backend into a standalone executable and make
-Electron start it locally on `127.0.0.1:8765`. The packaged backend defaults to
-`DATABASE_URL=memory`, so it does not require PostgreSQL on end-user machines.
+Desktop builds package the FastAPI backend into a standalone executable and also
+bundle the Go launcher. Electron starts the launcher locally on
+`127.0.0.1:8765`, and the launcher starts the packaged backend. The packaged
+backend defaults to a workspace-local SQLite database, so it does not require
+PostgreSQL on end-user machines.
 For local builds, the packaging scripts default to unsigned app artifacts so
 they still work offline or on machines without a working timestamp/signing
 setup. On macOS, the local script also defaults to `zip` output and skips `dmg`
@@ -126,8 +143,19 @@ PAG_MAC_DMG=1 ./scripts/package-desktop-macos.sh
 
 Outputs:
 
-- Intermediate backend executable: `apps/web/backend/server` or `server.exe`
-- Electron installers and archives: `apps/web/release/`
+- Intermediate backend executable: `release/staging/backend/server` or `server.exe`
+- Intermediate launcher executable: `release/staging/launcher/uap` or `uap.exe`
+- Electron installers and archives: `release/`
+
+## GitHub Releases
+
+The repo now includes a desktop packaging workflow at
+`.github/workflows/desktop-releases.yml`.
+
+- pushing a `v*` tag builds macOS and Windows desktop artifacts
+- those artifacts are then attached to the matching GitHub Release
+- `workflow_dispatch` can still be used to validate the packaging pipeline
+  without publishing a Release
 
 The desktop app inherits `OPENAI_API_KEY` / `PAG_OPENAI_API_KEY` from the launch
 environment, so keep those configured when testing packaged builds.

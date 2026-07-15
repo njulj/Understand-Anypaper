@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage } = require('electron');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -12,11 +12,15 @@ const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_OPENAI_MODEL = 'gpt-4o-mini';
 
 let mainWindow = null;
-let backendProcess = null;
+let tray = null;
 let quitting = false;
 
 function desktopApiConfigPath() {
   return path.join(app.getPath('userData'), 'desktop-api-config.json');
+}
+
+function desktopSetupPath() {
+  return path.join(app.getPath('userData'), 'desktop-setup.json');
 }
 
 function defaultDesktopApiConfig() {
@@ -28,11 +32,32 @@ function defaultDesktopApiConfig() {
   };
 }
 
+function defaultDesktopSetup() {
+  return {
+    workspaceDir: '',
+    launcherInstallDir: path.join(app.getPath('userData'), 'bin'),
+    launcherCommandPath: '',
+    launcherSourcePath: '',
+    initializedAt: '',
+  };
+}
+
 function normalizeDesktopApiConfig(input = {}) {
   return {
     openaiApiKey: String(input.openaiApiKey || '').trim(),
     openaiBaseUrl: String(input.openaiBaseUrl || '').trim() || DEFAULT_OPENAI_BASE_URL,
     openaiModel: String(input.openaiModel || '').trim() || DEFAULT_OPENAI_MODEL,
+  };
+}
+
+function normalizeDesktopSetup(input = {}) {
+  const defaults = defaultDesktopSetup();
+  return {
+    workspaceDir: String(input.workspaceDir || '').trim(),
+    launcherInstallDir: String(input.launcherInstallDir || defaults.launcherInstallDir).trim(),
+    launcherCommandPath: String(input.launcherCommandPath || '').trim(),
+    launcherSourcePath: String(input.launcherSourcePath || '').trim(),
+    initializedAt: String(input.initializedAt || '').trim(),
   };
 }
 
@@ -59,6 +84,29 @@ function saveDesktopApiConfig(input) {
   return nextConfig;
 }
 
+function loadDesktopSetup() {
+  const filePath = desktopSetupPath();
+  const defaults = defaultDesktopSetup();
+  if (!fs.existsSync(filePath)) {
+    return defaults;
+  }
+
+  try {
+    const payload = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return { ...defaults, ...normalizeDesktopSetup(payload) };
+  } catch {
+    return defaults;
+  }
+}
+
+function saveDesktopSetup(input) {
+  const filePath = desktopSetupPath();
+  const nextSetup = normalizeDesktopSetup(input);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${JSON.stringify(nextSetup, null, 2)}\n`, 'utf8');
+  return nextSetup;
+}
+
 function backendBaseUrl() {
   return `http://${DESKTOP_BACKEND_HOST}:${DESKTOP_BACKEND_PORT}`;
 }
@@ -67,27 +115,241 @@ function shouldSpawnPackagedBackend() {
   return app.isPackaged || process.env.PAG_ELECTRON_SPAWN_BACKEND === '1';
 }
 
-function backendExecutableName() {
-  return process.platform === 'win32' ? 'server.exe' : 'server';
+function launcherExecutableName() {
+  return process.platform === 'win32' ? 'uap.exe' : 'uap';
 }
 
-function resolveBackendExecutable() {
-  if (process.env.PAG_ELECTRON_BACKEND_EXECUTABLE) {
-    return process.env.PAG_ELECTRON_BACKEND_EXECUTABLE;
+function resolveLauncherExecutable() {
+  if (process.env.PAG_ELECTRON_LAUNCHER_EXECUTABLE) {
+    return process.env.PAG_ELECTRON_LAUNCHER_EXECUTABLE;
   }
   if (app.isPackaged) {
-    return path.join(process.resourcesPath, 'backend', backendExecutableName());
+    return path.join(process.resourcesPath, 'launcher', launcherExecutableName());
   }
-  return path.join(__dirname, '..', 'backend', backendExecutableName());
+  return path.join(__dirname, '..', '..', 'cli');
 }
 
-function attachBackendLogging(child) {
-  child.stdout?.on('data', (chunk) => {
-    process.stdout.write(`[python-backend] ${chunk}`);
+function resolveCLIInvocation(args) {
+  if (app.isPackaged) {
+    const launcher = resolveLauncherExecutable();
+    if (!fs.existsSync(launcher)) {
+      throw new Error(`Desktop launcher executable not found: ${launcher}`);
+    }
+    return {
+      command: launcher,
+      args,
+      cwd: path.dirname(launcher),
+    };
+  }
+
+  return {
+    command: 'go',
+    args: ['run', './cmd', ...args],
+    cwd: resolveLauncherExecutable(),
+  };
+}
+
+function runCLICommand(args) {
+  const invocation = resolveCLIInvocation(args);
+  return new Promise((resolve, reject) => {
+    const child = spawn(invocation.command, invocation.args, {
+      cwd: invocation.cwd,
+      env: {
+        ...process.env,
+        PAG_DESKTOP_SETTINGS_PATH: desktopApiConfigPath(),
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (chunk) => {
+      const text = String(chunk);
+      stdout += text;
+      process.stdout.write(`[uap] ${text}`);
+    });
+    child.stderr?.on('data', (chunk) => {
+      const text = String(chunk);
+      stderr += text;
+      process.stderr.write(`[uap] ${text}`);
+    });
+    child.once('error', reject);
+    child.once('exit', (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      reject(new Error(stderr.trim() || stdout.trim() || `Command failed with exit code ${code}`));
+    });
   });
-  child.stderr?.on('data', (chunk) => {
-    process.stderr.write(`[python-backend] ${chunk}`);
+}
+
+async function runCLIJSON(args) {
+  const { stdout } = await runCLICommand(['--json', ...args]);
+  try {
+    return JSON.parse(stdout);
+  } catch (error) {
+    throw new Error(`Failed to parse JSON output for ${args.join(' ')}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function launcherCommandName() {
+  return process.platform === 'win32' ? 'uap.cmd' : 'uap';
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function installLauncherCommand(installDir, setup) {
+  const sourceLauncher = resolveLauncherExecutable();
+  if (!fs.existsSync(sourceLauncher)) {
+    throw new Error(`Launcher executable not found: ${sourceLauncher}`);
+  }
+
+  fs.mkdirSync(installDir, { recursive: true });
+  const commandPath = path.join(installDir, launcherCommandName());
+  const settingsPath = desktopApiConfigPath();
+  const workspaceDir = setup?.workspaceDir || '';
+  if (process.platform === 'win32') {
+    const sourcePath = sourceLauncher.replace(/\//g, '\\');
+    const script = `@echo off\r\nset "PAG_DESKTOP_SETTINGS_PATH=${settingsPath}"\r\nset "PAG_WORKSPACE_DIR=${workspaceDir}"\r\n"${sourcePath}" %*\r\n`;
+    fs.writeFileSync(commandPath, script, 'utf8');
+  } else {
+    const exports = [
+      `export PAG_DESKTOP_SETTINGS_PATH=${shellQuote(settingsPath)}`,
+      `export PAG_WORKSPACE_DIR=${shellQuote(workspaceDir)}`,
+    ].join('\n');
+    const script = `#!/usr/bin/env bash\n${exports}\nexec ${shellQuote(sourceLauncher)} "$@"\n`;
+    fs.writeFileSync(commandPath, script, 'utf8');
+    fs.chmodSync(commandPath, 0o755);
+  }
+
+  return {
+    launcherInstallDir: installDir,
+    launcherCommandPath: commandPath,
+    launcherSourcePath: sourceLauncher,
+  };
+}
+
+function workspaceArgsForSetup(setup) {
+  return setup?.workspaceDir ? ['--workspace', setup.workspaceDir] : [];
+}
+
+async function promptForWorkspaceSetup() {
+  const response = await dialog.showMessageBox({
+    type: 'question',
+    buttons: ['Use Recommended Location', 'Choose Location', 'Quit'],
+    defaultId: 0,
+    cancelId: 2,
+    title: 'Set Up Understand Anypaper',
+    message: 'Choose where the desktop app should store its local workspace.',
+    detail:
+      'The workspace contains your SQLite database, uploaded papers, logs, and cache. You can keep the recommended location or pick a custom folder.',
+    noLink: true,
   });
+
+  if (response.response === 2) {
+    throw new Error('Desktop setup was canceled before a workspace was selected.');
+  }
+
+  if (response.response === 0) {
+    const result = await runCLIJSON(['init']);
+    return result.workspace.root;
+  }
+
+  const selection = await dialog.showOpenDialog({
+    title: 'Choose Workspace Folder',
+    buttonLabel: 'Use This Folder',
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (selection.canceled || !selection.filePaths[0]) {
+    throw new Error('Desktop setup was canceled before a workspace folder was chosen.');
+  }
+
+  const result = await runCLIJSON(['init', '--path', selection.filePaths[0]]);
+  return result.workspace.root;
+}
+
+async function maybeInstallLauncherCommand(currentSetup) {
+  const installChoice = await dialog.showMessageBox({
+    type: 'question',
+    buttons: ['Install uap Command', 'Skip'],
+    defaultId: 0,
+    cancelId: 1,
+    title: 'Optional CLI Installation',
+    message: 'Do you also want a reusable `uap` command?',
+    detail:
+      'Understand Anypaper can place a small launcher command in a folder you choose, so you can call `uap` from Terminal or PowerShell after adding that folder to PATH.',
+    noLink: true,
+  });
+  if (installChoice.response !== 0) {
+    return currentSetup;
+  }
+
+  const locationChoice = await dialog.showMessageBox({
+    type: 'question',
+    buttons: ['Use Recommended Folder', 'Choose Folder', 'Skip'],
+    defaultId: 0,
+    cancelId: 2,
+    title: 'Choose uap Install Folder',
+    message: 'Choose where to place the `uap` launcher command.',
+    detail: `Recommended: ${currentSetup.launcherInstallDir}`,
+    noLink: true,
+  });
+  if (locationChoice.response === 2) {
+    return currentSetup;
+  }
+
+  let installDir = currentSetup.launcherInstallDir;
+  if (locationChoice.response === 1) {
+    const selection = await dialog.showOpenDialog({
+      title: 'Choose Folder for uap',
+      buttonLabel: 'Install Here',
+      properties: ['openDirectory', 'createDirectory'],
+      defaultPath: currentSetup.launcherInstallDir,
+    });
+    if (selection.canceled || !selection.filePaths[0]) {
+      return currentSetup;
+    }
+    installDir = selection.filePaths[0];
+  }
+
+  const installResult = installLauncherCommand(installDir, currentSetup);
+  const nextSetup = saveDesktopSetup({
+    ...currentSetup,
+    ...installResult,
+  });
+  await dialog.showMessageBox({
+    type: 'info',
+    buttons: ['OK'],
+    defaultId: 0,
+    title: 'uap Installed',
+    message: 'The desktop launcher command is ready.',
+    detail: `Installed at:\n${nextSetup.launcherCommandPath}\n\nIf you want to run it from a shell, add this folder to PATH:\n${nextSetup.launcherInstallDir}`,
+    noLink: true,
+  });
+  return nextSetup;
+}
+
+async function ensureDesktopSetup() {
+  if (!shouldSpawnPackagedBackend()) {
+    return loadDesktopSetup();
+  }
+
+  let setup = loadDesktopSetup();
+  if (setup.workspaceDir && fs.existsSync(setup.workspaceDir)) {
+    return setup;
+  }
+
+  const workspaceDir = await promptForWorkspaceSetup();
+  setup = saveDesktopSetup({
+    ...setup,
+    workspaceDir,
+    initializedAt: new Date().toISOString(),
+  });
+  setup = await maybeInstallLauncherCommand(setup);
+  return setup;
 }
 
 function loadingMarkup(message) {
@@ -246,6 +508,115 @@ function loadingMarkup(message) {
   </html>`;
 }
 
+function createTrayImage() {
+  const svg =
+    process.platform === 'darwin'
+      ? `
+        <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
+          <path d="M6.2 16.8 L11 5.4 L15.8 16.8" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="M7.9 12.6 H14.1" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" />
+        </svg>
+      `.trim()
+      : `
+        <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+          <rect x="4" y="4" width="24" height="24" rx="8" fill="#146356" />
+          <path d="M10 21 L16 10 L22 21" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="M12.7 17.2 H19.3" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" />
+        </svg>
+      `.trim();
+  const image = nativeImage.createFromDataURL(
+    `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`,
+  );
+  const resized = image.resize(
+    process.platform === 'darwin' ? { width: 16, height: 16 } : { width: 18, height: 18 },
+  );
+  if (process.platform === 'darwin') {
+    resized.setTemplateImage(true);
+  }
+  return resized;
+}
+
+function showMainWindow() {
+  if (!mainWindow) {
+    return;
+  }
+  if (process.platform === 'darwin') {
+    app.dock.show();
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.show();
+  mainWindow.focus();
+  updateTrayMenu();
+}
+
+function hideMainWindow() {
+  if (!mainWindow) {
+    return;
+  }
+  mainWindow.hide();
+  if (process.platform === 'darwin') {
+    app.dock.hide();
+  }
+  updateTrayMenu();
+}
+
+function toggleMainWindow() {
+  if (!mainWindow) {
+    return;
+  }
+  if (mainWindow.isVisible()) {
+    hideMainWindow();
+    return;
+  }
+  showMainWindow();
+}
+
+function updateTrayMenu() {
+  if (!tray) {
+    return;
+  }
+  const isVisible = Boolean(mainWindow?.isVisible());
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      {
+        label: 'Start Service',
+        click: () => {
+          void ensureLocalService(true);
+        },
+      },
+      {
+        label: 'Stop Service',
+        click: () => {
+          void stopLocalService(true);
+        },
+      },
+      {
+        label: isVisible ? 'Hide Workspace' : 'Open Workspace',
+        click: () => toggleMainWindow(),
+      },
+      {
+        label: 'Quit',
+        click: () => {
+          quitting = true;
+          app.quit();
+        },
+      },
+    ]),
+  );
+}
+
+function createTray() {
+  if (tray) {
+    return;
+  }
+  tray = new Tray(createTrayImage());
+  tray.setToolTip('Understand Anypaper');
+  tray.on('click', () => toggleMainWindow());
+  updateTrayMenu();
+}
+
 async function showLoadingScreen(window, message) {
   await window.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(loadingMarkup(message))}`);
 }
@@ -270,63 +641,38 @@ async function waitForServer(url, timeoutMs = 30000) {
   throw lastError || new Error(`Timed out waiting for backend at ${url}`);
 }
 
-async function startBackendIfNeeded() {
+async function startBackendIfNeeded(setup) {
   if (!shouldSpawnPackagedBackend()) {
     process.env.PAG_RENDERER_API_BASE_URL = DEV_API_BASE_URL;
     return;
   }
-
-  const executable = resolveBackendExecutable();
-  if (!fs.existsSync(executable)) {
-    throw new Error(`Packaged backend executable not found: ${executable}`);
-  }
-
-  const documentsDir = path.join(app.getPath('userData'), 'documents');
-  fs.mkdirSync(documentsDir, { recursive: true });
-  const apiConfig = loadDesktopApiConfig();
-
-  backendProcess = spawn(
-    executable,
-    [
-      '--host',
-      DESKTOP_BACKEND_HOST,
-      '--port',
-      String(DESKTOP_BACKEND_PORT),
-      '--document-store-dir',
-      documentsDir,
-    ],
-    {
-      env: {
-        ...process.env,
-        DATABASE_URL: process.env.DATABASE_URL || 'memory',
-        PAG_DOCUMENT_STORE_DIR: documentsDir,
-        PAG_DESKTOP_SETTINGS_PATH: desktopApiConfigPath(),
-        OPENAI_API_KEY: apiConfig.openaiApiKey,
-        OPENAI_BASE_URL: apiConfig.openaiBaseUrl,
-        PAG_OPENAI_MODEL: apiConfig.openaiModel,
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
-
-  attachBackendLogging(backendProcess);
-  backendProcess.once('exit', (code, signal) => {
-    if (!quitting) {
-      const reason = signal ? `signal ${signal}` : `code ${code}`;
-      dialog.showErrorBox('Python backend exited', `The local backend stopped unexpectedly (${reason}).`);
-    }
-    backendProcess = null;
-  });
-
-  process.env.PAG_RENDERER_API_BASE_URL = backendBaseUrl();
-  await waitForServer(backendBaseUrl());
+  await ensureLocalService(false, setup);
 }
 
-function stopBackend() {
-  if (!backendProcess || backendProcess.killed) {
-    return;
+async function ensureLocalService(showErrors, setup = loadDesktopSetup()) {
+  try {
+    await runCLICommand(['service', 'start', ...workspaceArgsForSetup(setup)]);
+    process.env.PAG_RENDERER_API_BASE_URL = backendBaseUrl();
+    await waitForServer(backendBaseUrl());
+  } catch (error) {
+    if (showErrors) {
+      const detail = error instanceof Error ? error.message : String(error);
+      dialog.showErrorBox('Failed to start local service', detail);
+    }
+    throw error;
   }
-  backendProcess.kill();
+}
+
+async function stopLocalService(showErrors) {
+  try {
+    await runCLICommand(['service', 'stop']);
+  } catch (error) {
+    if (showErrors) {
+      const detail = error instanceof Error ? error.message : String(error);
+      dialog.showErrorBox('Failed to stop local service', detail);
+    }
+    throw error;
+  }
 }
 
 async function createMainWindow() {
@@ -350,6 +696,29 @@ async function createMainWindow() {
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
   });
+  mainWindow.on('show', () => {
+    if (process.platform === 'darwin') {
+      app.dock.show();
+    }
+    updateTrayMenu();
+  });
+  mainWindow.on('hide', () => {
+    if (process.platform === 'darwin') {
+      app.dock.hide();
+    }
+    updateTrayMenu();
+  });
+  mainWindow.on('close', (event) => {
+    if (quitting) {
+      return;
+    }
+    event.preventDefault();
+    hideMainWindow();
+  });
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+    updateTrayMenu();
+  });
 }
 
 async function loadAppWindow() {
@@ -368,12 +737,14 @@ async function loadAppWindow() {
 
 async function bootstrap() {
   try {
+    const desktopSetup = await ensureDesktopSetup();
     await createMainWindow();
+    createTray();
     await showLoadingScreen(
       mainWindow,
       shouldSpawnPackagedBackend() ? 'Starting the local paper engine...' : 'Opening the workspace...',
     );
-    await startBackendIfNeeded();
+    await startBackendIfNeeded(desktopSetup);
     await showLoadingScreen(mainWindow, 'Loading the desktop workspace...');
     await loadAppWindow();
   } catch (error) {
@@ -383,27 +754,33 @@ async function bootstrap() {
   }
 }
 
-app.whenReady().then(bootstrap);
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    showMainWindow();
+  });
+  app.whenReady().then(bootstrap);
+}
 
 ipcMain.handle('desktop-api-config:get', () => loadDesktopApiConfig());
 ipcMain.handle('desktop-api-config:save', (_event, config) => saveDesktopApiConfig(config));
+ipcMain.handle('desktop-setup:get', () => loadDesktopSetup());
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    void (async () => {
-      await createMainWindow();
-      await loadAppWindow();
-    })();
+  if (mainWindow) {
+    showMainWindow();
+    return;
   }
+  void bootstrap();
 });
 
 app.on('before-quit', () => {
   quitting = true;
-  stopBackend();
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  // Keep the process resident in the tray so the backend remains warm.
 });

@@ -78,6 +78,14 @@ const DEFAULT_DESKTOP_API_CONFIG: DesktopApiConfig = {
   openaiModel: 'gpt-4o-mini',
 };
 
+const DEFAULT_DESKTOP_SETUP: DesktopSetupInfo = {
+  workspaceDir: '',
+  launcherInstallDir: '',
+  launcherCommandPath: '',
+  launcherSourcePath: '',
+  initializedAt: '',
+};
+
 function isNavigationEdge(edge: GraphEdge): boolean {
   return edge.edge_type !== 'NEXT' && edge.edge_type !== 'PREVIOUS';
 }
@@ -181,6 +189,7 @@ function App() {
   const [desktopSettingsDraft, setDesktopSettingsDraft] = useState<DesktopApiConfig>(
     DEFAULT_DESKTOP_API_CONFIG,
   );
+  const [desktopSetup, setDesktopSetup] = useState<DesktopSetupInfo>(DEFAULT_DESKTOP_SETUP);
 
   const desktopBridge = window.pagDesktop;
   const isDesktopApp = Boolean(desktopBridge?.isDesktopApp);
@@ -271,6 +280,16 @@ function App() {
       .then((config) => {
         setDesktopSettings(config);
         setDesktopSettingsDraft(config);
+      })
+      .catch(() => undefined);
+  }, [desktopBridge]);
+
+  useEffect(() => {
+    if (!desktopBridge?.getSetupInfo) return;
+    desktopBridge
+      .getSetupInfo()
+      .then((setup) => {
+        setDesktopSetup(setup);
       })
       .catch(() => undefined);
   }, [desktopBridge]);
@@ -1077,6 +1096,25 @@ function App() {
               These values are stored locally for the desktop app and used for future uploads.
             </p>
             <div className="settings-form">
+              <section className="desktop-setup-panel">
+                <div className="desktop-setup-panel-header">
+                  <div>
+                    <span className="eyebrow">Workspace</span>
+                    <strong>{desktopSetup.workspaceDir || 'Not initialized yet'}</strong>
+                  </div>
+                  <span className="type-pill">{desktopBridge?.isPackaged ? 'Packaged App' : 'Dev Mode'}</span>
+                </div>
+                <div className="desktop-setup-grid">
+                  <div>
+                    <span>Launcher command</span>
+                    <strong>{desktopSetup.launcherCommandPath || 'Not installed'}</strong>
+                  </div>
+                  <div>
+                    <span>Launcher source</span>
+                    <strong>{desktopSetup.launcherSourcePath || 'Bundled with the app'}</strong>
+                  </div>
+                </div>
+              </section>
               <label>
                 API Key
                 <div className="secret-input">

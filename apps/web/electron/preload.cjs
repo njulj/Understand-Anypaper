@@ -7,4 +7,5 @@ contextBridge.exposeInMainWorld('pagDesktop', {
   isDesktopApp: true,
   getApiConfig: () => ipcRenderer.invoke('desktop-api-config:get'),
   saveApiConfig: (config) => ipcRenderer.invoke('desktop-api-config:save', config),
+  getSetupInfo: () => ipcRenderer.invoke('desktop-setup:get'),
 });
