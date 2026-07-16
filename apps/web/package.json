@@ -11,7 +11,8 @@
     "electron:pack": "electron-builder --dir",
     "electron:dist": "electron-builder",
     "desktop:dist:mac": "bash ../../scripts/package-desktop-macos.sh",
-    "desktop:dist:win": "powershell -ExecutionPolicy Bypass -File ../../scripts/package-desktop-windows.ps1"
+    "desktop:dist:win": "powershell -ExecutionPolicy Bypass -File ../../scripts/package-desktop-windows.ps1",
+    "desktop:dist:linux": "bash ../../scripts/package-desktop-linux.sh"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
@@ -70,6 +71,12 @@
       "target": [
         "nsis",
         "zip"
+      ]
+    },
+    "linux": {
+      "category": "Education",
+      "target": [
+        "AppImage"
       ]
     }
   }

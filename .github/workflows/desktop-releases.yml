@@ -25,32 +25,39 @@ jobs:
             os: windows-latest
             artifact_name: desktop-windows
             build_command: npm --prefix apps/web run desktop:dist:win
+          - name: linux
+            os: ubuntu-latest
+            artifact_name: desktop-linux
+            build_command: npm --prefix apps/web run desktop:dist:linux
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: apps/cli/go.mod
+          cache-dependency-path: apps/cli/go.mod
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: true
+          cache-dependency-glob: apps/server/uv.lock
+          cache-local-path: .tmp/uv-cache
 
       - name: Install web dependencies
         run: npm --prefix apps/web ci
@@ -61,12 +68,13 @@ jobs:
           PAG_MAC_DMG: ${{ matrix.target.name == 'macos' && '1' || '0' }}
 
       - name: Upload packaged artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.target.artifact_name }}
           compression-level: 0
           path: |
             release/*.dmg
+            release/*.AppImage
             release/*.zip
             release/*.exe
             release/*.blockmap
@@ -81,16 +89,17 @@ jobs:
 
     steps:
       - name: Download packaged artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: release-artifacts
           merge-multiple: true
 
       - name: Publish release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: |
             release-artifacts/*.dmg
+            release-artifacts/*.AppImage
             release-artifacts/*.zip
             release-artifacts/*.exe
             release-artifacts/*.blockmap
