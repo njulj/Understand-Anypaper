@@ -78,8 +78,6 @@ jobs:
             release/*.zip
             release/*.exe
             release/*.blockmap
-            release/latest*.yml
-            release/latest*.yaml
 
   publish:
     name: Publish GitHub Release
@@ -103,6 +101,4 @@ jobs:
             release-artifacts/*.zip
             release-artifacts/*.exe
             release-artifacts/*.blockmap
-            release-artifacts/latest*.yml
-            release-artifacts/latest*.yaml
           fail_on_unmatched_files: true
