@@ -677,6 +677,7 @@ async function stopLocalService(showErrors) {
 
 async function createMainWindow() {
   process.env.PAG_ELECTRON_IS_PACKAGED = app.isPackaged ? '1' : '0';
+  const isMac = process.platform === 'darwin';
 
   mainWindow = new BrowserWindow({
     width: 1600,
@@ -684,8 +685,26 @@ async function createMainWindow() {
     minWidth: 1200,
     minHeight: 760,
     autoHideMenuBar: true,
+    // Keep the native controls while moving content into the former title-bar
+    // area. Windows/Linux receive Electron's window-controls overlay instead.
+    titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
+    ...(isMac
+      ? {
+          // `under-window` uses macOS's native window material behind the
+          // transparent renderer, so the Source sidebar picks up wallpaper
+          // color instead of a fixed app-tinted surface.
+          vibrancy: 'under-window',
+          visualEffectState: 'active',
+          // Keep the renderer's transparent areas backed by the native visual
+          // effect view instead of an opaque application-colored surface.
+          transparent: true,
+          // The macOS green button should zoom/maximize this workspace rather
+          // than start an asynchronous fullscreen transition.
+          fullscreenable: false,
+        }
+      : { titleBarOverlay: true }),
     show: false,
-    backgroundColor: LOADING_BACKGROUND,
+    backgroundColor: isMac ? '#00000000' : LOADING_BACKGROUND,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -732,7 +751,9 @@ async function loadAppWindow() {
   }
 
   await mainWindow.loadURL(DEV_RENDERER_URL);
-  mainWindow.webContents.openDevTools({ mode: 'detach' });
+  if (process.env.PAG_ELECTRON_OPEN_DEVTOOLS === '1') {
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
+  }
 }
 
 async function bootstrap() {

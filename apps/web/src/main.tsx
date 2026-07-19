@@ -86,6 +86,46 @@ const DEFAULT_DESKTOP_SETUP: DesktopSetupInfo = {
   initializedAt: '',
 };
 
+const PANE_WIDTHS_STORAGE_KEY = 'pag.workspace-pane-widths.v1';
+const MIN_SOURCE_PANE_WIDTH = 260;
+const MIN_GRAPH_PANE_WIDTH = 360;
+const MIN_INSPECTOR_PANE_WIDTH = 280;
+const SPLITTER_WIDTH = 10;
+
+type PaneWidths = {
+  source: number;
+  inspector: number;
+};
+
+function initialPaneWidths(): PaneWidths {
+  try {
+    const stored = window.localStorage.getItem(PANE_WIDTHS_STORAGE_KEY);
+    if (!stored) return { source: 320, inspector: 340 };
+    const parsed = JSON.parse(stored) as Partial<PaneWidths>;
+    if (
+      typeof parsed.source === 'number' &&
+      typeof parsed.inspector === 'number' &&
+      Number.isFinite(parsed.source) &&
+      Number.isFinite(parsed.inspector)
+    ) {
+      return {
+        source: Math.max(MIN_SOURCE_PANE_WIDTH, parsed.source),
+        inspector: Math.max(MIN_INSPECTOR_PANE_WIDTH, parsed.inspector),
+      };
+    }
+  } catch {
+    // A malformed preference should never prevent the workspace from opening.
+  }
+  return { source: 320, inspector: 340 };
+}
+
+function availableSidePaneSpace(workspace: HTMLElement): number {
+  const styles = window.getComputedStyle(workspace);
+  const horizontalPadding =
+    (Number.parseFloat(styles.paddingLeft) || 0) + (Number.parseFloat(styles.paddingRight) || 0);
+  return workspace.clientWidth - horizontalPadding - SPLITTER_WIDTH * 2 - MIN_GRAPH_PANE_WIDTH;
+}
+
 function isNavigationEdge(edge: GraphEdge): boolean {
   return edge.edge_type !== 'NEXT' && edge.edge_type !== 'PREVIOUS';
 }
@@ -159,6 +199,7 @@ function sourcePageLabel(location: PageSourceLocation): string {
 function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const blockRefs = useRef(new Map<string, HTMLElement>());
+  const layoutRef = useRef<HTMLElement | null>(null);
   const [papers, setPapers] = useState<PaperSummary[]>([]);
   const [graph, setGraph] = useState<PaperArgumentGraph | null>(null);
   const [semanticUnits, setSemanticUnits] = useState<SemanticUnit[]>([]);
@@ -190,9 +231,48 @@ function App() {
     DEFAULT_DESKTOP_API_CONFIG,
   );
   const [desktopSetup, setDesktopSetup] = useState<DesktopSetupInfo>(DEFAULT_DESKTOP_SETUP);
+  const [paneWidths, setPaneWidths] = useState<PaneWidths>(initialPaneWidths);
 
   const desktopBridge = window.pagDesktop;
   const isDesktopApp = Boolean(desktopBridge?.isDesktopApp);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('desktop-app', isDesktopApp);
+    return () => document.documentElement.classList.remove('desktop-app');
+  }, [isDesktopApp]);
+
+  useEffect(() => {
+    window.localStorage.setItem(PANE_WIDTHS_STORAGE_KEY, JSON.stringify(paneWidths));
+  }, [paneWidths]);
+
+  useEffect(() => {
+    const fitPaneWidths = () => {
+      const layout = layoutRef.current;
+      if (!layout || window.matchMedia('(max-width: 980px)').matches) return;
+      const availableForSidePanes = availableSidePaneSpace(layout);
+      setPaneWidths((current) => {
+        if (current.source + current.inspector <= availableForSidePanes) return current;
+        const extraSpace = Math.max(
+          0,
+          availableForSidePanes - MIN_SOURCE_PANE_WIDTH - MIN_INSPECTOR_PANE_WIDTH,
+        );
+        const currentExtra = Math.max(
+          1,
+          current.source + current.inspector - MIN_SOURCE_PANE_WIDTH - MIN_INSPECTOR_PANE_WIDTH,
+        );
+        return {
+          source: MIN_SOURCE_PANE_WIDTH + (extraSpace * (current.source - MIN_SOURCE_PANE_WIDTH)) / currentExtra,
+          inspector:
+            MIN_INSPECTOR_PANE_WIDTH +
+            (extraSpace * (current.inspector - MIN_INSPECTOR_PANE_WIDTH)) / currentExtra,
+        };
+      });
+    };
+
+    fitPaneWidths();
+    window.addEventListener('resize', fitPaneWidths);
+    return () => window.removeEventListener('resize', fitPaneWidths);
+  }, []);
 
   const selectedNode = graph?.nodes.find((node) => node.id === selectedNodeId) ?? null;
   const focusedContribution = graph?.nodes.find((node) => node.id === focusedContributionId) ?? null;
@@ -605,90 +685,68 @@ function App() {
     return graph?.nodes.find((node) => node.id === nodeId)?.title ?? nodeId;
   }
 
+  function startPaneResize(
+    event: React.PointerEvent<HTMLDivElement>,
+    pane: keyof PaneWidths,
+  ) {
+    if (window.matchMedia('(max-width: 980px)').matches) return;
+    const layout = layoutRef.current;
+    if (!layout) return;
+
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidths = paneWidths;
+    const otherPane = pane === 'source' ? 'inspector' : 'source';
+    const minimum = pane === 'source' ? MIN_SOURCE_PANE_WIDTH : MIN_INSPECTOR_PANE_WIDTH;
+    const availableForSidePanes = availableSidePaneSpace(layout);
+    const maximum = Math.max(minimum, availableForSidePanes - startWidths[otherPane]);
+
+    const finishResize = () => {
+      document.body.classList.remove('pane-resizing');
+      window.removeEventListener('pointermove', resizePane);
+      window.removeEventListener('pointerup', finishResize);
+      window.removeEventListener('pointercancel', finishResize);
+    };
+    const resizePane = (moveEvent: PointerEvent) => {
+      const movement = moveEvent.clientX - startX;
+      // The right divider moves in the opposite direction to its panel width.
+      const nextWidth = pane === 'source' ? startWidths[pane] + movement : startWidths[pane] - movement;
+      setPaneWidths((current) => ({
+        ...current,
+        [pane]: Math.min(maximum, Math.max(minimum, nextWidth)),
+      }));
+    };
+
+    document.body.classList.add('pane-resizing');
+    window.addEventListener('pointermove', resizePane);
+    window.addEventListener('pointerup', finishResize);
+    window.addEventListener('pointercancel', finishResize);
+  }
+
   const legendTypes = useMemo(() => {
     if (!viewGraph) return [];
     return [...new Set(viewGraph.nodes.map((node) => node.node_type))];
   }, [viewGraph]);
 
-  return (
-    <main className="shell">
-      <header className="toolbar">
-        <div className="brand"><GitBranch size={22} /> Understand Anypaper</div>
-        <div className="toolbar-actions">
-          {papers.length ? (
-            <select
-              className="paper-select"
-              value={graph?.paper_id ?? ''}
-              onChange={(event) => {
-                const paper = papers.find((item) => item.paper_id === event.target.value);
-                loadPaper(
-                  event.target.value,
-                  paper ? `Loaded “${paper.title}”.` : undefined,
-                ).catch((error) => {
-                  setStatus('error');
-                  setMessage(error instanceof Error ? error.message : 'Failed to load paper.');
-                });
-              }}
-              aria-label="Switch paper"
-            >
-              {papers.map((paper) => (
-                <option key={paper.paper_id} value={paper.paper_id}>{paper.title}</option>
-              ))}
-            </select>
-          ) : null}
-          <button
-            className="icon-action toolbar-icon-action"
-            type="button"
-            title="Add paper"
-            aria-label="Add paper"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={status === 'uploading'}
-          >
-            {status === 'uploading' ? <Loader2 className="spin" size={16} /> : <UploadCloud size={16} />}
-          </button>
-          <button
-            className="icon-action toolbar-icon-action danger-icon-action"
-            type="button"
-            title="Delete current paper"
-            aria-label="Delete current paper"
-            onClick={deleteCurrentPaper}
-            disabled={!graph || saving}
-          >
-            <Trash2 size={16} />
-          </button>
-          {isDesktopApp ? (
-            <button
-              className="icon-action toolbar-icon-action"
-              type="button"
-              title="API settings"
-              aria-label="API settings"
-              onClick={openDesktopSettings}
-              disabled={status === 'uploading' || saving}
-            >
-              <Settings2 size={16} />
-            </button>
-          ) : null}
-          <label className="search-box" aria-label="Search graph nodes">
-            <Search size={16} />
-            <input
-              type="search"
-              placeholder="Search graph"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              disabled={!graph}
-            />
-          </label>
-          <input
-            ref={fileInputRef}
-            className="sr-only"
-            type="file"
-            accept=".pdf,.txt,.md,text/plain,text/markdown,application/pdf"
-            onChange={handleUpload}
-          />
-        </div>
-      </header>
+  const shellClassName = [
+    'shell',
+    isDesktopApp ? 'desktop-shell' : '',
+    isDesktopApp ? `desktop-platform-${desktopBridge?.platform ?? 'unknown'}` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const workspaceStyle = {
+    '--source-pane-width': `${paneWidths.source}px`,
+    '--inspector-pane-width': `${paneWidths.inspector}px`,
+  } as React.CSSProperties;
 
-      <section className="workspace">
+  return (
+    <main className={shellClassName}>
+      <section
+        ref={layoutRef}
+        className={isDesktopApp ? 'desktop-layout' : 'web-layout'}
+        style={workspaceStyle}
+      >
         <aside className="pdf-pane">
           <div className="pane-heading source-heading">
             <div>
@@ -817,6 +875,100 @@ function App() {
           )}
         </aside>
 
+        <div
+          className="pane-splitter"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize source panel"
+          aria-valuemin={MIN_SOURCE_PANE_WIDTH}
+          aria-valuenow={Math.round(paneWidths.source)}
+          onPointerDown={(event) => startPaneResize(event, 'source')}
+        />
+
+        <section className="main-column">
+          <header className="toolbar">
+            <div className="brand"><GitBranch size={22} /> Understand Anypaper</div>
+            {isDesktopApp ? (
+              <div className="desktop-titlebar-title" title={paperTitle || 'Understand Anypaper'}>
+                <GitBranch size={19} />
+                <span>{paperTitle || 'Understand Anypaper'}</span>
+              </div>
+            ) : null}
+            <div className="toolbar-actions">
+              {papers.length ? (
+                <select
+                  className="paper-select"
+                  value={graph?.paper_id ?? ''}
+                  onChange={(event) => {
+                    const paper = papers.find((item) => item.paper_id === event.target.value);
+                    loadPaper(
+                      event.target.value,
+                      paper ? `Loaded “${paper.title}”.` : undefined,
+                    ).catch((error) => {
+                      setStatus('error');
+                      setMessage(error instanceof Error ? error.message : 'Failed to load paper.');
+                    });
+                  }}
+                  aria-label="Switch paper"
+                >
+                  {papers.map((paper) => (
+                    <option key={paper.paper_id} value={paper.paper_id}>{paper.title}</option>
+                  ))}
+                </select>
+              ) : null}
+              <button
+                className="icon-action toolbar-icon-action"
+                type="button"
+                title="Add paper"
+                aria-label="Add paper"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={status === 'uploading'}
+              >
+                {status === 'uploading' ? <Loader2 className="spin" size={16} /> : <UploadCloud size={16} />}
+              </button>
+              <button
+                className="icon-action toolbar-icon-action danger-icon-action"
+                type="button"
+                title="Delete current paper"
+                aria-label="Delete current paper"
+                onClick={deleteCurrentPaper}
+                disabled={!graph || saving}
+              >
+                <Trash2 size={16} />
+              </button>
+              {isDesktopApp ? (
+                <button
+                  className="icon-action toolbar-icon-action"
+                  type="button"
+                  title="API settings"
+                  aria-label="API settings"
+                  onClick={openDesktopSettings}
+                  disabled={status === 'uploading' || saving}
+                >
+                  <Settings2 size={16} />
+                </button>
+              ) : null}
+              <label className="search-box" aria-label="Search graph nodes">
+                <Search size={16} />
+                <input
+                  type="search"
+                  placeholder="Search graph"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  disabled={!graph}
+                />
+              </label>
+              <input
+                ref={fileInputRef}
+                className="sr-only"
+                type="file"
+                accept=".pdf,.txt,.md,text/plain,text/markdown,application/pdf"
+                onChange={handleUpload}
+              />
+            </div>
+          </header>
+
+          <section className="workspace">
         <section className="graph-pane" aria-label="Paper argument graph">
           {graph && viewGraph ? (
             <>
@@ -872,6 +1024,16 @@ function App() {
             </div>
           )}
         </section>
+
+        <div
+          className="pane-splitter"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize inspector panel"
+          aria-valuemin={MIN_INSPECTOR_PANE_WIDTH}
+          aria-valuenow={Math.round(paneWidths.inspector)}
+          onPointerDown={(event) => startPaneResize(event, 'inspector')}
+        />
 
         <aside className="inspector">
           <div className="pane-heading">
@@ -1068,6 +1230,8 @@ function App() {
             <p className="muted">Select a graph node to inspect its evidence and relations.</p>
           )}
         </aside>
+      </section>
+      </section>
       </section>
       {desktopSettingsOpen ? (
         <div className="modal-backdrop" role="presentation" onClick={closeDesktopSettings}>
