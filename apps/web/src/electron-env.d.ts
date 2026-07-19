@@ -5,6 +5,7 @@ declare global {
     openaiApiKey: string;
     openaiBaseUrl: string;
     openaiModel: string;
+    sendPromptCacheKey: boolean;
   }
 
   interface DesktopSetupInfo {

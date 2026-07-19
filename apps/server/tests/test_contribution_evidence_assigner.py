@@ -87,6 +87,30 @@ def test_assigner_selects_evidence_per_contribution():
     assert "TARGET_CONTRIBUTION" in client.prompts[0]
 
 
+def test_assigner_omits_cache_key_when_disabled():
+    parsed = ParsedPaper(
+        paper_id="paper-12345678",
+        title="TinyLUT",
+        abstract="A compact lookup-table method.",
+    )
+    units = [
+        _unit("unit-contribution", "contribution", "TinyLUT contribution", 1),
+        _unit("unit-method", "method", "Separable mapping", 2),
+    ]
+    client = FakeChatClient(
+        [ContributionEvidenceSelectionOutput.model_validate({"evidence": []})]
+    )
+
+    asyncio.run(
+        ContributionEvidenceAssigner(
+            config=Settings(send_prompt_cache_key=False),
+            chat_client=client,
+        ).assign(parsed, units)
+    )
+
+    assert client.cache_keys == [None]
+
+
 def test_assigner_warms_cache_then_runs_remaining_in_parallel_with_limit():
     parsed = ParsedPaper(
         paper_id="paper-12345678",

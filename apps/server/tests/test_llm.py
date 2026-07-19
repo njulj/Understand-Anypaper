@@ -76,7 +76,7 @@ def test_create_chat_client_uses_chat_completions_api():
     assert client.default_headers is None
 
 
-def test_openrouter_structured_options_stay_stateless():
+def test_openrouter_structured_options_include_cache_key_when_enabled():
     options = structured_output_options(
         DemoOutput,
         prompt_cache_key="semantic-slice:test",
@@ -84,5 +84,16 @@ def test_openrouter_structured_options_stay_stateless():
     )
 
     assert options["extra_body"] == {"provider": {"require_parameters": True}}
-    assert "prompt_cache_key" not in options
+    assert options["prompt_cache_key"] == "semantic-slice:test"
     assert "store" not in options
+
+
+def test_structured_options_omit_cache_key_when_disabled():
+    options = structured_output_options(
+        DemoOutput,
+        prompt_cache_key="semantic-slice:test",
+        send_prompt_cache_key=False,
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    )
+
+    assert "prompt_cache_key" not in options

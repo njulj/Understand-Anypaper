@@ -412,6 +412,7 @@ class SemanticUnitSlicer:
             SemanticSliceOutput,
             base_url=self._config.openai_base_url,
             prompt_cache_key=session_id,
+            send_prompt_cache_key=self._config.send_prompt_cache_key,
         )
 
     @staticmethod

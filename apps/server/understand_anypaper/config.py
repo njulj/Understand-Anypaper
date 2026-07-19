@@ -25,6 +25,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("PAG_OPENAI_BASE_URL", "OPENAI_BASE_URL"),
     )
     openai_model: str = "gpt-4o-mini"
+    send_prompt_cache_key: bool = True
     llm_request_timeout_seconds: float = 180
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
@@ -56,6 +57,12 @@ def apply_desktop_api_overrides(target: Settings = settings) -> Settings:
         target.openai_base_url = str(payload["openaiBaseUrl"] or "https://api.openai.com/v1")
     if "openaiModel" in payload:
         target.openai_model = str(payload["openaiModel"] or "gpt-4o-mini")
+    if "sendPromptCacheKey" in payload:
+        value = payload["sendPromptCacheKey"]
+        if isinstance(value, bool):
+            target.send_prompt_cache_key = value
+        elif isinstance(value, str):
+            target.send_prompt_cache_key = value.strip().casefold() not in {"0", "false", "no", "off"}
 
     return target
 
