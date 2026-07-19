@@ -178,6 +178,7 @@ class ContributionEvidenceAssigner:
             ContributionEvidenceSelectionOutput,
             base_url=self._config.openai_base_url,
             prompt_cache_key=f"evidence-assignment:{contribution.paper_id}",
+            send_prompt_cache_key=self._config.send_prompt_cache_key,
         )
 
     def _base_context(self, parsed: ParsedPaper, evidence_units: list[SemanticUnit]) -> str:

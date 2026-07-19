@@ -90,7 +90,9 @@ instead of shutting down the warmed backend.
 When running the packaged desktop app, OpenAI-compatible API settings can be
 managed from the in-app toolbar instead of relying on shell environment
 variables. The desktop shell stores those values locally and the backend picks
-them up for subsequent uploads.
+them up for subsequent uploads. The settings panel also controls whether LLM
+requests include `prompt_cache_key`; disable it for compatible endpoints that
+reject that provider-specific parameter.
 
 On the first packaged launch, Electron now performs a lightweight desktop
 onboarding flow before loading the web UI:

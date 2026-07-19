@@ -76,6 +76,7 @@ const DEFAULT_DESKTOP_API_CONFIG: DesktopApiConfig = {
   openaiApiKey: '',
   openaiBaseUrl: 'https://api.openai.com/v1',
   openaiModel: 'gpt-4o-mini',
+  sendPromptCacheKey: true,
 };
 
 const DEFAULT_DESKTOP_SETUP: DesktopSetupInfo = {
@@ -656,18 +657,16 @@ function App() {
           >
             <Trash2 size={16} />
           </button>
-          {isDesktopApp ? (
-            <button
-              className="icon-action toolbar-icon-action"
-              type="button"
-              title="API settings"
-              aria-label="API settings"
-              onClick={openDesktopSettings}
-              disabled={status === 'uploading' || saving}
-            >
-              <Settings2 size={16} />
-            </button>
-          ) : null}
+          <button
+            className="icon-action toolbar-icon-action"
+            type="button"
+            title="API settings"
+            aria-label="API settings"
+            onClick={openDesktopSettings}
+            disabled={status === 'uploading' || saving}
+          >
+            <Settings2 size={16} />
+          </button>
           <label className="search-box" aria-label="Search graph nodes">
             <Search size={16} />
             <input
@@ -1172,6 +1171,28 @@ function App() {
                   autoComplete="off"
                   spellCheck={false}
                 />
+              </label>
+              <label className="settings-toggle-row">
+                <span className="settings-toggle-copy">
+                  <strong>Send prompt cache key</strong>
+                  <small>
+                    Enable for providers such as OpenRouter. Disable it for endpoints that reject
+                    the prompt_cache_key parameter.
+                  </small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={desktopSettingsDraft.sendPromptCacheKey}
+                  onChange={(event) =>
+                    setDesktopSettingsDraft((current) => ({
+                      ...current,
+                      sendPromptCacheKey: event.target.checked,
+                    }))
+                  }
+                />
+                <span className="settings-toggle-control" aria-hidden="true">
+                  <span />
+                </span>
               </label>
             </div>
             <div className="settings-modal-footer">

@@ -27,12 +27,12 @@ def structured_output_options(
     *,
     base_url: str = settings.openai_base_url,
     prompt_cache_key: str | None = None,
+    send_prompt_cache_key: bool = True,
 ) -> dict:
     options: dict = {"response_format": output_model}
     if _is_openrouter(base_url):
         options["extra_body"] = {"provider": {"require_parameters": True}}
-        return options
-    if prompt_cache_key:
+    if send_prompt_cache_key and prompt_cache_key:
         options["prompt_cache_key"] = prompt_cache_key
     return options
 
@@ -70,6 +70,7 @@ async def run_structured(
     *,
     base_url: str = settings.openai_base_url,
     prompt_cache_key: str | None = None,
+    send_prompt_cache_key: bool = True,
 ) -> OutputT:
     """Run an agent and return its typed structured output."""
     try:
@@ -79,6 +80,7 @@ async def run_structured(
                 output_model,
                 base_url=base_url,
                 prompt_cache_key=prompt_cache_key,
+                send_prompt_cache_key=send_prompt_cache_key,
             ),
         )
     except Exception as exc:

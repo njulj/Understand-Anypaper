@@ -29,7 +29,7 @@ def test_configure_runtime_environment_preserves_explicit_settings(tmp_path, mon
 def test_apply_desktop_api_overrides_reads_saved_desktop_config(tmp_path):
     settings_path = tmp_path / "desktop-api-config.json"
     settings_path.write_text(
-        '{"openaiApiKey":"desktop-key","openaiBaseUrl":"https://openrouter.ai/api/v1","openaiModel":"google/gemini-3-flash-preview"}',
+        '{"openaiApiKey":"desktop-key","openaiBaseUrl":"https://openrouter.ai/api/v1","openaiModel":"google/gemini-3-flash-preview","sendPromptCacheKey":false}',
         encoding="utf-8",
     )
 
@@ -45,3 +45,4 @@ def test_apply_desktop_api_overrides_reads_saved_desktop_config(tmp_path):
     assert config.openai_api_key == "desktop-key"
     assert config.openai_base_url == "https://openrouter.ai/api/v1"
     assert config.openai_model == "google/gemini-3-flash-preview"
+    assert config.send_prompt_cache_key is False

@@ -12,3 +12,4 @@ data/
 apps/web/backend/
 apps/web/launcher/
 .tmp/
+.direnv/

@@ -29,6 +29,7 @@ function defaultDesktopApiConfig() {
     openaiBaseUrl:
       process.env.OPENAI_BASE_URL || process.env.PAG_OPENAI_BASE_URL || DEFAULT_OPENAI_BASE_URL,
     openaiModel: process.env.PAG_OPENAI_MODEL || DEFAULT_OPENAI_MODEL,
+    sendPromptCacheKey: process.env.PAG_SEND_PROMPT_CACHE_KEY !== 'false',
   };
 }
 
@@ -47,6 +48,7 @@ function normalizeDesktopApiConfig(input = {}) {
     openaiApiKey: String(input.openaiApiKey || '').trim(),
     openaiBaseUrl: String(input.openaiBaseUrl || '').trim() || DEFAULT_OPENAI_BASE_URL,
     openaiModel: String(input.openaiModel || '').trim() || DEFAULT_OPENAI_MODEL,
+    sendPromptCacheKey: input.sendPromptCacheKey !== false,
   };
 }
 

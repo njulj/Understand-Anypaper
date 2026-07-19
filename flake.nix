@@ -26,5 +26,18 @@
           ]);
           default = postgresql-pgvector;
         });
+
+      devShells = forAllSystems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          default = pkgs.mkShell {
+            packages = with pkgs; [
+              nodejs
+              go
+            ];
+          };
+        });
     };
 }
