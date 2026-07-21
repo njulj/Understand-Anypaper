@@ -1,6 +1,8 @@
 import asyncio
+import html
 import logging
 import re
+from collections import Counter
 from enum import StrEnum
 from typing import Annotated, Literal, Self
 from uuid import uuid4
@@ -128,6 +130,20 @@ class SemanticUnitOutput(BaseModel):
     role: SemanticRole
     title: str = Field(description="Short graph-node title for this semantic unit.")
     text: str = Field(description="Concise faithful restatement of this unit.")
+    citation_markers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Exact in-text citation markers appearing inside this semantic unit, such as "
+            "['[3]', '[7]'] or ['Smith et al. (2020)']. Empty when it has no citations."
+        ),
+    )
+    citation_text: str = Field(
+        default="",
+        description=(
+            "Exact source sentence or short passage containing the citation markers. "
+            "Empty when citation_markers is empty."
+        ),
+    )
     source_location: SemanticUnitSourceLocationOutput = Field(
         description="The page location where this semantic unit appears. You can describe location by either text matching or bounding box, but not both. For text content, use text matching. Set kind=text and fill start_text and end_text. For formulas, figures and tables, use bounding box. Set kind=bbox and fill x, y, width, height.",
     )
@@ -198,6 +214,20 @@ should be made into a semantic unit, even if the same concept was already descri
 A description of a method is an SU. A formula that describes an algorithm is an SU.
 A paragraph that explains a formula is an SU. A figure/table/caption that explains,
 compares, or proves something is an SU.
+
+## Citation grounding
+
+Preserve citations on the semantic unit that actually cites them. For every unit whose
+source span contains one or more in-text citations:
+- copy each marker exactly into citation_markers (split grouped numeric citations such
+  as "[2, 5]" into ["[2]", "[5]"]);
+- copy the exact citation-bearing source sentence or shortest self-contained passage
+  into citation_text, including the marker;
+- keep the unit's semantic role (method_component, prior_work, baseline, etc.); do not
+  replace it with a bibliography-entry unit.
+
+Use citation_markers=[] and citation_text="" when the source span contains no citation.
+The reference role is reserved for a bibliography entry, not an in-text citation.
 
 For a full conference paper, sparse output such as 10-20 units is usually wrong. As a
 calibration target:
@@ -493,6 +523,18 @@ class SemanticUnitSlicer:
                         source_location=source_location,
                         confidence=max(0.0, min(item.confidence, 1.0)),
                         created_by="semantic-unit-slicer-agent",
+                        properties=(
+                            {
+                                "citation_markers": [
+                                    marker.strip()
+                                    for marker in item.citation_markers
+                                    if marker.strip()
+                                ],
+                                "citation_text": item.citation_text.strip(),
+                            }
+                            if item.citation_markers
+                            else {}
+                        ),
                     )
                 )
         finally:
@@ -505,6 +547,20 @@ class SemanticUnitSlicer:
             )
         if rejected_units:
             logger.warning("Dropped %s semantic units with unusable source locations", rejected_units)
+        extraction_methods = Counter(unit.source_location.extraction_method for unit in units)
+        full_page_locations = sum(
+            unit.source_location.bbox == [0.0, 0.0, 1.0, 1.0]
+            for unit in units
+        )
+        logger.info(
+            "Semantic source-location summary paper_id=%s total=%s rejected=%s "
+            "full_page=%s methods=%s",
+            parsed.paper_id,
+            len(units),
+            rejected_units,
+            full_page_locations,
+            dict(sorted(extraction_methods.items())),
+        )
         return units
 
     @staticmethod
@@ -531,11 +587,29 @@ class SemanticUnitSlicer:
     ) -> PageSourceLocation | None:
         valid_pages = {page.page: page for page in parsed.pages}
         if item.page not in valid_pages:
+            logger.warning(
+                "Rejected semantic source locator paper_id=%s page=%s kind=%s "
+                "reason=page_not_rendered valid_pages=%s",
+                parsed.paper_id,
+                item.page,
+                item.locator.kind,
+                sorted(valid_pages),
+            )
             return None
         if item.locator.kind == SourceLocatorKind.TEXT:
             return self._source_location_from_text_anchors(parsed, item, doc)
         bbox = self._bbox_locator_to_normalized(item.locator)
         if bbox is None:
+            logger.warning(
+                "Rejected semantic source locator paper_id=%s page=%s kind=bbox "
+                "reason=invalid_or_empty_bbox raw_bbox=(x=%s,y=%s,width=%s,height=%s)",
+                parsed.paper_id,
+                item.page,
+                item.locator.x,
+                item.locator.y,
+                item.locator.width,
+                item.locator.height,
+            )
             return None
         extracted_text = self._extract_text(parsed, item.page, bbox, doc)
         return PageSourceLocation(
@@ -556,6 +630,13 @@ class SemanticUnitSlicer:
         start_text = self._normalize_anchor(item.locator.start_text)
         end_text = self._normalize_anchor(item.locator.end_text)
         if not start_text:
+            logger.warning(
+                "Rejected semantic source locator paper_id=%s page=%s kind=text "
+                "reason=empty_start_anchor end_text=%r",
+                parsed.paper_id,
+                item.page,
+                self._log_text_preview(end_text),
+            )
             return None
         if doc is None:
             plain_text = parsed.metadata.get("plain_text")
@@ -581,7 +662,24 @@ class SemanticUnitSlicer:
             normalized_word_stream,
         )
         if not start_spans:
-            return self._fallback_text_anchor_location(parsed, item, doc, start_text, end_text)
+            adjacent_location = self._source_location_from_adjacent_page_start(
+                parsed,
+                item,
+                doc,
+                start_text,
+                end_text,
+            )
+            if adjacent_location is not None:
+                return adjacent_location
+            return self._fallback_text_anchor_location(
+                parsed,
+                item,
+                doc,
+                start_text,
+                end_text,
+                reason="start_anchor_not_found_on_reported_or_adjacent_pages",
+                page_word_count=len(words),
+            )
         end_spans = (
             self._word_spans_for_anchor(
                 page,
@@ -595,6 +693,11 @@ class SemanticUnitSlicer:
         )
 
         selection = self._word_range_for_anchor_spans(words, start_spans, end_spans)
+        fallback_reason = (
+            "end_anchor_not_found_after_start"
+            if end_text and not end_spans
+            else "anchor_range_not_found"
+        )
         if selection is not None:
             segment = self._page_source_segment_for_word_range(
                 item.page,
@@ -608,6 +711,7 @@ class SemanticUnitSlicer:
             )
             if segment is not None:
                 return self._location_from_segments([segment], start_text=start_text, end_text=end_text)
+            fallback_reason = "matched_anchor_range_failed_validation"
 
         cross_page = self._cross_page_source_location_from_text_anchors(
             item,
@@ -619,7 +723,52 @@ class SemanticUnitSlicer:
         )
         if cross_page is not None:
             return cross_page
-        return self._fallback_text_anchor_location(parsed, item, doc, start_text, end_text)
+        if end_text and not end_spans:
+            fallback_reason = "end_anchor_not_found_on_start_or_following_pages"
+        return self._fallback_text_anchor_location(
+            parsed,
+            item,
+            doc,
+            start_text,
+            end_text,
+            reason=fallback_reason,
+            page_word_count=len(words),
+        )
+
+    def _source_location_from_adjacent_page_start(
+        self,
+        parsed: ParsedPaper,
+        item: SemanticUnitSourceLocationOutput,
+        doc: fitz.Document,
+        start_text: str,
+        end_text: str,
+    ) -> PageSourceLocation | None:
+        for page_number in (item.page - 1, item.page + 1):
+            if page_number < 1 or page_number > doc.page_count:
+                continue
+            page = doc.load_page(page_number - 1)
+            words = self._ordered_page_words(page)
+            start_spans = self._word_spans_for_anchor(
+                page,
+                words,
+                start_text,
+                "start",
+                self._normalized_word_stream(words),
+            )
+            if not start_spans:
+                continue
+            logger.info(
+                "Corrected semantic text-anchor page paper_id=%s reported_page=%s "
+                "resolved_start_page=%s start_text=%r end_text=%r",
+                parsed.paper_id,
+                item.page,
+                page_number,
+                self._log_text_preview(start_text),
+                self._log_text_preview(end_text),
+            )
+            corrected_item = item.model_copy(update={"page": page_number})
+            return self._source_location_from_text_anchors(parsed, corrected_item, doc)
+        return None
 
     def _fallback_text_anchor_location(
         self,
@@ -628,6 +777,9 @@ class SemanticUnitSlicer:
         doc: fitz.Document | None,
         start_text: str,
         end_text: str,
+        *,
+        reason: str,
+        page_word_count: int | None = None,
     ) -> PageSourceLocation | None:
         if item.page < 1:
             return None
@@ -642,6 +794,16 @@ class SemanticUnitSlicer:
             ).strip()[:4000]
         else:
             return None
+        logger.warning(
+            "Semantic source locator fell back to full page paper_id=%s page=%s "
+            "reason=%s words=%s start_text=%r end_text=%r",
+            parsed.paper_id,
+            item.page,
+            reason,
+            page_word_count,
+            self._log_text_preview(start_text),
+            self._log_text_preview(end_text),
+        )
         return PageSourceLocation(
             page=item.page,
             bbox=[0.0, 0.0, 1.0, 1.0],
@@ -755,9 +917,18 @@ class SemanticUnitSlicer:
         return re.sub(r"\s+", " ", value).strip()
 
     @staticmethod
+    def _log_text_preview(value: str, max_chars: int = 180) -> str:
+        value = re.sub(r"\s+", " ", value).strip()
+        if len(value) <= max_chars:
+            return value
+        return f"{value[:max_chars - 1]}…"
+
+    @staticmethod
     def _normalize_text_for_anchor_match(value: str) -> str:
-        text = re.sub(r"\s+", " ", value).strip().casefold()
-        return re.sub(r"(?<=[^\W\d_])-\s+(?=[^\W\d_])", "", text)
+        text = re.sub(r"\s+", " ", html.unescape(value)).strip().casefold()
+        text = re.sub(r"(?<=[^\W\d_])-\s+(?=[^\W\d_])", "", text)
+        text = re.sub(r"\s*×\s*", "×", text)
+        return re.sub(r"[-\s.,;:]+$", "", text)
 
     @staticmethod
     def _anchor_candidates(value: str, edge: Literal["start", "end"]) -> list[str]:
@@ -794,16 +965,19 @@ class SemanticUnitSlicer:
         edge: Literal["start", "end"],
         normalized_word_stream: tuple[str, list[int | None]] | None = None,
     ) -> list[tuple[int, int]]:
-        rects = cls._search_anchor_rects(page, anchor, edge)
-        spans = cls._word_spans_intersecting_rects(words, rects)
-        if spans:
-            return spans
-        return cls._word_spans_from_normalized_anchor(
+        normalized_spans = cls._word_spans_from_normalized_anchor(
             words,
             anchor,
             edge,
             normalized_word_stream,
         )
+        if normalized_spans:
+            return normalized_spans
+        rects = cls._search_anchor_rects(page, anchor, edge)
+        spans = cls._word_spans_intersecting_rects(words, rects)
+        if spans:
+            return spans
+        return []
 
     @classmethod
     def _word_range_for_anchor_rects(
@@ -952,6 +1126,8 @@ class SemanticUnitSlicer:
                 if cls._should_join_hyphenated_words(chars, word_text):
                     chars.pop()
                     char_word_indices.pop()
+                elif chars[-1] == "×" or word_text[0] == "×":
+                    pass
                 else:
                     chars.append(" ")
                     char_word_indices.append(None)

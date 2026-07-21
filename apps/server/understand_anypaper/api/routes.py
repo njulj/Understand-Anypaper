@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Annotated, Literal
 from urllib.parse import quote
+from uuid import uuid4
 
 import fitz
 import httpx
@@ -13,12 +14,15 @@ from fastapi import APIRouter, File, HTTPException, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from understand_anypaper.analyzers.citation_contribution_matcher import (
+    CitationContributionMatcher,
+)
 from understand_anypaper.analyzers.contribution_evidence_assigner import ContributionEvidenceAssigner
 from understand_anypaper.analyzers.semantic_unit_slicer import SemanticUnitSlicer
 from understand_anypaper.config import apply_desktop_api_overrides, settings
 from understand_anypaper.graph.graph_builder import PaperArgumentGraphBuilder
 from understand_anypaper.graph.graph_validator import GraphValidator
-from understand_anypaper.graph.schema import GraphEdge, GraphNode, PaperArgumentGraph
+from understand_anypaper.graph.schema import EdgeType, GraphEdge, GraphNode, NodeType, PaperArgumentGraph
 from understand_anypaper.parser.models import PaperReference, ParsedPaper, SemanticUnit
 from understand_anypaper.parser.pdf_parser import PdfParser
 from understand_anypaper.recursive.traversal_policy import TraversalPolicy
@@ -41,6 +45,10 @@ class ReferenceAnalyzeRequest(BaseModel):
     depth: int = 1
     focus: str = "current_citation_context"
     expand: bool = False
+
+
+class NodeReferenceExpansionRequest(BaseModel):
+    depth: int = Field(default=1, ge=1, le=2)
 
 
 class GraphSearchRequest(BaseModel):
@@ -202,7 +210,7 @@ def delete_paper(paper_id: str) -> dict:
 
 @router.get("/papers/{paper_id}/graph", response_model=PaperArgumentGraph)
 def get_graph(paper_id: str) -> PaperArgumentGraph:
-    return _get_graph(paper_id)
+    return _materialize_cross_paper_contributions(_get_graph(paper_id), get_store())
 
 
 @router.get("/papers/{paper_id}/semantic-units", response_model=list[SemanticUnit])
@@ -367,6 +375,233 @@ async def analyze_reference(reference_id: str, request: ReferenceAnalyzeRequest)
     }
 
 
+@router.post("/papers/{paper_id}/nodes/{node_id}/references/expand")
+async def expand_node_references(
+    paper_id: str,
+    node_id: str,
+    request: NodeReferenceExpansionRequest,
+) -> dict:
+    """Resolve a node's citations directly to contributions in referenced papers."""
+    store = get_store()
+    graph = await asyncio.to_thread(_get_graph, paper_id)
+    source_node = next((node for node in graph.nodes if node.id == node_id), None)
+    if source_node is None:
+        raise HTTPException(status_code=404, detail="Node not found in the current paper")
+
+    contexts = await asyncio.to_thread(_citation_contexts_for_node, graph, source_node, store)
+    policy = TraversalPolicy(
+        max_depth=min(request.depth, settings.recursion_max_depth),
+        max_papers=settings.recursion_max_papers,
+    )
+    matcher = CitationContributionMatcher()
+    results: list[dict] = []
+    graph_changed = False
+
+    for context in contexts[: settings.recursion_max_papers]:
+        reference: PaperReference = context["reference"]
+        existing = next(
+            (
+                edge
+                for edge in graph.edges
+                if edge.source_node_id == source_node.id
+                and edge.properties.get("cross_paper") is True
+                and edge.properties.get("reference_id") == reference.reference_id
+            ),
+            None,
+        )
+        if existing is not None:
+            results.append(
+                {
+                    "reference_id": reference.reference_id,
+                    "status": "cached_link",
+                    "target_paper_id": existing.properties.get("target_paper_id"),
+                    "target_node_id": existing.target_node_id,
+                    "relation_type": str(existing.edge_type),
+                    "confidence": existing.confidence,
+                }
+            )
+            continue
+
+        cached = await asyncio.to_thread(_find_cached_reference_graph, reference, store)
+        if cached is None:
+            enriched = await asyncio.to_thread(_resolve_reference_metadata, reference)
+            if enriched != reference:
+                await asyncio.to_thread(store.update_reference, enriched)
+                reference = enriched
+            cached = await asyncio.to_thread(_find_cached_reference_graph, reference, store)
+
+        expansion: dict
+        if cached is not None:
+            expansion = {
+                "status": "cached",
+                "paper_id": cached["paper_id"],
+                "title": cached["title"],
+            }
+        elif policy.can_expand(reference.reference_id, request.depth):
+            policy.visited_paper_ids.add(reference.reference_id)
+            expansion = await _expand_reference(reference, store)
+        else:
+            expansion = {"status": "unavailable", "reason": "Traversal policy limit reached."}
+
+        target_paper_id = expansion.get("paper_id")
+        if not isinstance(target_paper_id, str):
+            results.append(
+                {
+                    "reference_id": reference.reference_id,
+                    "status": expansion.get("status", "unavailable"),
+                    "reason": expansion.get("reason", "Referenced paper could not be analyzed."),
+                }
+            )
+            continue
+
+        target_graph = await asyncio.to_thread(store.get_graph, target_paper_id)
+        if target_graph is None:
+            results.append(
+                {
+                    "reference_id": reference.reference_id,
+                    "status": "failed",
+                    "reason": "Referenced paper graph was not found after analysis.",
+                }
+            )
+            continue
+        target_contributions = [
+            node for node in target_graph.nodes if node.node_type == NodeType.CONTRIBUTION
+        ]
+        target_title = str(expansion.get("title") or _paper_title(target_paper_id, store))
+        match = await matcher.match(
+            source_node=source_node,
+            citation_context=context["citation_text"],
+            reference=reference,
+            target_paper_title=target_title,
+            candidate_contributions=target_contributions,
+        )
+        target_node = next(
+            (
+                node
+                for node in target_contributions
+                if node.id == match.target_contribution_node_id
+            ),
+            None,
+        )
+        if not match.matched or target_node is None or match.confidence < 0.45:
+            results.append(
+                {
+                    "reference_id": reference.reference_id,
+                    "status": "unmatched",
+                    "reason": match.rationale,
+                    "confidence": match.confidence,
+                }
+            )
+            continue
+
+        edge = GraphEdge(
+            id=f"edge-cross-paper-{uuid4()}",
+            paper_id=paper_id,
+            source_node_id=source_node.id,
+            target_node_id=target_node.id,
+            edge_type=EdgeType(match.relation_type),
+            confidence=match.confidence,
+            semantic_unit_ids=context["semantic_unit_ids"],
+            inference_type="llm_citation_contribution_match",
+            properties={
+                "cross_paper": True,
+                "citation_text": context["citation_text"],
+                "reference_id": reference.reference_id,
+                "reference_marker": reference.marker,
+                "reference_raw_text": reference.raw_text,
+                "source_paper_id": paper_id,
+                "target_paper_id": target_paper_id,
+                "target_node_id": target_node.id,
+                "target_paper_title": target_title,
+                "target_contribution_title": target_node.title,
+                "match_rationale": match.rationale,
+            },
+        )
+        graph.edges.append(edge)
+        graph_changed = True
+        results.append(
+            {
+                "reference_id": reference.reference_id,
+                "status": "linked",
+                "target_paper_id": target_paper_id,
+                "target_node_id": target_node.id,
+                "target_contribution_title": target_node.title,
+                "relation_type": match.relation_type,
+                "confidence": match.confidence,
+                "rationale": match.rationale,
+            }
+        )
+
+    if graph_changed:
+        await asyncio.to_thread(store.replace_graph, paper_id, graph)
+    view_graph = await asyncio.to_thread(_materialize_cross_paper_contributions, graph, store)
+    return {
+        "paper_id": paper_id,
+        "node_id": node_id,
+        "results": results,
+        "graph": view_graph.model_dump(mode="json"),
+    }
+
+
+@router.get(
+    "/papers/{paper_id}/external-contributions/{target_paper_id}/{contribution_node_id}",
+    response_model=PaperArgumentGraph,
+)
+def get_external_contribution_subgraph(
+    paper_id: str,
+    target_paper_id: str,
+    contribution_node_id: str,
+) -> PaperArgumentGraph:
+    current_graph = _get_graph(paper_id)
+    allowed = any(
+        edge.target_node_id == contribution_node_id
+        and edge.properties.get("cross_paper") is True
+        and edge.properties.get("target_paper_id") == target_paper_id
+        for edge in current_graph.edges
+    )
+    if not allowed:
+        raise HTTPException(status_code=404, detail="Cross-paper contribution link not found")
+
+    store = get_store()
+    target_graph = store.get_graph(target_paper_id)
+    if target_graph is None:
+        raise HTTPException(status_code=404, detail="Referenced paper graph not found")
+    selected = {contribution_node_id}
+    frontier = {contribution_node_id}
+    for _ in range(2):
+        next_frontier: set[str] = set()
+        for edge in target_graph.edges:
+            if edge.edge_type in {EdgeType.NEXT, EdgeType.PREVIOUS}:
+                continue
+            if edge.source_node_id in frontier and edge.target_node_id not in selected:
+                selected.add(edge.target_node_id)
+                next_frontier.add(edge.target_node_id)
+        frontier = next_frontier
+
+    target_title = _paper_title(target_paper_id, store)
+    nodes = [
+        _externalize_node(node, target_title)
+        for node in target_graph.nodes
+        if node.id in selected and node.node_type != NodeType.PAPER
+    ]
+    edges = [
+        edge.model_copy(
+            update={
+                "semantic_unit_ids": [],
+                "properties": {
+                    **edge.properties,
+                    "external_subgraph": True,
+                    "target_paper_id": target_paper_id,
+                    "target_paper_title": target_title,
+                },
+            }
+        )
+        for edge in target_graph.edges
+        if edge.source_node_id in selected and edge.target_node_id in selected
+    ]
+    return PaperArgumentGraph(paper_id=target_paper_id, nodes=nodes, edges=edges)
+
+
 @router.post("/graph/search")
 def search_graph(request: GraphSearchRequest) -> dict:
     graph = _get_graph(request.paper_id)
@@ -431,7 +666,7 @@ def patch_graph(paper_id: str, request: GraphPatchRequest) -> PaperArgumentGraph
     store = get_store()
     store.replace_graph(paper_id, graph)
     store.record_patch(paper_id, [op.model_dump(mode="json") for op in request.operations])
-    return graph
+    return _materialize_cross_paper_contributions(graph, store)
 
 
 _MUTABLE_NODE_FIELDS = {"title", "summary", "node_type", "confidence", "verified", "properties", "semantic_unit_ids"}
@@ -480,6 +715,178 @@ def _apply_patch_operation(graph: PaperArgumentGraph, operation: PatchOperation)
         if not any(edge.id == operation.id for edge in graph.edges):
             raise HTTPException(status_code=404, detail=f"Edge {operation.id} not found")
         graph.edges = [edge for edge in graph.edges if edge.id != operation.id]
+
+
+def _citation_contexts_for_node(
+    graph: PaperArgumentGraph,
+    node: GraphNode,
+    store: GraphStore,
+) -> list[dict]:
+    units_by_id = {
+        unit.semantic_unit_id: unit for unit in store.get_semantic_units(graph.paper_id)
+    }
+    units = [units_by_id[unit_id] for unit_id in node.semantic_unit_ids if unit_id in units_by_id]
+    references = store.get_references(graph.paper_id)
+    contexts: dict[str, dict] = {}
+
+    for unit in units:
+        property_markers = unit.properties.get("citation_markers")
+        marker_strings = (
+            [marker for marker in property_markers if isinstance(marker, str)]
+            if isinstance(property_markers, list)
+            else []
+        )
+        citation_text = unit.properties.get("citation_text")
+        exact_text = (
+            citation_text.strip()
+            if isinstance(citation_text, str) and citation_text.strip()
+            else (
+                unit.text.strip()
+                if unit.source_location.extraction_method in {
+                    "plain_text",
+                    "plain_text_anchors",
+                    "unresolved_text_anchors",
+                }
+                else unit.source_location.extracted_text.strip() or unit.text.strip()
+            )
+        )
+        searchable = " ".join([*marker_strings, exact_text, unit.text])
+        cited_numbers = _numeric_citation_numbers(searchable)
+        normalized_markers = {_normalize_citation_marker(marker) for marker in marker_strings}
+
+        for reference in references:
+            marker_matches = False
+            if reference.marker:
+                marker_number = _single_marker_number(reference.marker)
+                marker_matches = (
+                    (marker_number is not None and marker_number in cited_numbers)
+                    or _normalize_citation_marker(reference.marker) in normalized_markers
+                    or reference.marker in exact_text
+                )
+            elif _author_year_reference_matches(reference, searchable):
+                marker_matches = True
+            if not marker_matches:
+                continue
+
+            context = contexts.setdefault(
+                reference.reference_id,
+                {
+                    "reference": reference,
+                    "semantic_unit_ids": [],
+                    "citation_texts": [],
+                },
+            )
+            if unit.semantic_unit_id not in context["semantic_unit_ids"]:
+                context["semantic_unit_ids"].append(unit.semantic_unit_id)
+            if exact_text and exact_text not in context["citation_texts"]:
+                context["citation_texts"].append(exact_text)
+
+    return [
+        {
+            "reference": context["reference"],
+            "semantic_unit_ids": context["semantic_unit_ids"],
+            "citation_text": "\n".join(context["citation_texts"])[:4000],
+        }
+        for context in contexts.values()
+    ]
+
+
+def _numeric_citation_numbers(text: str) -> set[int]:
+    numbers: set[int] = set()
+    for bracketed in re.findall(r"\[([^\]]+)\]", text):
+        for part in re.split(r"[,;]", bracketed):
+            token = part.strip()
+            range_match = re.fullmatch(r"(\d+)\s*[-–—]\s*(\d+)", token)
+            if range_match:
+                start, end = (int(value) for value in range_match.groups())
+                if start <= end and end - start <= 25:
+                    numbers.update(range(start, end + 1))
+                continue
+            if token.isdigit():
+                numbers.add(int(token))
+    return numbers
+
+
+def _single_marker_number(marker: str) -> int | None:
+    match = re.fullmatch(r"\s*\[(\d+)\]\s*", marker)
+    return int(match.group(1)) if match else None
+
+
+def _normalize_citation_marker(marker: str) -> str:
+    return re.sub(r"\s+", " ", marker).strip().casefold()
+
+
+def _author_year_reference_matches(reference: PaperReference, text: str) -> bool:
+    if reference.year is None or str(reference.year) not in text:
+        return False
+    prefix = reference.raw_text.split(str(reference.year), 1)[0]
+    author_tokens = {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z][A-Za-z'-]{2,}", prefix)
+        if len(token) >= 4
+    }
+    searchable = text.casefold()
+    return any(token in searchable for token in author_tokens)
+
+
+def _resolve_reference_metadata(reference: PaperReference) -> PaperReference:
+    enriched = _crossref_enrich(reference) or reference
+    return _semantic_scholar_enrich(enriched) or enriched
+
+
+def _paper_title(paper_id: str, store: GraphStore) -> str:
+    paper = next((item for item in store.list_papers() if item["paper_id"] == paper_id), None)
+    return str(paper.get("title") if paper else paper_id)
+
+
+def _externalize_node(node: GraphNode, target_paper_title: str, relation: str = "") -> GraphNode:
+    return node.model_copy(
+        update={
+            "semantic_unit_ids": [],
+            "page_ranges": [],
+            "source_type": "cross_paper_reference",
+            "properties": {
+                **node.properties,
+                "cross_paper": True,
+                "target_paper_id": node.paper_id,
+                "target_paper_title": target_paper_title,
+                "cross_paper_relation": relation,
+            },
+        }
+    )
+
+
+def _materialize_cross_paper_contributions(
+    graph: PaperArgumentGraph,
+    store: GraphStore,
+) -> PaperArgumentGraph:
+    nodes = list(graph.nodes)
+    known_node_ids = {node.id for node in nodes}
+    for edge in graph.edges:
+        if edge.properties.get("cross_paper") is not True or edge.target_node_id in known_node_ids:
+            continue
+        target_paper_id = edge.properties.get("target_paper_id")
+        if not isinstance(target_paper_id, str):
+            continue
+        target_graph = store.get_graph(target_paper_id)
+        if target_graph is None:
+            continue
+        target_node = next(
+            (
+                node
+                for node in target_graph.nodes
+                if node.id == edge.target_node_id and node.node_type == NodeType.CONTRIBUTION
+            ),
+            None,
+        )
+        if target_node is None:
+            continue
+        target_title = str(
+            edge.properties.get("target_paper_title") or _paper_title(target_paper_id, store)
+        )
+        nodes.append(_externalize_node(target_node, target_title, str(edge.edge_type)))
+        known_node_ids.add(target_node.id)
+    return graph.model_copy(update={"nodes": nodes})
 
 
 def _crossref_enrich(reference: PaperReference) -> PaperReference | None:

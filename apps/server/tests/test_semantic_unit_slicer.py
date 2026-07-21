@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 import pytest
 from pydantic import BaseModel
@@ -110,6 +111,49 @@ def test_slice_semantic_units_uses_agent_output():
     assert client.prompts
 
 
+def test_slice_semantic_units_preserves_citation_grounding():
+    parsed = ParsedPaper(
+        paper_id="paper",
+        title="TinyLUT",
+        pages=[DocumentPage(page=1, width=612, height=792)],
+    )
+    client = FakeChatClient(
+        [
+            SemanticSliceOutput.model_validate(
+                {
+                    "semantic_units": [
+                        {
+                            "role": "contribution",
+                            "title": "TinyLUT contribution",
+                            "text": "TinyLUT extends prior lookup-table routing.",
+                            "citation_markers": ["[2]"],
+                            "citation_text": "We extend the routing mechanism of [2].",
+                            "source_location": {
+                                "page": 1,
+                                "locator": {
+                                    "kind": "bbox",
+                                    "start_text": "",
+                                    "end_text": "",
+                                    "x": 100,
+                                    "y": 100,
+                                    "width": 700,
+                                    "height": 100,
+                                },
+                            },
+                            "confidence": 0.9,
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+
+    units = asyncio.run(SemanticUnitSlicer(chat_client=client).slice_semantic_units(parsed))
+
+    assert units[0].properties["citation_markers"] == ["[2]"]
+    assert units[0].properties["citation_text"] == "We extend the routing mechanism of [2]."
+
+
 def test_slice_semantic_units_prefers_text_anchors_for_text_roles():
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
@@ -185,6 +229,45 @@ def test_dehyphenated_anchor_matching_maps_back_to_original_words():
         "structure inside the im- age.",
         "structure inside the image.",
     )
+
+
+def test_anchor_matching_normalizes_model_markup_and_terminal_punctuation():
+    assert SemanticUnitSlicer._text_contains_anchor(
+        "the RF size is still limited to 3×3.",
+        "limited to 3 &times; 3.",
+    )
+    assert SemanticUnitSlicer._text_contains_anchor(
+        "prediction is obtained with 4D simplex interpolation [23], a 4D equivalent",
+        "interpolation [23].",
+    )
+    assert SemanticUnitSlicer._text_contains_anchor(
+        "The effectiveness of hierarchical indexing.",
+        "The effectiveness of hierarchical index-",
+    )
+
+
+def test_word_anchor_match_keeps_all_wrapped_line_fragments():
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 96), "Methods ignore local structure inside the im-")
+    page.insert_text((72, 110), "age.")
+    words = SemanticUnitSlicer._ordered_page_words(page)
+
+    spans = SemanticUnitSlicer._word_spans_for_anchor(
+        page,
+        words,
+        "structure inside the im- age.",
+        "end",
+        SemanticUnitSlicer._normalized_word_stream(words),
+    )
+
+    assert len(spans) == 1
+    matched_text = SemanticUnitSlicer._text_from_words(words[spans[0][0] : spans[0][1] + 1])
+    assert SemanticUnitSlicer._text_contains_anchor(
+        matched_text,
+        "structure inside the im- age.",
+    )
+    doc.close()
 
 
 def test_slice_semantic_units_matches_dehyphenated_end_anchor():
@@ -300,8 +383,10 @@ def test_text_anchor_resolution_uses_end_anchor_after_start_anchor():
 
 def test_slice_semantic_units_resolves_cross_page_text_anchor_segments():
     doc = fitz.open()
-    page1 = doc.new_page(width=612, height=792)
-    page2 = doc.new_page(width=612, height=792)
+    doc.new_page(width=612, height=792)
+    doc.new_page(width=612, height=792)
+    page1 = doc.load_page(0)
+    page2 = doc.load_page(1)
     page1.insert_text(
         (72, 96),
         "We propose a compact pipeline that starts here and continues",
@@ -361,7 +446,66 @@ def test_slice_semantic_units_resolves_cross_page_text_anchor_segments():
     assert "ending with strong gains." in location.extracted_text
 
 
-def test_unresolved_text_anchors_fall_back_to_page_location():
+def test_slice_semantic_units_corrects_start_page_to_adjacent_page(caplog):
+    doc = fitz.open()
+    doc.new_page(width=612, height=792)
+    doc.new_page(width=612, height=792)
+    page1 = doc.load_page(0)
+    page2 = doc.load_page(1)
+    page1.insert_text((72, 96), "The span starts on the previous page and continues")
+    page2.insert_text((72, 96), "onto the reported page before its exact ending.")
+    source_bytes = doc.tobytes()
+    doc.close()
+    parsed = ParsedPaper(
+        paper_id="paper",
+        title="TinyLUT",
+        pages=[
+            DocumentPage(page=1, width=612, height=792),
+            DocumentPage(page=2, width=612, height=792),
+        ],
+        source_bytes=source_bytes,
+        source_media_type="application/pdf",
+    )
+    client = FakeChatClient(
+        [
+            SemanticSliceOutput.model_validate(
+                {
+                    "semantic_units": [
+                        {
+                            "role": "contribution",
+                            "title": "Adjacent-page correction",
+                            "text": "The model reported the ending page.",
+                            "source_location": {
+                                "page": 2,
+                                "locator": {
+                                    "kind": "text",
+                                    "start_text": "starts on the previous page",
+                                    "end_text": "its exact ending.",
+                                    "x": 0,
+                                    "y": 0,
+                                    "width": 0,
+                                    "height": 0,
+                                },
+                            },
+                            "confidence": 0.9,
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+
+    with caplog.at_level(logging.INFO):
+        units = asyncio.run(SemanticUnitSlicer(chat_client=client).slice_semantic_units(parsed))
+
+    location = units[0].source_location
+    assert location.page == 1
+    assert location.extraction_method == "pymupdf_text_anchors_cross_page"
+    assert [segment.page for segment in location.segments] == [1, 2]
+    assert "reported_page=2 resolved_start_page=1" in caplog.text
+
+
+def test_unresolved_text_anchors_fall_back_to_page_location(caplog):
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
     page.insert_text((72, 96), "The visible contribution text is present on this page.")
@@ -403,13 +547,16 @@ def test_unresolved_text_anchors_fall_back_to_page_location():
         ]
     )
 
-    units = asyncio.run(SemanticUnitSlicer(chat_client=client).slice_semantic_units(parsed))
+    with caplog.at_level(logging.INFO):
+        units = asyncio.run(SemanticUnitSlicer(chat_client=client).slice_semantic_units(parsed))
 
     assert units
     location = units[0].source_location
     assert location.extraction_method == "unresolved_text_anchors"
     assert location.bbox == [0.0, 0.0, 1.0, 1.0]
     assert "visible contribution text" in location.extracted_text
+    assert "reason=start_anchor_not_found_on_reported_or_adjacent_pages" in caplog.text
+    assert "full_page=1" in caplog.text
 
 
 def test_slice_semantic_units_reports_llm_timeout():

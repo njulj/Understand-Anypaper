@@ -346,7 +346,28 @@ class PdfParser:
                 end = starts[i + 1].start() if i + 1 < len(starts) else len(text)
                 entries.append((match.group(1), text[match.end():end].strip()))
         else:
-            entries = [(None, line.strip()) for line in text.splitlines() if len(line.strip()) > 20]
+            numbered = list(re.finditer(r"(?m)^\s*(\d{1,3})\.\s+", text))
+            numbered_starts: list[re.Match[str]] = []
+            for match in numbered:
+                if (
+                    not numbered_starts
+                    or int(match.group(1)) == int(numbered_starts[-1].group(1)) + 1
+                ):
+                    numbered_starts.append(match)
+            if numbered_starts:
+                for i, match in enumerate(numbered_starts):
+                    end = (
+                        numbered_starts[i + 1].start()
+                        if i + 1 < len(numbered_starts)
+                        else len(text)
+                    )
+                    entries.append((match.group(1), text[match.end():end].strip()))
+            else:
+                entries = [
+                    (None, line.strip())
+                    for line in text.splitlines()
+                    if len(line.strip()) > 20
+                ]
         return [
             self._build_reference(index, marker, raw, prefix)
             for index, (marker, raw) in enumerate(entries, start=1)
@@ -362,6 +383,13 @@ class PdfParser:
         quoted = re.search(r"[“\"](.+?)[”\"]", raw)
         if quoted:
             title = quoted.group(1).strip(" .,")
+        elif ": " in raw:
+            candidate = raw.split(": ", 1)[1]
+            title = re.split(
+                r"\.\s+(?:In:|IEEE|ACM|Springer|Proceedings|arXiv|Int\.\s+J\.)",
+                candidate,
+                maxsplit=1,
+            )[0].strip(" .,")
         else:
             parts = [part.strip() for part in raw.split(". ") if len(part.strip()) > 12]
             title = next((part.strip(" .,") for part in parts if not _YEAR.search(part)), None)

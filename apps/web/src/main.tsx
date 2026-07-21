@@ -30,7 +30,9 @@ import {
   SemanticUnit,
   deletePaper,
   documentPageImageUrl,
+  expandNodeReferences,
   fetchDocumentInfo,
+  fetchExternalContributionSubgraph,
   fetchSemanticUnits,
   fetchGraph,
   listPapers,
@@ -102,7 +104,11 @@ function subgraphOf(graph: PaperArgumentGraph, keep: Set<string>): PaperArgument
 function overviewGraph(graph: PaperArgumentGraph): PaperArgumentGraph {
   const keep = new Set(
     graph.nodes
-      .filter((node) => node.node_type === 'Paper' || node.node_type === 'Contribution')
+      .filter(
+        (node) =>
+          node.paper_id === graph.paper_id &&
+          (node.node_type === 'Paper' || node.node_type === 'Contribution'),
+      )
       .map((node) => node.id),
   );
   return subgraphOf(graph, keep);
@@ -124,7 +130,22 @@ function contributionGraph(graph: PaperArgumentGraph, contributionId: string): P
     }
     frontier = next;
   }
+  // Resolved references remain one more hop away:
+  // Contribution → facet → evidence → cited paper's Contribution.
+  for (const edge of graph.edges) {
+    if (edge.properties.cross_paper === true && keep.has(edge.source_node_id)) {
+      keep.add(edge.target_node_id);
+    }
+  }
   return subgraphOf(graph, keep);
+}
+
+function mergeGraph(base: PaperArgumentGraph, addition: PaperArgumentGraph): PaperArgumentGraph {
+  const nodes = new Map(base.nodes.map((node) => [node.id, node]));
+  const edges = new Map(base.edges.map((edge) => [edge.id, edge]));
+  addition.nodes.forEach((node) => nodes.set(node.id, node));
+  addition.edges.forEach((edge) => edges.set(edge.id, edge));
+  return { ...base, nodes: [...nodes.values()], edges: [...edges.values()] };
 }
 
 function owningContributionId(graph: PaperArgumentGraph, nodeId: string): string | null {
@@ -157,15 +178,25 @@ function sourcePageLabel(location: PageSourceLocation): string {
   return `pp.${pages[0]}-${pages[pages.length - 1]}`;
 }
 
+function unitOwnerPriority(node: GraphNode, unitId: string): number {
+  if (node.id === unitId) return 0;
+  if (node.node_type === 'Contribution') return 1;
+  if (!['Paper', 'Why', 'How', 'Proof'].includes(node.node_type)) return 2;
+  return 3;
+}
+
 function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const blockRefs = useRef(new Map<string, HTMLElement>());
+  const referenceExpansionKeys = useRef(new Set<string>());
+  const externalExpansionKeys = useRef(new Set<string>());
   const [papers, setPapers] = useState<PaperSummary[]>([]);
   const [graph, setGraph] = useState<PaperArgumentGraph | null>(null);
   const [semanticUnits, setSemanticUnits] = useState<SemanticUnit[]>([]);
   const [documentInfo, setDocumentInfo] = useState<PaperDocumentInfo | null>(null);
   const [sourceMode, setSourceMode] = useState<'pages' | 'units'>('pages');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [graphFocusRevision, setGraphFocusRevision] = useState(0);
   const [focusedContributionId, setFocusedContributionId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
@@ -183,6 +214,7 @@ function App() {
   const [newEdgeTargetId, setNewEdgeTargetId] = useState('');
   const [newEdgeType, setNewEdgeType] = useState('SUPPORTED_BY');
   const [newEdgeEvidenceId, setNewEdgeEvidenceId] = useState('');
+  const [referenceLoadingNodeId, setReferenceLoadingNodeId] = useState<string | null>(null);
   const [desktopSettingsOpen, setDesktopSettingsOpen] = useState(false);
   const [desktopSettingsSaving, setDesktopSettingsSaving] = useState(false);
   const [showDesktopApiKey, setShowDesktopApiKey] = useState(false);
@@ -196,6 +228,9 @@ function App() {
   const isDesktopApp = Boolean(desktopBridge?.isDesktopApp);
 
   const selectedNode = graph?.nodes.find((node) => node.id === selectedNodeId) ?? null;
+  const selectedNodeIsExternal = Boolean(
+    graph && selectedNode && selectedNode.paper_id !== graph.paper_id,
+  );
   const focusedContribution = graph?.nodes.find((node) => node.id === focusedContributionId) ?? null;
   const paperTitle = graph
     ? graph.nodes.find((node) => node.node_type === 'Paper')?.title ?? graph.paper_id
@@ -241,22 +276,40 @@ function App() {
     }
     return grouped;
   }, [semanticUnits]);
-  const firstNodeByUnitId = useMemo(() => {
+  const nodeByUnitId = useMemo(() => {
     const byUnitId = new Map<string, string>();
     if (!graph) return byUnitId;
-    for (const node of graph.nodes) {
-      for (const unitId of node.semantic_unit_ids) {
-        if (unitById.has(unitId) && !byUnitId.has(unitId)) byUnitId.set(unitId, node.id);
-      }
+    const localNodes = graph.nodes.filter((node) => node.paper_id === graph.paper_id);
+    for (const unit of semanticUnits) {
+      const unitId = unit.semantic_unit_id;
+      const owner = localNodes
+        .filter((node) => node.semantic_unit_ids.includes(unitId))
+        .sort((left, right) => unitOwnerPriority(left, unitId) - unitOwnerPriority(right, unitId))[0];
+      if (owner) byUnitId.set(unitId, owner.id);
     }
     return byUnitId;
-  }, [graph, unitById]);
+  }, [graph, semanticUnits]);
   const incidentEdges = useMemo(() => {
     if (!graph || !selectedNode) return [];
     return graph.edges.filter(
       (edge) => edge.source_node_id === selectedNode.id || edge.target_node_id === selectedNode.id,
     );
   }, [graph, selectedNode]);
+  const crossPaperEdges = useMemo(
+    () => incidentEdges.filter((edge) => edge.properties.cross_paper === true),
+    [incidentEdges],
+  );
+  const graphSubtitles = useMemo(() => {
+    const subtitles = focusedContributionId ? new Map<string, string>() : new Map(contributionStats);
+    if (!graph) return subtitles;
+    for (const node of graph.nodes) {
+      if (node.paper_id === graph.paper_id) continue;
+      const relation = String(node.properties.cross_paper_relation || 'CITED');
+      const targetTitle = String(node.properties.target_paper_title || 'Referenced paper');
+      subtitles.set(node.id, `${relation} · ${targetTitle}`);
+    }
+    return subtitles;
+  }, [contributionStats, focusedContributionId, graph]);
 
   const selectedUnitIds = useMemo(
     () => new Set(selectedNode?.semantic_unit_ids ?? []),
@@ -312,9 +365,18 @@ function App() {
   }, [sourceMode, documentInfo, selectedNodeId, unitById]);
 
   useEffect(() => {
+    if (!graph || !selectedNode || selectedNode.paper_id !== graph.paper_id) return;
+    void connectNodeReferences(selectedNode.id);
+  }, [graph?.paper_id, selectedNodeId]);
+
+  useEffect(() => {
     if (!graph) return;
-    const source = selectedNodeId ?? graph.nodes[0]?.id ?? '';
-    const target = graph.nodes.find((node) => node.id !== source)?.id ?? source;
+    const editableNodes = graph.nodes.filter((node) => node.paper_id === graph.paper_id);
+    const source =
+      (selectedNode?.paper_id === graph.paper_id ? selectedNodeId : null) ??
+      editableNodes[0]?.id ??
+      '';
+    const target = editableNodes.find((node) => node.id !== source)?.id ?? source;
     setNewEdgeSourceId(source);
     setNewEdgeTargetId(target);
     const evidence = selectedNode?.semantic_unit_ids.find((id) => unitById.has(id)) ?? '';
@@ -334,6 +396,9 @@ function App() {
     setSourceMode(nextDocumentInfo ? 'pages' : 'units');
     setSelectedNodeId(nextGraph.nodes[0]?.id ?? null);
     setFocusedContributionId(null);
+    referenceExpansionKeys.current.clear();
+    externalExpansionKeys.current.clear();
+    setReferenceLoadingNodeId(null);
     setStatus('ready');
     setUploadProgress(null);
     setMessage(readyMessage ?? `Graph ready: ${nextGraph.nodes.length} nodes, ${nextGraph.edges.length} edges.`);
@@ -345,6 +410,9 @@ function App() {
     setDocumentInfo(null);
     setSelectedNodeId(null);
     setFocusedContributionId(null);
+    referenceExpansionKeys.current.clear();
+    externalExpansionKeys.current.clear();
+    setReferenceLoadingNodeId(null);
     setQuery('');
     setStatus('idle');
     setUploadProgress(null);
@@ -365,8 +433,17 @@ function App() {
       setFocusedContributionId(null);
     } else if (node.node_type === 'Contribution') {
       setFocusedContributionId(node.id);
+      if (node.paper_id !== graph.paper_id) {
+        void expandExternalContribution(node);
+      }
     } else {
-      const owner = owningContributionId(graph, nodeId);
+      const nodeIsInFocusedContribution = Boolean(
+        focusedContributionId &&
+          contributionGraph(graph, focusedContributionId)?.nodes.some((item) => item.id === nodeId),
+      );
+      const owner = nodeIsInFocusedContribution
+        ? focusedContributionId
+        : owningContributionId(graph, nodeId);
       if (owner) setFocusedContributionId(owner);
     }
     setSelectedNodeId(nodeId);
@@ -380,16 +457,69 @@ function App() {
   }
 
   function handleGraphNodeSelect(nodeId: string) {
-    const node = graph?.nodes.find((item) => item.id === nodeId);
-    if (!focusedContributionId && node?.node_type === 'Contribution') {
-      setFocusedContributionId(nodeId);
+    revealNode(nodeId);
+  }
+
+  async function connectNodeReferences(nodeId: string, force = false) {
+    if (!graph) return;
+    const sourceNode = graph.nodes.find((node) => node.id === nodeId);
+    if (!sourceNode || sourceNode.paper_id !== graph.paper_id) return;
+    const key = `${graph.paper_id}:${nodeId}`;
+    if (!force && referenceExpansionKeys.current.has(key)) return;
+    referenceExpansionKeys.current.add(key);
+    setReferenceLoadingNodeId(nodeId);
+    try {
+      const expansion = await expandNodeReferences(graph.paper_id, nodeId);
+      setGraph((current) =>
+        current?.paper_id === expansion.paper_id ? expansion.graph : current,
+      );
+      const linked = expansion.results.filter((result) =>
+        ['linked', 'cached_link'].includes(result.status),
+      );
+      if (linked.length) {
+        setStatus('ready');
+        setMessage(
+          `Connected ${linked.length} citation${linked.length === 1 ? '' : 's'} to referenced contributions.`,
+        );
+      } else if (force && expansion.results.length) {
+        const reason = expansion.results.map((result) => result.reason).find(Boolean);
+        setMessage(reason || 'No cited contribution could be matched confidently.');
+      }
+    } catch (error) {
+      referenceExpansionKeys.current.delete(key);
+      setStatus('error');
+      setMessage(error instanceof Error ? error.message : 'Failed to resolve cited contributions.');
+    } finally {
+      setReferenceLoadingNodeId((current) => (current === nodeId ? null : current));
     }
-    setSelectedNodeId(nodeId);
+  }
+
+  async function expandExternalContribution(node: GraphNode) {
+    if (!graph || node.paper_id === graph.paper_id) return;
+    const key = `${graph.paper_id}:${node.paper_id}:${node.id}`;
+    if (externalExpansionKeys.current.has(key)) return;
+    externalExpansionKeys.current.add(key);
+    try {
+      const subgraph = await fetchExternalContributionSubgraph(
+        graph.paper_id,
+        node.paper_id,
+        node.id,
+      );
+      setGraph((current) => (current ? mergeGraph(current, subgraph) : current));
+    } catch (error) {
+      externalExpansionKeys.current.delete(key);
+      setStatus('error');
+      setMessage(
+        error instanceof Error ? error.message : 'Failed to expand the referenced contribution.',
+      );
+    }
   }
 
   function selectUnitOwner(unitId: string) {
-    const nodeId = firstNodeByUnitId.get(unitId);
-    if (nodeId) revealNode(nodeId);
+    const nodeId = nodeByUnitId.get(unitId);
+    if (!nodeId) return;
+    revealNode(nodeId);
+    setGraphFocusRevision((current) => current + 1);
   }
 
   async function handleUpload(event: ChangeEvent<HTMLInputElement>) {
@@ -850,9 +980,10 @@ function App() {
               <GraphView
                 graph={viewGraph}
                 selectedNodeId={selectedNodeId}
+                focusRevision={graphFocusRevision}
                 query={query}
                 onSelectNode={handleGraphNodeSelect}
-                subtitles={focusedContributionId ? undefined : contributionStats}
+                subtitles={graphSubtitles}
               />
               <div className="graph-legend">
                 {legendTypes.map((nodeType) => (
@@ -914,6 +1045,65 @@ function App() {
                 </section>
               ) : null}
 
+              <section className="citation-links">
+                <div className="section-heading-row">
+                  <h3>{selectedNodeIsExternal ? 'Referenced paper' : 'Cited contributions'}</h3>
+                  {!selectedNodeIsExternal ? (
+                    <button
+                      type="button"
+                      className="subtle-inline-action"
+                      onClick={() => void connectNodeReferences(selectedNode.id, true)}
+                      disabled={referenceLoadingNodeId === selectedNode.id}
+                    >
+                      {referenceLoadingNodeId === selectedNode.id ? (
+                        <Loader2 className="spin" size={13} />
+                      ) : (
+                        <Link2 size={13} />
+                      )}
+                      Refresh
+                    </button>
+                  ) : null}
+                </div>
+                {selectedNodeIsExternal ? (
+                  <article className="citation-card">
+                    <strong>{String(selectedNode.properties.target_paper_title || selectedNode.paper_id)}</strong>
+                    <span>Contribution from a referenced paper. Its WHY / HOW / PROOF is loaded on demand.</span>
+                  </article>
+                ) : referenceLoadingNodeId === selectedNode.id ? (
+                  <p className="muted citation-status">
+                    <Loader2 className="spin" size={14} /> Finding cited contributions…
+                  </p>
+                ) : crossPaperEdges.length ? (
+                  crossPaperEdges.map((edge) => {
+                    const otherId =
+                      edge.source_node_id === selectedNode.id
+                        ? edge.target_node_id
+                        : edge.source_node_id;
+                    return (
+                      <article className="citation-card" key={`citation-${edge.id}`}>
+                        <div>
+                          <strong>{edge.edge_type}</strong>
+                          <span>{Math.round(edge.confidence * 100)}% confidence</span>
+                        </div>
+                        <button type="button" className="edge-link" onClick={() => revealNode(otherId)}>
+                          → {nodeLabel(otherId)}
+                        </button>
+                        <small>{String(edge.properties.target_paper_title || '')}</small>
+                        {edge.properties.citation_text ? (
+                          <p>“{String(edge.properties.citation_text).slice(0, 280)}”</p>
+                        ) : null}
+                      </article>
+                    );
+                  })
+                ) : (
+                  <p className="muted">
+                    No resolved citations for this node. Citation lookup runs when the node is selected.
+                  </p>
+                )}
+              </section>
+
+              {!selectedNodeIsExternal ? (
+                <>
               <section className="edit-form">
                 <h3>Correct this node</h3>
                 <label>
@@ -986,7 +1176,7 @@ function App() {
                 <label>
                   From
                   <select value={newEdgeSourceId} onChange={(event) => setNewEdgeSourceId(event.target.value)}>
-                    {(graph?.nodes ?? []).map((node) => (
+                    {(graph?.nodes ?? []).filter((node) => node.paper_id === graph?.paper_id).map((node) => (
                       <option key={node.id} value={node.id}>{node.title}</option>
                     ))}
                   </select>
@@ -1002,7 +1192,7 @@ function App() {
                 <label>
                   To
                   <select value={newEdgeTargetId} onChange={(event) => setNewEdgeTargetId(event.target.value)}>
-                    {(graph?.nodes ?? []).map((node) => (
+                    {(graph?.nodes ?? []).filter((node) => node.paper_id === graph?.paper_id).map((node) => (
                       <option key={node.id} value={node.id}>{node.title}</option>
                     ))}
                   </select>
@@ -1027,6 +1217,8 @@ function App() {
                   <Link2 size={16} /> Add relation
                 </button>
               </section>
+                </>
+              ) : null}
 
               <section className="edge-list">
                 <h3>Relations</h3>
@@ -1036,20 +1228,24 @@ function App() {
                     <article className="edge-item" key={edge.id}>
                       <div className="edge-item-header">
                         <strong>{edge.edge_type}</strong>
-                        <button
-                          type="button"
-                          className="icon-action"
-                          title="Remove relation"
-                          onClick={() => removeEdge(edge.id)}
-                          disabled={saving}
-                        >
-                          <X size={14} />
-                        </button>
+                        {edge.paper_id === graph?.paper_id ? (
+                          <button
+                            type="button"
+                            className="icon-action"
+                            title="Remove relation"
+                            onClick={() => removeEdge(edge.id)}
+                            disabled={saving}
+                          >
+                            <X size={14} />
+                          </button>
+                        ) : null}
                       </div>
                       <button type="button" className="edge-link" onClick={() => revealNode(otherId)}>
                         {edge.source_node_id === selectedNode.id ? '→' : '←'} {nodeLabel(otherId)}
                       </button>
-                      {edge.semantic_unit_ids.length ? (
+                      {edge.properties.cross_paper === true && edge.properties.citation_text ? (
+                        <p>“{String(edge.properties.citation_text).slice(0, 280)}”</p>
+                      ) : edge.semantic_unit_ids.length ? (
                         <p>
                           {edge.semantic_unit_ids
                             .map((unitId) => unitById.get(unitId)?.text)

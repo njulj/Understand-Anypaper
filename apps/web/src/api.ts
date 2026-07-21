@@ -116,6 +116,25 @@ export type UploadPaperOptions = {
   onStageProgress?: (progress: UploadStageProgress) => void;
 };
 
+export type CitationLinkResult = {
+  reference_id: string;
+  status: string;
+  target_paper_id?: string;
+  target_node_id?: string;
+  target_contribution_title?: string;
+  relation_type?: string;
+  confidence?: number;
+  rationale?: string;
+  reason?: string;
+};
+
+export type NodeReferenceExpansion = {
+  paper_id: string;
+  node_id: string;
+  results: CitationLinkResult[];
+  graph: PaperArgumentGraph;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, init);
   if (!response.ok) {
@@ -219,6 +238,32 @@ export function deletePaper(paperId: string): Promise<{ deleted: string; papers:
 
 export function fetchGraph(paperId: string): Promise<PaperArgumentGraph> {
   return request<PaperArgumentGraph>(`/api/papers/${paperId}/graph`);
+}
+
+export function expandNodeReferences(
+  paperId: string,
+  nodeId: string,
+): Promise<NodeReferenceExpansion> {
+  return request<NodeReferenceExpansion>(
+    `/api/papers/${paperId}/nodes/${encodeURIComponent(nodeId)}/references/expand`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ depth: 1 }),
+    },
+  );
+}
+
+export function fetchExternalContributionSubgraph(
+  paperId: string,
+  targetPaperId: string,
+  contributionNodeId: string,
+): Promise<PaperArgumentGraph> {
+  return request<PaperArgumentGraph>(
+    `/api/papers/${paperId}/external-contributions/${encodeURIComponent(
+      targetPaperId,
+    )}/${encodeURIComponent(contributionNodeId)}`,
+  );
 }
 
 export function fetchSemanticUnits(paperId: string): Promise<SemanticUnit[]> {

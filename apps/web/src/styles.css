@@ -409,11 +409,83 @@ button:disabled {
 
 .edge-list h3,
 .evidence-list h3,
-.edit-form h3 {
+.edit-form h3,
+.citation-links h3 {
   margin: 0 0 10px;
   font-size: 13px;
   color: var(--muted);
   text-transform: uppercase;
+}
+
+.citation-links {
+  display: grid;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.section-heading-row,
+.citation-card > div,
+.citation-status {
+  display: flex;
+  align-items: center;
+}
+
+.section-heading-row {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.section-heading-row h3 {
+  margin: 0;
+}
+
+.subtle-inline-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.subtle-inline-action:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.citation-card {
+  display: grid;
+  gap: 7px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+}
+
+.citation-card > div {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.citation-card span,
+.citation-card small {
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.citation-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.citation-status {
+  gap: 7px;
+  margin: 0;
 }
 
 .graph-canvas {

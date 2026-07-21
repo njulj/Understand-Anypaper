@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     )
     openai_model: str = "gpt-4o-mini"
     send_prompt_cache_key: bool = True
-    llm_request_timeout_seconds: float = 180
+    llm_request_timeout_seconds: float = 600
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
     desktop_settings_path: str = ""
@@ -62,7 +62,12 @@ def apply_desktop_api_overrides(target: Settings = settings) -> Settings:
         if isinstance(value, bool):
             target.send_prompt_cache_key = value
         elif isinstance(value, str):
-            target.send_prompt_cache_key = value.strip().casefold() not in {"0", "false", "no", "off"}
+            target.send_prompt_cache_key = value.strip().casefold() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }
 
     return target
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import jsMind from 'jsmind';
 import type { JsMindOptions, Node as JsMindNode, NodeTreeData, NodeTreeFormat } from 'jsmind';
 import 'jsmind/style/jsmind.css';
@@ -244,12 +244,20 @@ function setMindNodeClasses(
 type GraphViewProps = {
   graph: PaperArgumentGraph;
   selectedNodeId: string | null;
+  focusRevision: number;
   query: string;
   onSelectNode: (id: string) => void;
   subtitles?: Map<string, string>;
 };
 
-export function GraphView({ graph, selectedNodeId, query, onSelectNode, subtitles }: GraphViewProps) {
+export function GraphView({
+  graph,
+  selectedNodeId,
+  focusRevision,
+  query,
+  onSelectNode,
+  subtitles,
+}: GraphViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mindRef = useRef<jsMind | null>(null);
   const onSelectNodeRef = useRef(onSelectNode);
@@ -322,7 +330,7 @@ export function GraphView({ graph, selectedNodeId, query, onSelectNode, subtitle
     };
   }, [mind]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const jm = mindRef.current;
     if (!jm) return;
     syncingSelectionRef.current = true;
@@ -339,7 +347,15 @@ export function GraphView({ graph, selectedNodeId, query, onSelectNode, subtitle
       }, 0);
     }
     setMindNodeClasses(jm, graph, selectedNodeId, matchedIds);
-  }, [graph, matchedIds, selectedNodeId]);
+
+    if (!selectedNodeId || !jm.get_node(selectedNodeId)) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (mindRef.current === jm && jm.get_node(selectedNodeId)) {
+        jm.scroll_node_to_center(selectedNodeId);
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusRevision, graph, matchedIds, selectedNodeId]);
 
   return <div ref={containerRef} className="graph-canvas graph-mindmap" />;
 }
