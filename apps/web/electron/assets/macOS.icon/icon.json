@@ -1,0 +1,211 @@
+{
+  "features" : [
+    "refractivity",
+    "specular-location"
+  ],
+  "fill" : "system-light",
+  "groups" : [
+    {
+      "blur-material" : null,
+      "layers" : [
+        {
+          "image-name" : "argument-nodes 2.svg",
+          "name" : "argument-nodes 2",
+          "position" : {
+            "scale" : 1.3,
+            "translation-in-points" : [
+              -22,
+              -22
+            ]
+          }
+        }
+      ],
+      "name" : "node-1",
+      "refractivity" : {
+        "depth" : 0,
+        "enabled" : true,
+        "strength" : 0.12296875
+      },
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.6
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    },
+    {
+      "blur-material-specializations" : [
+        {
+          "appearance" : "dark",
+          "value" : null
+        }
+      ],
+      "layers" : [
+        {
+          "fill" : "none",
+          "image-name" : "argument-node-rings.svg",
+          "name" : "argument-node-rings",
+          "position" : {
+            "scale" : 1.3,
+            "translation-in-points" : [
+              -22,
+              -22
+            ]
+          }
+        }
+      ],
+      "lighting-specializations" : [
+        {
+          "appearance" : "dark",
+          "value" : "individual"
+        }
+      ],
+      "name" : "node",
+      "opacity-specializations" : [
+        {
+          "value" : 0.7
+        },
+        {
+          "appearance" : "dark",
+          "value" : 0.7
+        }
+      ],
+      "refractivity-specializations" : [
+        {
+          "value" : {
+            "depth" : 0.063,
+            "enabled" : true,
+            "strength" : 0.081
+          }
+        },
+        {
+          "appearance" : "dark",
+          "value" : {
+            "depth" : 0.06265625000000014,
+            "enabled" : true,
+            "strength" : 0.081328125
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.6
+      },
+      "specular-specializations" : [
+        {
+          "appearance" : "dark",
+          "value" : "inside"
+        }
+      ],
+      "translucency-specializations" : [
+        {
+          "value" : {
+            "enabled" : false,
+            "value" : 0.2
+          }
+        },
+        {
+          "appearance" : "dark",
+          "value" : {
+            "enabled" : false,
+            "value" : 0
+          }
+        }
+      ]
+    },
+    {
+      "layers" : [
+        {
+          "fill-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "display-p3:0.37915,0.39917,0.43555,1.00000"
+              }
+            }
+          ],
+          "image-name" : "argument-lines.svg",
+          "name" : "argument-lines",
+          "position" : {
+            "scale" : 1.3,
+            "translation-in-points" : [
+              -22,
+              -22
+            ]
+          }
+        }
+      ],
+      "name" : "line",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.6
+      },
+      "specular" : "inside",
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    },
+    {
+      "layers" : [
+        {
+          "image-name" : "fold 2.svg",
+          "name" : "fold 2",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -15.5,
+              25.500000000000057
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : "none"
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "page 2.svg",
+          "name" : "page 2",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -15.5,
+              25.500000000000057
+            ]
+          }
+        }
+      ],
+      "name" : "document",
+      "position" : {
+        "scale" : 1.4,
+        "translation-in-points" : [
+          0,
+          0
+        ]
+      },
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.6
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
