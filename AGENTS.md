@@ -28,9 +28,9 @@ docker-compose.yml
 1. 前端或调用方上传论文到 `POST /api/papers`。
 2. `apps/server/understand_anypaper/api/routes.py` 把上传文件写到临时文件。
 3. `PdfParser` 产出 `ParsedPaper`：渲染页面图片，并为 PyMuPDF 文本块建立稳定的 `block_id + offset` 索引；行级 bbox 只作为服务端派生高亮的数据。
-4. `PaperGraphAgent` 创建临时工作区：`paper.pdf`、`rendered/{page}.png`、`paper_parsed_text.txt`、`graph.json`，让模型通过 Read/编辑/shell 工具逐步构建完整 PAG。
-5. 编辑工具每次修改 `graph.json` 后运行 `AgentGraphWorkspace` 校验并把问题返回模型；构建早期可传 `disable_checks`。GPT 模型走 Responses API 和 raw custom `apply_patch`，其他模型走 Chat Completions 和 `search_replace`。
-6. 最终图通过校验后，服务端把 `block_id + offset` 精确物化成 `SemanticUnit`、page 和归一化 bbox，供 PDF 高亮及现有 API 使用；模型不生成 quote/bbox 等第二套定位信息。
+4. `PaperGraphAgent` 创建临时工作区：`paper.pdf`、`rendered/{page}.png`、`paper_parsed_text.txt`、`paper_references.json`、`graph_schema.json`、`graph.json`，让模型通过 Read/编辑/shell 工具逐步构建完整 PAG。
+5. 编辑工具每次修改 `graph.json` 后运行 `AgentGraphWorkspace` 校验并把问题返回模型；构建早期可传 `disable_checks`。GPT 模型走 Responses API 和标准 function `apply_patch`，其他模型走 Chat Completions 和 `search_replace`；两条路径都由 Agent Framework 管理工具循环。
+6. Agent 根据 `paper_references.json` 把引用节点绑定到稳定的 `reference_ids`；最终图通过校验后，服务端把 `block_id + offset` 精确物化成 `SemanticUnit`、page 和归一化 bbox，供 PDF 高亮、前作查询及现有 API 使用；模型不生成 quote/bbox。
 7. 图通过 `GraphStore` 保存；服务端使用 PostgreSQL，桌面端使用 SQLite，数据库不可用时回退到进程内内存 store。
 
 ## 目录和文件职责
@@ -62,7 +62,7 @@ docker-compose.yml
 - `graph/agent_workspace.py`：创建 agent 工作区，实现 Read、原子编辑、逐次 graph 校验，以及 block offset → semantic unit/page/bbox 的最终物化。
 - `graph/graph_validator.py`：贡献完整度评分，检查每个 contribution 是否有 motivation/gap、method/module、equation、experiment/result、reference 类型邻居。
 - `analyzers/llm.py`：analyzers 共享的 Microsoft Agent Framework Responses/Chat Completions client 工厂、结构化输出 options 和 helper。
-- `analyzers/paper_graph_agent.py`：当前主构图流程。提供 Read、GPT custom `apply_patch` / 非 GPT `search_replace`、shell 工具，并驱动校验—修复循环。
+- `analyzers/paper_graph_agent.py`：当前主构图流程。提供 Read、GPT function `apply_patch` / 非 GPT `search_replace`、shell 工具，并由 Agent Framework 驱动工具调用与校验—修复循环。
 - `storage/graph_store.py`：`GraphStore` 抽象及 PostgreSQL/SQLite/内存实现，负责论文、图、semantic units、references 和源 PDF 的持久化。
 - `recursive/traversal_policy.py`：参考文献递归分析的边界策略，限制最大深度、最大论文数和重复访问。
 

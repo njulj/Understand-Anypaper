@@ -267,3 +267,22 @@ def test_numeric_citation_parser_expands_grouped_ranges():
         5,
         8,
     }
+
+
+def test_node_reference_binding_is_preferred_over_marker_heuristics():
+    current, _ = _paper_pair()
+    graph = _graph_for(current)
+    source_node = next(node for node in graph.nodes if node.id == "current-method-unit")
+    source_node.reference_ids = ["ref-current-2"]
+    unit = next(
+        unit for unit in current.semantic_units if unit.semantic_unit_id == "current-method-unit"
+    )
+    unit.properties.pop("citation_markers")
+    unit.properties.pop("citation_text")
+    store = InMemoryGraphStore()
+    store.save_paper(current, graph)
+
+    contexts = routes._citation_contexts_for_node(graph, source_node, store)
+
+    assert len(contexts) == 1
+    assert contexts[0]["reference"].reference_id == "ref-current-2"

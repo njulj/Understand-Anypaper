@@ -67,12 +67,7 @@ def create_responses_client(
     config: Settings = settings,
     session_id: str | None = None,
 ) -> OpenAIChatClient:
-    """Create Agent Framework's OpenAI Responses API client.
-
-    The graph agent uses the framework client as its provider boundary. Its raw
-    SDK handle is used only for custom-tool calls, which the current framework
-    release sends but does not yet surface back as invokable FunctionTool calls.
-    """
+    """Create Agent Framework's OpenAI Responses API client."""
     apply_desktop_api_overrides(config)
     if not config.openai_api_key:
         raise RuntimeError("OpenAI API key is not configured")

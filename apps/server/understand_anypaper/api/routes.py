@@ -673,6 +673,12 @@ def _citation_contexts_for_node(
     }
     units = [units_by_id[unit_id] for unit_id in node.semantic_unit_ids if unit_id in units_by_id]
     references = store.get_references(graph.paper_id)
+    references_by_id = {reference.reference_id: reference for reference in references}
+    bound_references = [
+        references_by_id[reference_id]
+        for reference_id in node.reference_ids
+        if reference_id in references_by_id
+    ]
     contexts: dict[str, dict] = {}
 
     for unit in units:
@@ -692,20 +698,24 @@ def _citation_contexts_for_node(
         cited_numbers = _numeric_citation_numbers(searchable)
         normalized_markers = {_normalize_citation_marker(marker) for marker in marker_strings}
 
-        for reference in references:
-            marker_matches = False
-            if reference.marker:
-                marker_number = _single_marker_number(reference.marker)
-                marker_matches = (
-                    (marker_number is not None and marker_number in cited_numbers)
-                    or _normalize_citation_marker(reference.marker) in normalized_markers
-                    or reference.marker in exact_text
-                )
-            elif _author_year_reference_matches(reference, searchable):
-                marker_matches = True
-            if not marker_matches:
-                continue
+        matched_references = bound_references
+        if not matched_references:
+            matched_references = []
+            for reference in references:
+                marker_matches = False
+                if reference.marker:
+                    marker_number = _single_marker_number(reference.marker)
+                    marker_matches = (
+                        (marker_number is not None and marker_number in cited_numbers)
+                        or _normalize_citation_marker(reference.marker) in normalized_markers
+                        or reference.marker in exact_text
+                    )
+                elif _author_year_reference_matches(reference, searchable):
+                    marker_matches = True
+                if marker_matches:
+                    matched_references.append(reference)
 
+        for reference in matched_references:
             context = contexts.setdefault(
                 reference.reference_id,
                 {

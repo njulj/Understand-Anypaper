@@ -70,6 +70,18 @@ class AgentGraphWorkspace:
         (self.root / "paper_parsed_text.txt").write_text(
             self._parsed_text_document(), encoding="utf-8"
         )
+        (self.root / "graph_schema.json").write_text(
+            json.dumps(PaperArgumentGraph.model_json_schema(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (self.root / "paper_references.json").write_text(
+            json.dumps(
+                [reference.model_dump(mode="json") for reference in self.parsed.references],
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         initial = PaperArgumentGraph(
             paper_id=self.parsed.paper_id,
             nodes=[
@@ -181,6 +193,72 @@ class AgentGraphWorkspace:
             path = f"graph.json.nodes.{index}"
             if node.paper_id != graph.paper_id:
                 errors.append(self._issue("node_paper_id_mismatch", "node paper_id differs from graph", path))
+            known_reference_ids = {
+                reference.reference_id for reference in self.parsed.references
+            }
+            unknown_reference_ids = [
+                reference_id
+                for reference_id in node.reference_ids
+                if reference_id not in known_reference_ids
+            ]
+            if unknown_reference_ids:
+                errors.append(
+                    self._issue(
+                        "unknown_reference_ids",
+                        f"reference_ids are not present in paper_references.json: {unknown_reference_ids}",
+                        f"{path}.reference_ids",
+                    )
+                )
+            citation_markers = node.properties.get("citation_markers")
+            if citation_markers is not None and (
+                not isinstance(citation_markers, list)
+                or not all(isinstance(marker, str) for marker in citation_markers)
+            ):
+                errors.append(
+                    self._issue(
+                        "invalid_citation_markers",
+                        "citation_markers must be a list of exact marker strings",
+                        f"{path}.properties.citation_markers",
+                    )
+                )
+            elif citation_markers:
+                references_by_marker = {
+                    self._normalize_citation_marker(reference.marker): reference
+                    for reference in self.parsed.references
+                    if reference.marker
+                }
+                unresolved = [
+                    marker
+                    for marker in citation_markers
+                    if self._normalize_citation_marker(marker) not in references_by_marker
+                ]
+                if unresolved:
+                    warnings.append(
+                        GraphIssue(
+                            severity="warning",
+                            code="unresolved_citation_markers",
+                            message=f"citation markers do not match parsed references: {unresolved}",
+                            path=f"{path}.properties.citation_markers",
+                        )
+                    )
+                missing_reference_ids = [
+                    references_by_marker[self._normalize_citation_marker(marker)].reference_id
+                    for marker in citation_markers
+                    if self._normalize_citation_marker(marker) in references_by_marker
+                    and references_by_marker[
+                        self._normalize_citation_marker(marker)
+                    ].reference_id
+                    not in node.reference_ids
+                ]
+                if missing_reference_ids:
+                    errors.append(
+                        self._issue(
+                            "missing_reference_ids",
+                            "citation_markers must be paired with these reference_ids: "
+                            f"{missing_reference_ids}",
+                            f"{path}.reference_ids",
+                        )
+                    )
             if node.node_type not in _STRUCTURAL_NODE_TYPES:
                 self._validate_locator(node.properties.get("source_location"), path, errors)
 
@@ -457,7 +535,9 @@ class AgentGraphWorkspace:
         materialized_nodes = []
         for node in graph.nodes:
             if node.node_type in _STRUCTURAL_NODE_TYPES:
-                materialized_nodes.append(node.model_copy(update={"semantic_unit_ids": []}))
+                materialized_nodes.append(
+                    node.model_copy(update={"semantic_unit_ids": [], "reference_ids": []})
+                )
                 continue
             locator = node.properties["source_location"]
             block = self.blocks_by_id[locator["block_id"]]
@@ -518,6 +598,10 @@ class AgentGraphWorkspace:
             edges=materialized_edges,
         )
         return result
+
+    @staticmethod
+    def _normalize_citation_marker(marker: str) -> str:
+        return re.sub(r"\s+", " ", marker).strip().casefold()
 
     def _materialize_location(
         self,

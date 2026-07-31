@@ -434,16 +434,19 @@ Parser 固定地产生：
 - `paper.pdf`
 - `rendered/{1,2,3,...}.png`
 - `paper_parsed_text.txt`
+- `paper_references.json`
+- `graph_schema.json`
 - 初始 `graph.json`
 
 `paper_parsed_text.txt` 中每个 PyMuPDF 文本块都有稳定 `block_id` 和精确文本。页面图片帮助模型理解图、表、公式和版面，但模型不输出 bbox。
+`paper_references.json` 提供可见 marker 到稳定 `PaperReference.reference_id` 的映射；`graph_schema.json` 由 `PaperArgumentGraph.model_json_schema()` 生成，是 `graph.json` 字段、类型和说明的权威定义。
 
 ## 第二步：Agent 读取论文并增量编辑图
 
 Agent 可使用：
 
 - `Read`：读取文本或页面图片；
-- `apply_patch`：GPT 系列通过 Responses API custom tool 编辑 `graph.json`；
+- `apply_patch`：GPT 系列通过 Responses API 标准 function tool 编辑 `graph.json`；
 - `search_replace`：其他模型通过 Chat Completions 编辑 `graph.json`；
 - `shell`：只用于检查和计算，工具描述明确提示不要用它编辑 `graph.json`。
 
@@ -519,7 +522,7 @@ Paragraph 12
 }
 ```
 
-引用出现位置由实际包含该 marker 的图节点 source span 表达；marker 同时保存在该节点的 `properties.citation_markers`，不再维护第二份 citation mention locator。
+引用出现位置由实际包含该 marker 的图节点 source span 表达；marker 同时保存在该节点的 `properties.citation_markers`，不再维护第二份 citation mention locator。Agent 从 `paper_references.json` 选择对应的稳定 ID 写入节点 `reference_ids`，validator 检查 ID 和 marker 的一致性。
 
 ---
 

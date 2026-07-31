@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   summary TEXT NOT NULL DEFAULT '',
   properties_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   semantic_unit_ids TEXT[] NOT NULL DEFAULT '{}',
+  reference_ids TEXT[] NOT NULL DEFAULT '{}',
   page_ranges JSONB NOT NULL DEFAULT '[]'::jsonb,
   confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
   source_type TEXT NOT NULL,

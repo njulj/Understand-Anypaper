@@ -7,6 +7,7 @@ export type GraphNode = {
   confidence: number;
   source_type: string;
   semantic_unit_ids: string[];
+  reference_ids: string[];
   page_ranges: [number, number][];
   properties: Record<string, unknown>;
   created_by: string;

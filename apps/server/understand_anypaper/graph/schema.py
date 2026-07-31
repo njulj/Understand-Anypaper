@@ -70,33 +70,89 @@ class EdgeType(StrEnum):
 
 
 class GraphNode(BaseModel):
-    id: str
-    paper_id: str
-    node_type: NodeType
-    title: str
-    summary: str = ""
-    confidence: float = Field(ge=0, le=1, default=0.0)
-    source_type: str = "system_inferred"
-    semantic_unit_ids: list[str] = Field(default_factory=list)
-    page_ranges: list[tuple[int, int]] = Field(default_factory=list)
-    properties: dict[str, Any] = Field(default_factory=dict)
-    created_by: str = "paper-graph-agent"
-    verified: bool = False
+    """A typed argument or evidence node extracted from one paper."""
+
+    id: str = Field(description="Graph-wide unique identifier for this node.")
+    paper_id: str = Field(description="Identifier of the paper that owns this node.")
+    node_type: NodeType = Field(description="Semantic role of the node in the argument graph.")
+    title: str = Field(description="Short, concrete label displayed in the graph.")
+    summary: str = Field(default="", description="Concise explanation of the node's content.")
+    confidence: float = Field(
+        ge=0,
+        le=1,
+        default=0.0,
+        description="Confidence in the extracted node, from 0 to 1.",
+    )
+    source_type: str = Field(
+        default="system_inferred",
+        description="How the node was produced or grounded, such as pdf_block_span.",
+    )
+    semantic_unit_ids: list[str] = Field(
+        default_factory=list,
+        description="Semantic units in the current paper that ground this node.",
+    )
+    reference_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "PaperReference identifiers cited by this node. Select exact IDs from "
+            "paper_references.json; do not invent identifiers."
+        ),
+    )
+    page_ranges: list[tuple[int, int]] = Field(
+        default_factory=list,
+        description="Inclusive one-based page ranges containing the node's evidence.",
+    )
+    properties: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Extensible node metadata, including the authoring source_location.",
+    )
+    created_by: str = Field(
+        default="paper-graph-agent",
+        description="Component or actor that created the node.",
+    )
+    verified: bool = Field(
+        default=False,
+        description="Whether a human has verified the node.",
+    )
 
 
 class GraphEdge(BaseModel):
-    id: str
-    paper_id: str
-    source_node_id: str
-    target_node_id: str
-    edge_type: EdgeType
-    confidence: float = Field(ge=0, le=1, default=0.0)
-    semantic_unit_ids: list[str] = Field(default_factory=list)
-    inference_type: str = "direct_extraction"
-    properties: dict[str, Any] = Field(default_factory=dict)
+    """A directed semantic relationship between two graph nodes."""
+
+    id: str = Field(description="Graph-wide unique identifier for this edge.")
+    paper_id: str = Field(description="Identifier of the paper graph that owns this edge.")
+    source_node_id: str = Field(description="Identifier of the edge's source node.")
+    target_node_id: str = Field(description="Identifier of the edge's target node.")
+    edge_type: EdgeType = Field(description="Semantic relationship from source to target.")
+    confidence: float = Field(
+        ge=0,
+        le=1,
+        default=0.0,
+        description="Confidence in the relationship, from 0 to 1.",
+    )
+    semantic_unit_ids: list[str] = Field(
+        default_factory=list,
+        description="Semantic units that provide evidence for this relationship.",
+    )
+    inference_type: str = Field(
+        default="direct_extraction",
+        description="Method used to infer the relationship.",
+    )
+    properties: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Extensible relationship metadata.",
+    )
 
 
 class PaperArgumentGraph(BaseModel):
-    paper_id: str
-    nodes: list[GraphNode] = Field(default_factory=list)
-    edges: list[GraphEdge] = Field(default_factory=list)
+    """The complete, traceable argument graph for one paper."""
+
+    paper_id: str = Field(description="Identifier of the paper represented by this graph.")
+    nodes: list[GraphNode] = Field(
+        default_factory=list,
+        description="All argument, structure, and evidence nodes in the graph.",
+    )
+    edges: list[GraphEdge] = Field(
+        default_factory=list,
+        description="All directed semantic relationships between graph nodes.",
+    )

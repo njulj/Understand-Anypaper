@@ -189,6 +189,7 @@ class SQLiteGraphStore(GraphStore):
                     summary TEXT NOT NULL DEFAULT '',
                     properties_json TEXT NOT NULL DEFAULT '{}',
                     semantic_unit_ids_json TEXT NOT NULL DEFAULT '[]',
+                    reference_ids_json TEXT NOT NULL DEFAULT '[]',
                     page_ranges_json TEXT NOT NULL DEFAULT '[]',
                     confidence REAL NOT NULL DEFAULT 0,
                     source_type TEXT NOT NULL DEFAULT '',
@@ -267,9 +268,9 @@ class SQLiteGraphStore(GraphStore):
                 conn.execute(
                     """
                     INSERT INTO nodes
-                    (id, paper_id, node_type, title, summary, properties_json, semantic_unit_ids_json, page_ranges_json,
-                     confidence, source_type, created_by, verified)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, paper_id, node_type, title, summary, properties_json, semantic_unit_ids_json,
+                     reference_ids_json, page_ranges_json, confidence, source_type, created_by, verified)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         node.id,
@@ -279,6 +280,7 @@ class SQLiteGraphStore(GraphStore):
                         node.summary,
                         json.dumps(node.properties, default=str),
                         json.dumps(node.semantic_unit_ids),
+                        json.dumps(node.reference_ids),
                         json.dumps([list(pair) for pair in node.page_ranges]),
                         node.confidence,
                         node.source_type,
@@ -413,8 +415,8 @@ class SQLiteGraphStore(GraphStore):
                 return None
             node_rows = conn.execute(
                 """
-                SELECT id, node_type, title, summary, properties_json, semantic_unit_ids_json, page_ranges_json,
-                       confidence, source_type, created_by, verified
+                SELECT id, node_type, title, summary, properties_json, semantic_unit_ids_json,
+                       reference_ids_json, page_ranges_json, confidence, source_type, created_by, verified
                 FROM nodes WHERE paper_id = ?
                 """,
                 (paper_id,),
@@ -438,6 +440,7 @@ class SQLiteGraphStore(GraphStore):
                 confidence=row["confidence"],
                 source_type=row["source_type"],
                 semantic_unit_ids=_loads_json(row["semantic_unit_ids_json"], []),
+                reference_ids=_loads_json(row["reference_ids_json"], []),
                 page_ranges=[tuple(pair) for pair in _loads_json(row["page_ranges_json"], [])],
                 properties=_loads_json(row["properties_json"], {}),
                 created_by=row["created_by"],
@@ -469,9 +472,9 @@ class SQLiteGraphStore(GraphStore):
                 conn.execute(
                     """
                     INSERT INTO nodes
-                    (id, paper_id, node_type, title, summary, properties_json, semantic_unit_ids_json, page_ranges_json,
-                     confidence, source_type, created_by, verified)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, paper_id, node_type, title, summary, properties_json, semantic_unit_ids_json,
+                     reference_ids_json, page_ranges_json, confidence, source_type, created_by, verified)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         node.id,
@@ -481,6 +484,7 @@ class SQLiteGraphStore(GraphStore):
                         node.summary,
                         json.dumps(node.properties, default=str),
                         json.dumps(node.semantic_unit_ids),
+                        json.dumps(node.reference_ids),
                         json.dumps([list(pair) for pair in node.page_ranges]),
                         node.confidence,
                         node.source_type,
@@ -746,8 +750,8 @@ class PostgresGraphStore(GraphStore):
                 return None
             node_rows = conn.execute(
                 text(
-                    "SELECT id, node_type, title, summary, properties_json, semantic_unit_ids, page_ranges, "
-                    "confidence, source_type, created_by, verified FROM nodes WHERE paper_id = :pid"
+                    "SELECT id, node_type, title, summary, properties_json, semantic_unit_ids, reference_ids, "
+                    "page_ranges, confidence, source_type, created_by, verified FROM nodes WHERE paper_id = :pid"
                 ),
                 {"pid": paper_id},
             ).mappings()
@@ -761,6 +765,7 @@ class PostgresGraphStore(GraphStore):
                     confidence=row["confidence"],
                     source_type=row["source_type"],
                     semantic_unit_ids=list(row["semantic_unit_ids"] or []),
+                    reference_ids=list(row["reference_ids"] or []),
                     page_ranges=[tuple(pair) for pair in row["page_ranges"]],
                     properties=row["properties_json"],
                     created_by=row["created_by"],
@@ -889,9 +894,9 @@ class PostgresGraphStore(GraphStore):
             conn.execute(
                 text(
                     "INSERT INTO nodes (id, paper_id, node_type, title, summary, properties_json, semantic_unit_ids, "
-                    "page_ranges, confidence, source_type, created_by, verified) "
-                    "VALUES (:id, :pid, :node_type, :title, :summary, :properties, :semantic_unit_ids, :page_ranges, "
-                    ":confidence, :source_type, :created_by, :verified)"
+                    "reference_ids, page_ranges, confidence, source_type, created_by, verified) "
+                    "VALUES (:id, :pid, :node_type, :title, :summary, :properties, :semantic_unit_ids, "
+                    ":reference_ids, :page_ranges, :confidence, :source_type, :created_by, :verified)"
                 ),
                 {
                     "id": node.id,
@@ -901,6 +906,7 @@ class PostgresGraphStore(GraphStore):
                     "summary": node.summary,
                     "properties": json.dumps(node.properties, default=str),
                     "semantic_unit_ids": node.semantic_unit_ids,
+                    "reference_ids": node.reference_ids,
                     "page_ranges": json.dumps([list(pair) for pair in node.page_ranges]),
                     "confidence": node.confidence,
                     "source_type": node.source_type,

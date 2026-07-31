@@ -634,6 +634,7 @@ function App() {
       confidence: 1,
       source_type: 'human_added',
       semantic_unit_ids: evidenceUnit ? [evidenceUnit.semantic_unit_id] : [],
+      reference_ids: [],
       page_ranges: evidencePage ? [[evidencePage, evidencePage]] : [],
       properties: { manual: true },
       created_by: 'human',
