@@ -286,3 +286,22 @@ def test_node_reference_binding_is_preferred_over_marker_heuristics():
 
     assert len(contexts) == 1
     assert contexts[0]["reference"].reference_id == "ref-current-2"
+
+
+def test_reference_metadata_resolution_skips_remote_lookups_when_arxiv_id_is_known(
+    monkeypatch,
+):
+    reference = PaperReference(
+        reference_id="ref-arxiv",
+        marker="[2]",
+        raw_text="A. Author. A known arXiv paper. 2018.",
+        arxiv_id="1809.00219",
+    )
+
+    def unexpected_lookup(_reference):
+        raise AssertionError("metadata lookup should not run for a known arXiv identifier")
+
+    monkeypatch.setattr(routes, "_crossref_enrich", unexpected_lookup)
+    monkeypatch.setattr(routes, "_semantic_scholar_enrich", unexpected_lookup)
+
+    assert routes._resolve_reference_metadata(reference) is reference

@@ -45,6 +45,8 @@ class ReadResult(BaseModel):
     kind: Literal["text", "image"]
     content: str | bytes
     media_type: str = "text/plain"
+    start_line: int | None = None
+    end_line: int | None = None
 
 
 class AgentGraphWorkspace:
@@ -145,7 +147,12 @@ class AgentGraphWorkspace:
         selected = lines[start : start + count]
         numbered = "\n".join(f"{index:>6} | {line}" for index, line in enumerate(selected, start + 1))
         suffix = "\n[more lines available]" if start + count < len(lines) else ""
-        return ReadResult(kind="text", content=numbered + suffix)
+        return ReadResult(
+            kind="text",
+            content=numbered + suffix,
+            start_line=start + 1 if selected else None,
+            end_line=start + len(selected) if selected else None,
+        )
 
     def validate(self) -> GraphValidationReport:
         errors: list[GraphIssue] = []

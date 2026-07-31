@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
+import logging
 import os
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +32,10 @@ from understand_anypaper.graph.schema import EdgeType, NodeType, PaperArgumentGr
 from understand_anypaper.parser.models import ParsedPaper
 
 
+logger = logging.getLogger(__name__)
+AgentProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
+
+
 class PaperGraphAgentError(RuntimeError):
     """Raised when the graph-authoring agent cannot leave a valid graph.json."""
 
@@ -38,6 +45,110 @@ class _ToolRuntime:
     workspace: AgentGraphWorkspace
     config: Settings
     deferred_images: list[tuple[str, Content]] | None = None
+    on_progress: AgentProgressCallback | None = None
+    activity_sequence: int = 0
+    thinking_id: str | None = None
+    thinking_started_at: float | None = None
+    clock: Callable[[], float] = time.monotonic
+
+    async def _emit(self, activity: dict[str, Any]) -> None:
+        if self.on_progress is None:
+            return
+        try:
+            await self.on_progress(activity)
+        except Exception:  # noqa: BLE001 - progress reporting must not stop graph generation
+            logger.exception("Failed to report paper graph agent progress")
+
+    def _next_id(self, kind: str) -> str:
+        self.activity_sequence += 1
+        return f"{kind}-{self.activity_sequence}"
+
+    async def begin_thinking(self) -> None:
+        if self.thinking_started_at is not None:
+            return
+        self.thinking_id = self._next_id("thinking")
+        self.thinking_started_at = self.clock()
+        await self._emit(
+            {"id": self.thinking_id, "kind": "thinking", "label": "Thinking…"}
+        )
+
+    async def finish_thinking(self) -> None:
+        if self.thinking_started_at is None or self.thinking_id is None:
+            return
+        thinking_id = self.thinking_id
+        elapsed = self.clock() - self.thinking_started_at
+        self.thinking_id = None
+        self.thinking_started_at = None
+        if elapsed > 10:
+            seconds = max(1, round(elapsed))
+            await self._emit(
+                {
+                    "id": thinking_id,
+                    "kind": "thought",
+                    "label": f"Thought for {seconds}s",
+                    "duration_seconds": seconds,
+                }
+            )
+        else:
+            await self._emit({"id": thinking_id, "kind": "thinking_done"})
+
+    async def record_read(
+        self,
+        path: str,
+        *,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> None:
+        await self._emit(
+            {
+                "id": self._next_id("read"),
+                "kind": "read",
+                "label": f"Read {path}",
+                "path": path,
+                "start_line": start_line,
+                "end_line": end_line,
+            }
+        )
+
+    async def record_shell(self, command: str) -> None:
+        compact = " ".join(command.split())
+        if len(compact) > 88:
+            compact = compact[:85] + "…"
+        await self._emit(
+            {
+                "id": self._next_id("shell"),
+                "kind": "shell",
+                "label": f"Ran {compact}",
+                "command": command,
+            }
+        )
+
+    async def record_edit(self, before: str) -> None:
+        after = self.workspace.graph_path.read_text(encoding="utf-8")
+        diff = list(
+            difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="")
+        )
+        additions = sum(line.startswith("+") and not line.startswith("+++") for line in diff)
+        deletions = sum(line.startswith("-") and not line.startswith("---") for line in diff)
+        report = self.workspace.validate()
+        try:
+            payload = json.loads(after)
+            nodes = payload.get("nodes", []) if isinstance(payload, dict) else []
+            node_count = len(nodes) if isinstance(nodes, list) else 0
+        except json.JSONDecodeError:
+            node_count = 0
+        await self._emit(
+            {
+                "id": self._next_id("edit"),
+                "kind": "edit",
+                "label": "Edited graph.json",
+                "path": "graph.json",
+                "additions": additions,
+                "deletions": deletions,
+                "problem_count": len(report.errors) + len(report.warnings),
+                "node_count": node_count,
+            }
+        )
 
 
 def _runtime(context: FunctionInvocationContext) -> _ToolRuntime:
@@ -56,7 +167,18 @@ async def read_file(
 ) -> str | list[Content]:
     """Read text or a image from the paper workspace."""
     runtime = _runtime(context)
-    result = runtime.workspace.read(path, offset, limit)
+    await runtime.finish_thinking()
+    try:
+        result = runtime.workspace.read(path, offset, limit)
+    except Exception:
+        await runtime.begin_thinking()
+        raise
+    await runtime.record_read(
+        path,
+        start_line=result.start_line,
+        end_line=result.end_line,
+    )
+    await runtime.begin_thinking()
     if result.kind != "image":
         return str(result.content)
 
@@ -78,51 +200,71 @@ async def search_replace(
     disable_checks: bool = False,
 ) -> str:
     """Edit graph.json by exact string replacement and return validation results."""
-    return _runtime(context).workspace.search_replace(
-        path,
-        old_text,
-        new_text,
-        replace_all=replace_all,
-        disable_checks=disable_checks,
-    )
+    runtime = _runtime(context)
+    await runtime.finish_thinking()
+    before = runtime.workspace.graph_path.read_text(encoding="utf-8")
+    try:
+        result = runtime.workspace.search_replace(
+            path,
+            old_text,
+            new_text,
+            replace_all=replace_all,
+            disable_checks=disable_checks,
+        )
+    except Exception:
+        await runtime.begin_thinking()
+        raise
+    await runtime.record_edit(before)
+    await runtime.begin_thinking()
+    return result
 
 
 @tool
 async def shell(command: str, context: FunctionInvocationContext) -> str:
     """Run a shell command; never edit graph.json using this tool."""
     runtime = _runtime(context)
-    process = await asyncio.create_subprocess_shell(
-        command,
-        cwd=str(runtime.workspace.root),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=os.environ,
-    )
+    await runtime.finish_thinking()
     try:
-        stdout, _ = await asyncio.wait_for(
-            process.communicate(),
-            timeout=runtime.config.graph_agent_shell_timeout_seconds,
+        process = await asyncio.create_subprocess_shell(
+            command,
+            cwd=str(runtime.workspace.root),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=dict(os.environ),
         )
-    except TimeoutError:
-        process.kill()
-        await process.communicate()
-        return json.dumps(
-            {
-                "exit_code": None,
-                "timed_out": True,
-                "output": (
-                    f"command exceeded {runtime.config.graph_agent_shell_timeout_seconds:g} seconds"
-                ),
-            }
-        )
-    output = stdout.decode(errors="replace")
-    limit = runtime.config.graph_agent_shell_max_output_chars
-    if len(output) > limit:
-        output = output[:limit] + "\n[output truncated]"
-    return json.dumps(
-        {"exit_code": process.returncode, "timed_out": False, "output": output},
-        ensure_ascii=False,
-    )
+        try:
+            stdout, _ = await asyncio.wait_for(
+                process.communicate(),
+                timeout=runtime.config.graph_agent_shell_timeout_seconds,
+            )
+        except TimeoutError:
+            process.kill()
+            await process.communicate()
+            result = json.dumps(
+                {
+                    "exit_code": None,
+                    "timed_out": True,
+                    "output": (
+                        "command exceeded "
+                        f"{runtime.config.graph_agent_shell_timeout_seconds:g} seconds"
+                    ),
+                }
+            )
+        else:
+            output = stdout.decode(errors="replace")
+            limit = runtime.config.graph_agent_shell_max_output_chars
+            if len(output) > limit:
+                output = output[:limit] + "\n[output truncated]"
+            result = json.dumps(
+                {"exit_code": process.returncode, "timed_out": False, "output": output},
+                ensure_ascii=False,
+            )
+        await runtime.record_shell(command)
+        return result
+    finally:
+        # The framework starts another model turn even when the tool raises. Keep the
+        # progress state in sync on both successful and exceptional shell paths.
+        await runtime.begin_thinking()
 
 
 @tool
@@ -132,11 +274,18 @@ async def apply_patch(
     disable_checks: bool = False,
 ) -> str:
     """Apply a Codex-style patch to graph.json and return validation results."""
+    runtime = _runtime(context)
+    await runtime.finish_thinking()
+    before = runtime.workspace.graph_path.read_text(encoding="utf-8")
     header = f"disable_checks={'true' if disable_checks else 'false'}"
     try:
-        return _runtime(context).workspace.apply_patch(f"{header}\n{patch}")
+        result = runtime.workspace.apply_patch(f"{header}\n{patch}")
     except Exception as exc:  # noqa: BLE001 - patch errors are model-correctable
-        return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+        result = json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+    if runtime.workspace.graph_path.read_text(encoding="utf-8") != before:
+        await runtime.record_edit(before)
+    await runtime.begin_thinking()
+    return result
 
 
 def _attach_read_images(deferred_images: list[tuple[str, Content]]):
@@ -277,14 +426,19 @@ class PaperGraphAgent:
         self._responses_client = responses_client
         self._chat_client = chat_client
 
-    async def build(self, parsed: ParsedPaper) -> PaperArgumentGraph:
+    async def build(
+        self,
+        parsed: ParsedPaper,
+        *,
+        on_progress: AgentProgressCallback | None = None,
+    ) -> PaperArgumentGraph:
         apply_desktop_api_overrides(self._config)
         if not parsed.source_blocks:
             raise PaperGraphAgentError("parser produced no source blocks for graph grounding")
         with TemporaryDirectory(prefix=f"anypaper-{parsed.paper_id[:8]}-") as directory:
             workspace = AgentGraphWorkspace(Path(directory), parsed)
             workspace.initialize()
-            await self._run_agent(workspace)
+            await self._run_agent(workspace, on_progress=on_progress)
             report = workspace.validate()
             if not report.valid:
                 raise PaperGraphAgentError(
@@ -297,7 +451,12 @@ class PaperGraphAgent:
         slug = model.strip().casefold().split("/")[-1]
         return slug.startswith("gpt-") or slug.startswith("chatgpt-")
 
-    async def _run_agent(self, workspace: AgentGraphWorkspace) -> None:
+    async def _run_agent(
+        self,
+        workspace: AgentGraphWorkspace,
+        *,
+        on_progress: AgentProgressCallback | None = None,
+    ) -> None:
         use_responses = self.is_gpt_model(self._config.openai_model)
         session_id = f"paper-graph:{workspace.parsed.paper_id}"
         deferred_images: list[tuple[str, Content]] | None = None
@@ -346,6 +505,7 @@ class PaperGraphAgent:
             workspace=workspace,
             config=self._config,
             deferred_images=deferred_images,
+            on_progress=on_progress,
         )
         prompt = (
             "Build graph.json now. Read the workspace sources, edit incrementally, and do not stop "
@@ -353,12 +513,15 @@ class PaperGraphAgent:
         )
         for _ in range(3):
             try:
+                await runtime.begin_thinking()
                 await agent.run(
                     prompt,
                     options=options,
                     function_invocation_kwargs={"runtime": runtime},
                 )
+                await runtime.finish_thinking()
             except Exception as exc:
+                await runtime.finish_thinking()
                 raise PaperGraphAgentError(f"{api_name} graph agent failed: {exc}") from exc
             report = workspace.validate()
             if report.valid:

@@ -330,3 +330,90 @@ def test_chat_completions_read_defers_image_for_middleware(tmp_path):
     assert "attached to the next model call" in result[0].text
     assert deferred_images[0][0] == "rendered/1.png"
     assert deferred_images[0][1].type == "data"
+
+
+def test_shell_passes_plain_environment_dict_and_resumes_thinking(tmp_path, monkeypatch):
+    workspace = AgentGraphWorkspace(tmp_path, _parsed())
+    workspace.initialize()
+    activities = []
+    invocation = {}
+
+    async def capture(activity):
+        activities.append(activity)
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return b"ok", None
+
+    async def fake_create_subprocess_shell(command, **kwargs):
+        invocation.update(command=command, **kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", fake_create_subprocess_shell)
+    runtime = _ToolRuntime(workspace=workspace, config=Settings(), on_progress=capture)
+    context = FunctionInvocationContext(
+        function=shell,
+        arguments={},
+        kwargs={"runtime": runtime},
+    )
+
+    result = asyncio.run(
+        shell.invoke(
+            arguments={"command": "printf ok"},
+            context=context,
+        )
+    )
+
+    assert json.loads(result[0].text)["output"] == "ok"
+    assert type(invocation["env"]) is dict
+    assert [activity["kind"] for activity in activities] == ["shell", "thinking"]
+
+
+def test_tool_progress_reports_thinking_read_and_edit_metadata(tmp_path):
+    workspace = AgentGraphWorkspace(tmp_path, _parsed())
+    workspace.initialize()
+    activities = []
+
+    async def capture(activity):
+        activities.append(activity)
+
+    timestamps = iter([100.0, 112.4, 200.0, 200.5])
+    runtime = _ToolRuntime(
+        workspace=workspace,
+        config=Settings(),
+        on_progress=capture,
+        clock=lambda: next(timestamps),
+    )
+
+    async def exercise_tools():
+        await runtime.begin_thinking()
+        read_context = FunctionInvocationContext(
+            function=read_file,
+            arguments={},
+            kwargs={"runtime": runtime},
+        )
+        await read_file.invoke(arguments={"path": "graph.json"}, context=read_context)
+
+        workspace.graph_path.write_text(json.dumps(_valid_graph(), indent=2), encoding="utf-8")
+        await runtime.record_edit('{"nodes": []}')
+        await runtime.finish_thinking()
+
+    asyncio.run(exercise_tools())
+
+    assert [activity["kind"] for activity in activities] == [
+        "thinking",
+        "thought",
+        "read",
+        "thinking",
+        "edit",
+        "thinking_done",
+    ]
+    assert activities[1]["duration_seconds"] == 12
+    assert activities[2]["start_line"] == 1
+    assert activities[2]["end_line"] > activities[2]["start_line"]
+    assert activities[4]["additions"] > 0
+    assert activities[4]["deletions"] == 1
+    assert activities[4]["node_count"] == 5
+    assert activities[4]["problem_count"] == len(workspace.validate().warnings)

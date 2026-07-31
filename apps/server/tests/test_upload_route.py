@@ -35,7 +35,16 @@ def _unit(paper_id: str, unit_id: str, role: str, properties: dict | None = None
 
 
 def test_upload_paper_streams_progress_and_saves_graph(monkeypatch):
-    async def fake_build(self, parsed):
+    async def fake_build(self, parsed, *, on_progress=None):
+        assert on_progress is not None
+        await on_progress(
+            {
+                "id": "read-1",
+                "kind": "read",
+                "label": "Read graph.json",
+                "path": "graph.json",
+            }
+        )
         units = [
             _unit(parsed.paper_id, "unit-contribution", "contribution"),
             _unit(parsed.paper_id, "unit-method", "method"),
@@ -73,17 +82,19 @@ def test_upload_paper_streams_progress_and_saves_graph(monkeypatch):
         "upload_received",
         "rendered_pages",
         "started_graph_agent",
+        "agent_activity",
         "built_argument_graph",
         "saved_graph",
         "complete",
     ]
     graph = events[-1]["graph"]
+    assert events[3]["activity"]["label"] == "Read graph.json"
     assert graph["nodes"]
     assert routes.get_store().get_graph(graph["paper_id"]) is not None
 
 
 def test_upload_paper_reports_pipeline_errors_in_stream(monkeypatch):
-    async def failing_build(self, parsed):
+    async def failing_build(self, parsed, *, on_progress=None):
         raise RuntimeError("graph agent failed")
 
     monkeypatch.setattr(routes.PaperGraphAgent, "build", failing_build)

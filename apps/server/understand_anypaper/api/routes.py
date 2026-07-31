@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 import re
+import time
+from contextlib import suppress
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Annotated, Literal
@@ -17,7 +19,7 @@ from pydantic import BaseModel, Field
 from understand_anypaper.analyzers.citation_contribution_matcher import (
     CitationContributionMatcher,
 )
-from understand_anypaper.analyzers.paper_graph_agent import PaperGraphAgent
+from understand_anypaper.analyzers.paper_graph_agent import AgentProgressCallback, PaperGraphAgent
 from understand_anypaper.config import apply_desktop_api_overrides, settings
 from understand_anypaper.graph.graph_validator import GraphValidator
 from understand_anypaper.graph.schema import EdgeType, GraphEdge, GraphNode, NodeType, PaperArgumentGraph
@@ -80,8 +82,11 @@ class GraphPatchRequest(BaseModel):
     operations: list[PatchOperation]
 
 
-async def _analyze_and_build_graph(parsed: ParsedPaper) -> PaperArgumentGraph:
-    return await PaperGraphAgent().build(parsed)
+async def _analyze_and_build_graph(
+    parsed: ParsedPaper,
+    on_progress: AgentProgressCallback | None = None,
+) -> PaperArgumentGraph:
+    return await PaperGraphAgent().build(parsed, on_progress=on_progress)
 
 
 def _upload_progress_line(event: str, progress: int, message: str, **payload: object) -> str:
@@ -140,7 +145,35 @@ async def upload_paper(file: Annotated[UploadFile, File(...)]) -> StreamingRespo
                 74,
                 "Started the graph authoring agent.",
             )
-            graph = await _analyze_and_build_graph(parsed)
+            activity_queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+            async def report_agent_activity(activity: dict) -> None:
+                await activity_queue.put(activity)
+
+            async def build_graph() -> PaperArgumentGraph:
+                try:
+                    return await _analyze_and_build_graph(parsed, report_agent_activity)
+                finally:
+                    await activity_queue.put(None)
+
+            graph_task = asyncio.create_task(build_graph())
+            try:
+                while True:
+                    activity = await activity_queue.get()
+                    if activity is None:
+                        break
+                    yield _upload_progress_line(
+                        "agent_activity",
+                        78,
+                        str(activity.get("label", "Graph agent is working.")),
+                        activity=activity,
+                    )
+                graph = await graph_task
+            finally:
+                if not graph_task.done():
+                    graph_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await graph_task
             yield _upload_progress_line(
                 "built_argument_graph",
                 94,
@@ -339,6 +372,15 @@ async def expand_node_references(
     request: NodeReferenceExpansionRequest,
 ) -> dict:
     """Resolve a node's citations directly to contributions in referenced papers."""
+    trace_id = f"{paper_id[:8]}:{node_id}:{uuid4().hex[:8]}"
+    started_at = time.monotonic()
+    logger.info(
+        "[citation-expand:%s] started paper_id=%s node_id=%s depth=%s",
+        trace_id,
+        paper_id,
+        node_id,
+        request.depth,
+    )
     store = get_store()
     graph = await asyncio.to_thread(_get_graph, paper_id)
     source_node = next((node for node in graph.nodes if node.id == node_id), None)
@@ -346,6 +388,14 @@ async def expand_node_references(
         raise HTTPException(status_code=404, detail="Node not found in the current paper")
 
     contexts = await asyncio.to_thread(_citation_contexts_for_node, graph, source_node, store)
+    scheduled_contexts = contexts[: settings.recursion_max_papers]
+    logger.info(
+        "[citation-expand:%s] found citation contexts count=%s scheduled=%s limit=%s",
+        trace_id,
+        len(contexts),
+        len(scheduled_contexts),
+        settings.recursion_max_papers,
+    )
     policy = TraversalPolicy(
         max_depth=min(request.depth, settings.recursion_max_depth),
         max_papers=settings.recursion_max_papers,
@@ -354,8 +404,19 @@ async def expand_node_references(
     results: list[dict] = []
     graph_changed = False
 
-    for context in contexts[: settings.recursion_max_papers]:
+    for context_index, context in enumerate(scheduled_contexts, start=1):
+        reference_started_at = time.monotonic()
         reference: PaperReference = context["reference"]
+        logger.info(
+            "[citation-expand:%s] reference %s/%s started reference_id=%s marker=%s arxiv_id=%s doi=%s",
+            trace_id,
+            context_index,
+            len(scheduled_contexts),
+            reference.reference_id,
+            reference.marker,
+            reference.arxiv_id,
+            reference.doi,
+        )
         existing = next(
             (
                 edge
@@ -367,6 +428,12 @@ async def expand_node_references(
             None,
         )
         if existing is not None:
+            logger.info(
+                "[citation-expand:%s] reference_id=%s reused existing cross-paper link elapsed=%.2fs",
+                trace_id,
+                reference.reference_id,
+                time.monotonic() - reference_started_at,
+            )
             results.append(
                 {
                     "reference_id": reference.reference_id,
@@ -379,13 +446,40 @@ async def expand_node_references(
             )
             continue
 
+        logger.info(
+            "[citation-expand:%s] reference_id=%s checking graph cache",
+            trace_id,
+            reference.reference_id,
+        )
         cached = await asyncio.to_thread(_find_cached_reference_graph, reference, store)
         if cached is None:
+            logger.info(
+                "[citation-expand:%s] reference_id=%s cache miss; resolving metadata",
+                trace_id,
+                reference.reference_id,
+            )
+            metadata_started_at = time.monotonic()
             enriched = await asyncio.to_thread(_resolve_reference_metadata, reference)
+            logger.info(
+                "[citation-expand:%s] reference_id=%s metadata resolved elapsed=%.2fs arxiv_id=%s doi=%s changed=%s",
+                trace_id,
+                reference.reference_id,
+                time.monotonic() - metadata_started_at,
+                enriched.arxiv_id,
+                enriched.doi,
+                enriched != reference,
+            )
             if enriched != reference:
                 await asyncio.to_thread(store.update_reference, enriched)
                 reference = enriched
             cached = await asyncio.to_thread(_find_cached_reference_graph, reference, store)
+        else:
+            logger.info(
+                "[citation-expand:%s] reference_id=%s graph cache hit paper_id=%s",
+                trace_id,
+                reference.reference_id,
+                cached.get("paper_id"),
+            )
 
         expansion: dict
         if cached is not None:
@@ -396,9 +490,22 @@ async def expand_node_references(
             }
         elif policy.can_expand(reference.reference_id, request.depth):
             policy.visited_paper_ids.add(reference.reference_id)
-            expansion = await _expand_reference(reference, store)
+            logger.info(
+                "[citation-expand:%s] reference_id=%s starting recursive paper analysis",
+                trace_id,
+                reference.reference_id,
+            )
+            expansion = await _expand_reference(reference, store, trace_id=trace_id)
         else:
             expansion = {"status": "unavailable", "reason": "Traversal policy limit reached."}
+        logger.info(
+            "[citation-expand:%s] reference_id=%s expansion finished status=%s target_paper_id=%s elapsed=%.2fs",
+            trace_id,
+            reference.reference_id,
+            expansion.get("status"),
+            expansion.get("paper_id"),
+            time.monotonic() - reference_started_at,
+        )
 
         target_paper_id = expansion.get("paper_id")
         if not isinstance(target_paper_id, str):
@@ -425,12 +532,41 @@ async def expand_node_references(
             node for node in target_graph.nodes if node.node_type == NodeType.CONTRIBUTION
         ]
         target_title = str(expansion.get("title") or _paper_title(target_paper_id, store))
-        match = await matcher.match(
-            source_node=source_node,
-            citation_context=context["citation_text"],
-            reference=reference,
-            target_paper_title=target_title,
-            candidate_contributions=target_contributions,
+        logger.info(
+            "[citation-expand:%s] reference_id=%s matching citation to contributions candidates=%s",
+            trace_id,
+            reference.reference_id,
+            len(target_contributions),
+        )
+        match_started_at = time.monotonic()
+        match_heartbeat = asyncio.create_task(
+            _log_citation_heartbeat(
+                trace_id,
+                reference.reference_id,
+                "contribution matching",
+                match_started_at,
+            )
+        )
+        try:
+            match = await matcher.match(
+                source_node=source_node,
+                citation_context=context["citation_text"],
+                reference=reference,
+                target_paper_title=target_title,
+                candidate_contributions=target_contributions,
+            )
+        finally:
+            match_heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await match_heartbeat
+        logger.info(
+            "[citation-expand:%s] reference_id=%s contribution match finished matched=%s target_node_id=%s confidence=%.3f elapsed=%.2fs",
+            trace_id,
+            reference.reference_id,
+            match.matched,
+            match.target_contribution_node_id,
+            match.confidence,
+            time.monotonic() - match_started_at,
         )
         target_node = next(
             (
@@ -441,6 +577,12 @@ async def expand_node_references(
             None,
         )
         if not match.matched or target_node is None or match.confidence < 0.45:
+            logger.info(
+                "[citation-expand:%s] reference_id=%s left unmatched elapsed=%.2fs",
+                trace_id,
+                reference.reference_id,
+                time.monotonic() - reference_started_at,
+            )
             results.append(
                 {
                     "reference_id": reference.reference_id,
@@ -476,6 +618,14 @@ async def expand_node_references(
         )
         graph.edges.append(edge)
         graph_changed = True
+        logger.info(
+            "[citation-expand:%s] reference_id=%s linked target_node_id=%s relation=%s elapsed=%.2fs",
+            trace_id,
+            reference.reference_id,
+            target_node.id,
+            match.relation_type,
+            time.monotonic() - reference_started_at,
+        )
         results.append(
             {
                 "reference_id": reference.reference_id,
@@ -490,8 +640,16 @@ async def expand_node_references(
         )
 
     if graph_changed:
+        logger.info("[citation-expand:%s] saving updated source graph", trace_id)
         await asyncio.to_thread(store.replace_graph, paper_id, graph)
     view_graph = await asyncio.to_thread(_materialize_cross_paper_contributions, graph, store)
+    logger.info(
+        "[citation-expand:%s] completed results=%s graph_changed=%s elapsed=%.2fs",
+        trace_id,
+        len(results),
+        graph_changed,
+        time.monotonic() - started_at,
+    )
     return {
         "paper_id": paper_id,
         "node_id": node_id,
@@ -778,6 +936,12 @@ def _author_year_reference_matches(reference: PaperReference, text: str) -> bool
 
 
 def _resolve_reference_metadata(reference: PaperReference) -> PaperReference:
+    # An arXiv identifier is already enough both to locate a cached graph and to
+    # download the paper. Avoid a redundant Semantic Scholar lookup here: this
+    # path runs immediately before recursive analysis and unauthenticated Graph
+    # API requests are commonly rate limited.
+    if reference.arxiv_id:
+        return reference
     enriched = _crossref_enrich(reference) or reference
     return _semantic_scholar_enrich(enriched) or enriched
 
@@ -913,14 +1077,61 @@ def _semantic_scholar_enrich(reference: PaperReference) -> PaperReference | None
         return None
 
 
-async def _expand_reference(reference: PaperReference, store: GraphStore) -> dict:
+async def _log_citation_heartbeat(
+    trace_id: str,
+    reference_id: str,
+    stage: str,
+    started_at: float,
+) -> None:
+    while True:
+        await asyncio.sleep(30)
+        logger.info(
+            "[citation-expand:%s] reference_id=%s stage=%s still running elapsed=%.2fs",
+            trace_id,
+            reference_id,
+            stage,
+            time.monotonic() - started_at,
+        )
+
+
+async def _expand_reference(
+    reference: PaperReference,
+    store: GraphStore,
+    *,
+    trace_id: str | None = None,
+) -> dict:
+    log_id = trace_id or reference.reference_id
+    started_at = time.monotonic()
+    logger.info(
+        "[citation-expand:%s] reference_id=%s recursive expansion entered",
+        log_id,
+        reference.reference_id,
+    )
     cached = await asyncio.to_thread(_find_cached_reference_graph, reference, store)
     if cached:
+        logger.info(
+            "[citation-expand:%s] reference_id=%s recursive cache hit paper_id=%s",
+            log_id,
+            reference.reference_id,
+            cached.get("paper_id"),
+        )
         return {"status": "cached", "paper_id": cached["paper_id"], "title": cached["title"]}
     if not reference.arxiv_id:
+        logger.info(
+            "[citation-expand:%s] reference_id=%s cannot download: no arXiv identifier",
+            log_id,
+            reference.reference_id,
+        )
         return {"status": "unavailable", "reason": "No arXiv identifier or downloadable PDF is known."}
 
     url = f"https://arxiv.org/pdf/{reference.arxiv_id}.pdf"
+    download_started_at = time.monotonic()
+    logger.info(
+        "[citation-expand:%s] reference_id=%s downloading arXiv PDF arxiv_id=%s timeout=40s",
+        log_id,
+        reference.reference_id,
+        reference.arxiv_id,
+    )
     try:
         async with httpx.AsyncClient(timeout=40, follow_redirects=True) as client:
             response = await client.get(url)
@@ -929,12 +1140,32 @@ async def _expand_reference(reference: PaperReference, store: GraphStore) -> dic
         logger.warning("arXiv PDF download failed for %s: %s", reference.reference_id, exc)
         return {"status": "unavailable", "reason": "arXiv PDF download failed."}
     data = response.content
+    logger.info(
+        "[citation-expand:%s] reference_id=%s arXiv PDF downloaded status=%s bytes=%s elapsed=%.2fs",
+        log_id,
+        reference.reference_id,
+        response.status_code,
+        len(data),
+        time.monotonic() - download_started_at,
+    )
     if not data.startswith(b"%PDF"):
+        logger.warning(
+            "[citation-expand:%s] reference_id=%s arXiv response is not a PDF bytes=%s",
+            log_id,
+            reference.reference_id,
+            len(data),
+        )
         return {"status": "unavailable", "reason": "Downloaded arXiv response was not a PDF."}
 
     with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(data)
         tmp_path = Path(tmp.name)
+    parse_started_at = time.monotonic()
+    logger.info(
+        "[citation-expand:%s] reference_id=%s parsing downloaded PDF",
+        log_id,
+        reference.reference_id,
+    )
     try:
         parsed = await asyncio.to_thread(PdfParser().parse, tmp_path)
     except Exception as exc:  # noqa: BLE001 - reference expansion should not break citation analysis
@@ -942,6 +1173,16 @@ async def _expand_reference(reference: PaperReference, store: GraphStore) -> dic
         return {"status": "failed", "reason": f"Failed to parse referenced PDF: {exc}"}
     finally:
         tmp_path.unlink(missing_ok=True)
+    logger.info(
+        "[citation-expand:%s] reference_id=%s PDF parsed paper_id=%s pages=%s blocks=%s references=%s elapsed=%.2fs",
+        log_id,
+        reference.reference_id,
+        parsed.paper_id,
+        len(parsed.pages),
+        len(parsed.source_blocks),
+        len(parsed.references),
+        time.monotonic() - parse_started_at,
+    )
 
     parsed.metadata.update(
         {
@@ -951,13 +1192,69 @@ async def _expand_reference(reference: PaperReference, store: GraphStore) -> dic
             "source_media_type": "application/pdf",
         }
     )
+    agent_started_at = time.monotonic()
+    logger.info(
+        "[citation-expand:%s] reference_id=%s starting graph agent paper_id=%s model=%s request_timeout=%ss",
+        log_id,
+        reference.reference_id,
+        parsed.paper_id,
+        settings.openai_model,
+        settings.llm_request_timeout_seconds,
+    )
+
+    async def log_agent_activity(activity: dict) -> None:
+        logger.info(
+            "[citation-expand:%s] reference_id=%s graph-agent kind=%s label=%s",
+            log_id,
+            reference.reference_id,
+            activity.get("kind"),
+            activity.get("label"),
+        )
+
+    agent_heartbeat = asyncio.create_task(
+        _log_citation_heartbeat(
+            log_id,
+            reference.reference_id,
+            "graph agent",
+            agent_started_at,
+        )
+    )
     try:
-        graph = await _analyze_and_build_graph(parsed)
+        graph = await _analyze_and_build_graph(parsed, log_agent_activity)
     except Exception as exc:  # noqa: BLE001 - reference expansion reports failures per reference
+        logger.exception(
+            "[citation-expand:%s] reference_id=%s graph agent failed elapsed=%.2fs",
+            log_id,
+            reference.reference_id,
+            time.monotonic() - agent_started_at,
+        )
         return {"status": "failed", "reason": str(exc)}
+    finally:
+        agent_heartbeat.cancel()
+        with suppress(asyncio.CancelledError):
+            await agent_heartbeat
+    logger.info(
+        "[citation-expand:%s] reference_id=%s graph agent finished nodes=%s edges=%s elapsed=%.2fs",
+        log_id,
+        reference.reference_id,
+        len(graph.nodes),
+        len(graph.edges),
+        time.monotonic() - agent_started_at,
+    )
+    logger.info(
+        "[citation-expand:%s] reference_id=%s saving analyzed paper and source document",
+        log_id,
+        reference.reference_id,
+    )
     await asyncio.to_thread(store.save_paper, parsed, graph)
     await asyncio.to_thread(
         store.save_source_document, parsed.paper_id, f"{reference.arxiv_id}.pdf", "application/pdf", data
+    )
+    logger.info(
+        "[citation-expand:%s] reference_id=%s recursive expansion saved elapsed=%.2fs",
+        log_id,
+        reference.reference_id,
+        time.monotonic() - started_at,
     )
     return {
         "status": "expanded",

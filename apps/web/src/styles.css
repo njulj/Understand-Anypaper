@@ -303,6 +303,76 @@ button:disabled {
   transition: width 0.18s ease;
 }
 
+.agent-activities {
+  display: grid;
+  gap: 7px;
+  max-height: 220px;
+  margin: 2px 0 0;
+  padding: 10px 0 0;
+  overflow: auto;
+  border-top: 1px solid var(--border);
+  list-style: none;
+}
+
+.agent-activity {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.agent-activity.thinking,
+.agent-activity.thought {
+  color: var(--muted);
+}
+
+.agent-activity.thinking svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.agent-activity-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  margin: 0 4px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.agent-activity-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-activity-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.agent-activity-cards small {
+  padding: 2px 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.agent-activity-cards .diff-card span:first-child {
+  color: var(--success);
+}
+
+.agent-activity-cards .diff-card span:last-child {
+  color: var(--danger);
+}
+
 .inspector-title {
   margin-top: 18px;
 }

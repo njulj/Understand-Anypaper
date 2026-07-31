@@ -111,6 +111,22 @@ export type UploadStageProgress = {
   semantic_unit_count?: number;
   node_count?: number;
   edge_count?: number;
+  activity?: AgentActivity;
+};
+
+export type AgentActivity = {
+  id: string;
+  kind: 'thinking' | 'thinking_done' | 'thought' | 'read' | 'edit' | 'shell';
+  label?: string;
+  path?: string;
+  start_line?: number;
+  end_line?: number;
+  command?: string;
+  duration_seconds?: number;
+  additions?: number;
+  deletions?: number;
+  problem_count?: number;
+  node_count?: number;
 };
 
 export type UploadPaperOptions = {

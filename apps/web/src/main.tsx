@@ -20,6 +20,7 @@ import {
   X,
 } from 'lucide-react';
 import {
+  AgentActivity,
   GraphNode,
   PaperArgumentGraph,
   GraphEdge,
@@ -185,6 +186,14 @@ function unitOwnerPriority(node: GraphNode, unitId: string): number {
   return 3;
 }
 
+function appendAgentActivity(current: AgentActivity[], activity: AgentActivity): AgentActivity[] {
+  if (activity.kind === 'thinking_done') {
+    return current.filter((item) => item.id !== activity.id);
+  }
+  const next = current.filter((item) => item.id !== activity.id && item.kind !== 'thinking');
+  return [...next, activity].slice(-12);
+}
+
 function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const blockRefs = useRef(new Map<string, HTMLElement>());
@@ -201,6 +210,7 @@ function App() {
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [agentActivities, setAgentActivities] = useState<AgentActivity[]>([]);
   const [message, setMessage] = useState('Upload a .txt, .md, or PDF to build a Paper Argument Graph.');
   const [editTitle, setEditTitle] = useState('');
   const [editSummary, setEditSummary] = useState('');
@@ -365,11 +375,6 @@ function App() {
   }, [sourceMode, documentInfo, selectedNodeId, unitById]);
 
   useEffect(() => {
-    if (!graph || !selectedNode || selectedNode.paper_id !== graph.paper_id) return;
-    void connectNodeReferences(selectedNode.id);
-  }, [graph?.paper_id, selectedNodeId]);
-
-  useEffect(() => {
     if (!graph) return;
     const editableNodes = graph.nodes.filter((node) => node.paper_id === graph.paper_id);
     const source =
@@ -460,12 +465,12 @@ function App() {
     revealNode(nodeId);
   }
 
-  async function connectNodeReferences(nodeId: string, force = false) {
+  async function connectNodeReferences(nodeId: string) {
     if (!graph) return;
     const sourceNode = graph.nodes.find((node) => node.id === nodeId);
     if (!sourceNode || sourceNode.paper_id !== graph.paper_id) return;
     const key = `${graph.paper_id}:${nodeId}`;
-    if (!force && referenceExpansionKeys.current.has(key)) return;
+    if (referenceExpansionKeys.current.has(key)) return;
     referenceExpansionKeys.current.add(key);
     setReferenceLoadingNodeId(nodeId);
     try {
@@ -481,15 +486,17 @@ function App() {
         setMessage(
           `Connected ${linked.length} citation${linked.length === 1 ? '' : 's'} to referenced contributions.`,
         );
-      } else if (force && expansion.results.length) {
+      } else if (expansion.results.length) {
         const reason = expansion.results.map((result) => result.reason).find(Boolean);
         setMessage(reason || 'No cited contribution could be matched confidently.');
+      } else {
+        setMessage('This node has no citation context to analyze.');
       }
     } catch (error) {
-      referenceExpansionKeys.current.delete(key);
       setStatus('error');
       setMessage(error instanceof Error ? error.message : 'Failed to resolve cited contributions.');
     } finally {
+      referenceExpansionKeys.current.delete(key);
       setReferenceLoadingNodeId((current) => (current === nodeId ? null : current));
     }
   }
@@ -527,6 +534,7 @@ function App() {
     if (!file) return;
     setStatus('uploading');
     setUploadProgress(0);
+    setAgentActivities([]);
     setMessage(`Uploading ${file.name}...`);
     try {
       const nextGraph = await uploadPaper(file, {
@@ -541,7 +549,10 @@ function App() {
         },
         onStageProgress: (progress) => {
           setUploadProgress(progress.progress);
-          setMessage(progress.message);
+          if (progress.event !== 'agent_activity') setMessage(progress.message);
+          if (progress.activity) {
+            setAgentActivities((current) => appendAgentActivity(current, progress.activity!));
+          }
         },
       });
       setUploadProgress(100);
@@ -869,6 +880,42 @@ function App() {
                 <span style={{ width: `${uploadProgress ?? 0}%` }} />
               </div>
             ) : null}
+            {status === 'uploading' && agentActivities.length ? (
+              <ol className="agent-activities" aria-label="Graph agent activity">
+                {agentActivities.map((activity) => (
+                  <li className={`agent-activity ${activity.kind}`} key={activity.id}>
+                    {activity.kind === 'thinking' ? (
+                      <Loader2 className="spin" size={14} />
+                    ) : activity.kind === 'thought' ? (
+                      <span aria-hidden="true">💡</span>
+                    ) : (
+                      <span className="agent-activity-dot" aria-hidden="true" />
+                    )}
+                    <span className="agent-activity-label">{activity.label}</span>
+                    {activity.kind === 'edit' ? (
+                      <span className="agent-activity-cards">
+                        <small className="diff-card">
+                          <span>+{activity.additions ?? 0}</span>{' '}
+                          <span>−{activity.deletions ?? 0}</span>
+                        </small>
+                        <small>{activity.problem_count ?? 0} Problems</small>
+                        <small>{activity.node_count ?? 0} Nodes</small>
+                      </span>
+                    ) : null}
+                    {activity.kind === 'read' && activity.start_line != null ? (
+                      <span className="agent-activity-cards">
+                        <small>
+                          L{activity.start_line}
+                          {activity.end_line != null && activity.end_line !== activity.start_line
+                            ? `–${activity.end_line}`
+                            : ''}
+                        </small>
+                      </span>
+                    ) : null}
+                  </li>
+                ))}
+              </ol>
+            ) : null}
           </div>
           {documentInfo && sourceMode === 'pages' ? (
             <div className="pdf-pages">
@@ -1053,7 +1100,7 @@ function App() {
                     <button
                       type="button"
                       className="subtle-inline-action"
-                      onClick={() => void connectNodeReferences(selectedNode.id, true)}
+                      onClick={() => void connectNodeReferences(selectedNode.id)}
                       disabled={referenceLoadingNodeId === selectedNode.id}
                     >
                       {referenceLoadingNodeId === selectedNode.id ? (
@@ -1061,7 +1108,7 @@ function App() {
                       ) : (
                         <Link2 size={13} />
                       )}
-                      Refresh
+                      Analyze citations
                     </button>
                   ) : null}
                 </div>
@@ -1072,7 +1119,7 @@ function App() {
                   </article>
                 ) : referenceLoadingNodeId === selectedNode.id ? (
                   <p className="muted citation-status">
-                    <Loader2 className="spin" size={14} /> Finding cited contributions…
+                    <Loader2 className="spin" size={14} /> Analyzing cited papers… this may take several minutes.
                   </p>
                 ) : crossPaperEdges.length ? (
                   crossPaperEdges.map((edge) => {
@@ -1098,7 +1145,7 @@ function App() {
                   })
                 ) : (
                   <p className="muted">
-                    No resolved citations for this node. Citation lookup runs when the node is selected.
+                    No resolved citations for this node. Select Analyze citations to process them on demand.
                   </p>
                 )}
               </section>
