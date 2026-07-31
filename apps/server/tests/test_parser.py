@@ -29,6 +29,9 @@ def test_parses_real_pdf_with_page_images(sample_pdf):
     assert len(parsed.references) == 3
     assert parsed.source_bytes
     assert parsed.source_media_type == "application/pdf"
+    assert parsed.source_blocks
+    assert parsed.source_blocks[0].block_id.startswith("p0001-b")
+    assert all(block.text for block in parsed.source_blocks)
 
 
 def test_unique_ids_across_papers(sample_txt):

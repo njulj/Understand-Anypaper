@@ -17,10 +17,8 @@ from pydantic import BaseModel, Field
 from understand_anypaper.analyzers.citation_contribution_matcher import (
     CitationContributionMatcher,
 )
-from understand_anypaper.analyzers.contribution_evidence_assigner import ContributionEvidenceAssigner
-from understand_anypaper.analyzers.semantic_unit_slicer import SemanticUnitSlicer
+from understand_anypaper.analyzers.paper_graph_agent import PaperGraphAgent
 from understand_anypaper.config import apply_desktop_api_overrides, settings
-from understand_anypaper.graph.graph_builder import PaperArgumentGraphBuilder
 from understand_anypaper.graph.graph_validator import GraphValidator
 from understand_anypaper.graph.schema import EdgeType, GraphEdge, GraphNode, NodeType, PaperArgumentGraph
 from understand_anypaper.parser.models import PaperReference, ParsedPaper, SemanticUnit
@@ -82,17 +80,8 @@ class GraphPatchRequest(BaseModel):
     operations: list[PatchOperation]
 
 
-async def _slice_semantic_units(parsed: ParsedPaper) -> list[SemanticUnit]:
-    units = await SemanticUnitSlicer().slice_semantic_units(parsed)
-    if not units:
-        raise RuntimeError("LLM semantic slicing returned no usable semantic units")
-    return units
-
-
 async def _analyze_and_build_graph(parsed: ParsedPaper) -> PaperArgumentGraph:
-    units = await _slice_semantic_units(parsed)
-    parsed.semantic_units = await ContributionEvidenceAssigner().assign(parsed, units)
-    return PaperArgumentGraphBuilder().build(parsed)
+    return await PaperGraphAgent().build(parsed)
 
 
 def _upload_progress_line(event: str, progress: int, message: str, **payload: object) -> str:
@@ -146,29 +135,19 @@ async def upload_paper(file: Annotated[UploadFile, File(...)]) -> StreamingRespo
                 page_count=len(parsed.pages),
             )
 
-            units = await _slice_semantic_units(parsed)
             yield _upload_progress_line(
-                "generated_semantic_units",
-                78,
-                "Generated semantic units.",
-                semantic_unit_count=len(units),
+                "started_graph_agent",
+                74,
+                "Started the graph authoring agent.",
             )
-
-            parsed.semantic_units = await ContributionEvidenceAssigner().assign(parsed, units)
-            yield _upload_progress_line(
-                "assigned_contribution_evidence",
-                86,
-                "Connected evidence to contributions.",
-                semantic_unit_count=len(parsed.semantic_units),
-            )
-
-            graph = PaperArgumentGraphBuilder().build(parsed)
+            graph = await _analyze_and_build_graph(parsed)
             yield _upload_progress_line(
                 "built_argument_graph",
                 94,
                 "Built the argument graph.",
                 node_count=len(graph.nodes),
                 edge_count=len(graph.edges),
+                semantic_unit_count=len(parsed.semantic_units),
             )
 
             store = get_store()
@@ -317,28 +296,6 @@ def get_node_evidence(node_id: str, paper_id: str | None = None) -> dict:
             "evidence": evidence,
         }
     raise HTTPException(status_code=404, detail="Node not found")
-
-
-@router.get("/content/{content_id}/assignments")
-def get_content_assignments(content_id: str) -> dict:
-    store = get_store()
-    assignments = []
-    for paper in store.list_papers():
-        graph = store.get_graph(paper["paper_id"])
-        if graph is None:
-            continue
-        assignments.extend(
-            {
-                "paper_id": graph.paper_id,
-                "contribution_id": edge.target_node_id,
-                "relation": edge.edge_type,
-                "confidence": edge.confidence,
-                "explanation": edge.inference_type,
-            }
-            for edge in graph.edges
-            if content_id in edge.semantic_unit_ids and edge.target_node_id.startswith("contribution-")
-        )
-    return {"content_id": content_id, "assignments": assignments}
 
 
 @router.post("/references/{reference_id}/resolve", response_model=PaperReference)
@@ -614,17 +571,6 @@ def search_graph(request: GraphSearchRequest) -> dict:
         if query in haystack:
             scored[node.id] = {"node": node, "score": 1.0 + haystack.count(query) * 0.1, "source": "lexical"}
 
-    nodes_by_id = {node.id: node for node in graph.nodes}
-    for node_id, similarity in get_store().vector_search(request.paper_id, request.query):
-        node = nodes_by_id.get(node_id)
-        if node is None or (request.node_types and node.node_type not in request.node_types):
-            continue
-        if node_id in scored:
-            scored[node_id]["score"] += similarity
-            scored[node_id]["source"] = "hybrid"
-        elif similarity > 0.35:
-            scored[node_id] = {"node": node, "score": similarity, "source": "vector"}
-
     matches = sorted(scored.values(), key=lambda item: item["score"], reverse=True)
     selected_ids = {item["node"].id for item in matches}
     for _ in range(request.expand_depth):
@@ -740,15 +686,7 @@ def _citation_contexts_for_node(
         exact_text = (
             citation_text.strip()
             if isinstance(citation_text, str) and citation_text.strip()
-            else (
-                unit.text.strip()
-                if unit.source_location.extraction_method in {
-                    "plain_text",
-                    "plain_text_anchors",
-                    "unresolved_text_anchors",
-                }
-                else unit.source_location.extracted_text.strip() or unit.text.strip()
-            )
+            else unit.source_location.extracted_text.strip() or unit.text.strip()
         )
         searchable = " ".join([*marker_strings, exact_text, unit.text])
         cited_numbers = _numeric_citation_numbers(searchable)

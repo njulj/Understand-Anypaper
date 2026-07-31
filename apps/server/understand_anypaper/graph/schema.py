@@ -1,5 +1,6 @@
 from enum import StrEnum
 from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -79,7 +80,7 @@ class GraphNode(BaseModel):
     semantic_unit_ids: list[str] = Field(default_factory=list)
     page_ranges: list[tuple[int, int]] = Field(default_factory=list)
     properties: dict[str, Any] = Field(default_factory=dict)
-    created_by: str = "pag-builder"
+    created_by: str = "paper-graph-agent"
     verified: bool = False
 
 

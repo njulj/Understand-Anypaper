@@ -13,7 +13,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from understand_anypaper.config import settings
 from understand_anypaper.graph.schema import GraphEdge, GraphNode, PaperArgumentGraph
 from understand_anypaper.parser.models import PageSourceLocation, PaperReference, ParsedPaper, SemanticUnit
-from understand_anypaper.retrieval.embeddings import EmbeddingClient
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +62,6 @@ class GraphStore(ABC):
 
     @abstractmethod
     def record_patch(self, paper_id: str, operations: list[dict]) -> str: ...
-
-    @abstractmethod
-    def vector_search(self, paper_id: str, query: str, limit: int = 10) -> list[tuple[str, float]]:
-        """Returns (node_id, similarity) pairs; empty when embeddings are unavailable."""
-
 
 class InMemoryGraphStore(GraphStore):
     def __init__(self) -> None:
@@ -143,10 +137,6 @@ class InMemoryGraphStore(GraphStore):
         patch_id = str(uuid4())
         self._patches.setdefault(paper_id, []).append({"id": patch_id, "operations": operations})
         return patch_id
-
-    def vector_search(self, paper_id: str, query: str, limit: int = 10) -> list[tuple[str, float]]:
-        return []
-
 
 class SQLiteGraphStore(GraphStore):
     def __init__(self, database_url: str) -> None:
@@ -606,17 +596,11 @@ class SQLiteGraphStore(GraphStore):
             )
         return patch_id
 
-    def vector_search(self, paper_id: str, query: str, limit: int = 10) -> list[tuple[str, float]]:
-        return []
-
-
 class PostgresGraphStore(GraphStore):
-    def __init__(self, engine: Engine, embeddings: EmbeddingClient | None = None) -> None:
+    def __init__(self, engine: Engine) -> None:
         self._engine = engine
-        self._embeddings = embeddings or EmbeddingClient()
 
     def save_paper(self, parsed: ParsedPaper, graph: PaperArgumentGraph) -> None:
-        node_embeddings = self._embed_nodes(graph.nodes)
         with self._engine.begin() as conn:
             conn.execute(
                 text(
@@ -653,7 +637,7 @@ class PostgresGraphStore(GraphStore):
                         "properties": json.dumps(unit.properties, default=str),
                     },
                 )
-            self._insert_nodes(conn, graph.nodes, node_embeddings)
+            self._insert_nodes(conn, graph.nodes)
             self._insert_edges(conn, graph.edges)
             for reference in parsed.references:
                 conn.execute(
@@ -808,11 +792,10 @@ class PostgresGraphStore(GraphStore):
         return PaperArgumentGraph(paper_id=paper_id, nodes=nodes, edges=edges)
 
     def replace_graph(self, paper_id: str, graph: PaperArgumentGraph) -> None:
-        node_embeddings = self._embed_nodes(graph.nodes)
         with self._engine.begin() as conn:
             conn.execute(text("DELETE FROM edges WHERE paper_id = :pid"), {"pid": paper_id})
             conn.execute(text("DELETE FROM nodes WHERE paper_id = :pid"), {"pid": paper_id})
-            self._insert_nodes(conn, graph.nodes, node_embeddings)
+            self._insert_nodes(conn, graph.nodes)
             self._insert_edges(conn, graph.edges)
 
     def get_semantic_units(self, paper_id: str) -> list[SemanticUnit]:
@@ -900,44 +883,15 @@ class PostgresGraphStore(GraphStore):
             )
         return patch_id
 
-    def vector_search(self, paper_id: str, query: str, limit: int = 10) -> list[tuple[str, float]]:
-        if not self._embeddings.available:
-            return []
-        vectors = self._embeddings.embed([query])
-        if not vectors:
-            return []
-        query_vector = "[" + ",".join(f"{value:.6f}" for value in vectors[0]) + "]"
-        with self._engine.connect() as conn:
-            rows = conn.execute(
-                text(
-                    "SELECT id, 1 - (embedding <=> CAST(:qvec AS vector)) AS similarity FROM nodes "
-                    "WHERE paper_id = :pid AND embedding IS NOT NULL "
-                    "ORDER BY embedding <=> CAST(:qvec AS vector) LIMIT :limit"
-                ),
-                {"qvec": query_vector, "pid": paper_id, "limit": limit},
-            )
-            return [(row[0], float(row[1])) for row in rows]
-
-    def _embed_nodes(self, nodes: list[GraphNode]) -> dict[str, str]:
-        if not self._embeddings.available or not nodes:
-            return {}
-        vectors = self._embeddings.embed([f"{node.title}\n{node.summary}" for node in nodes])
-        if not vectors:
-            return {}
-        return {
-            node.id: "[" + ",".join(f"{value:.6f}" for value in vector) + "]"
-            for node, vector in zip(nodes, vectors)
-        }
-
     @staticmethod
-    def _insert_nodes(conn, nodes: list[GraphNode], embeddings: dict[str, str]) -> None:
+    def _insert_nodes(conn, nodes: list[GraphNode]) -> None:
         for node in nodes:
             conn.execute(
                 text(
                     "INSERT INTO nodes (id, paper_id, node_type, title, summary, properties_json, semantic_unit_ids, "
-                    "page_ranges, confidence, source_type, created_by, verified, embedding) "
+                    "page_ranges, confidence, source_type, created_by, verified) "
                     "VALUES (:id, :pid, :node_type, :title, :summary, :properties, :semantic_unit_ids, :page_ranges, "
-                    ":confidence, :source_type, :created_by, :verified, CAST(:embedding AS vector))"
+                    ":confidence, :source_type, :created_by, :verified)"
                 ),
                 {
                     "id": node.id,
@@ -952,7 +906,6 @@ class PostgresGraphStore(GraphStore):
                     "source_type": node.source_type,
                     "created_by": node.created_by,
                     "verified": node.verified,
-                    "embedding": embeddings.get(node.id),
                 },
             )
 

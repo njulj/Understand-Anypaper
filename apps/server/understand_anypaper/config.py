@@ -14,8 +14,7 @@ class Settings(BaseSettings):
     recursion_max_papers: int = 5
     document_store_dir: str = "data/documents"
 
-    # LLM / embeddings. Empty api key disables semantic slicing and vector search;
-    # graph building requires semantic units from the LLM analyzer.
+    # LLM configuration. Graph building requires the graph-authoring agent.
     openai_api_key: str = Field(
         default="",
         validation_alias=AliasChoices("PAG_OPENAI_API_KEY", "OPENAI_API_KEY"),
@@ -27,11 +26,18 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     send_prompt_cache_key: bool = True
     llm_request_timeout_seconds: float = 600
-    embedding_model: str = "text-embedding-3-small"
-    embedding_dimensions: int = 1536
+    graph_agent_max_turns: int = 40
+    graph_agent_max_tool_calls: int = 120
+    graph_agent_shell_timeout_seconds: float = 30
+    graph_agent_shell_max_output_chars: int = 20000
     desktop_settings_path: str = ""
 
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="PAG_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="PAG_",
+        extra="ignore",
+        populate_by_name=True,
+    )
 
 
 settings = Settings()

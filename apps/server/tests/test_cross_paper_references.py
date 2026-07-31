@@ -4,7 +4,13 @@ from understand_anypaper.analyzers.citation_contribution_matcher import (
     CitationContributionMatchOutput,
 )
 from understand_anypaper.api import routes
-from understand_anypaper.graph.graph_builder import PaperArgumentGraphBuilder
+from understand_anypaper.graph.schema import (
+    EdgeType,
+    GraphEdge,
+    GraphNode,
+    NodeType,
+    PaperArgumentGraph,
+)
 from understand_anypaper.main import app
 from understand_anypaper.parser.models import (
     PageSourceLocation,
@@ -106,10 +112,86 @@ def _paper_pair() -> tuple[ParsedPaper, ParsedPaper]:
     return current, target
 
 
+def _graph_for(parsed: ParsedPaper) -> PaperArgumentGraph:
+    paper_node_id = f"paper-{parsed.paper_id}"
+    contribution = next(unit for unit in parsed.semantic_units if unit.role == "contribution")
+    facet_ids = {
+        NodeType.WHY: f"{contribution.semantic_unit_id}-why",
+        NodeType.HOW: f"{contribution.semantic_unit_id}-how",
+        NodeType.PROOF: f"{contribution.semantic_unit_id}-proof",
+    }
+    nodes = [
+        GraphNode(
+            id=paper_node_id,
+            paper_id=parsed.paper_id,
+            node_type=NodeType.PAPER,
+            title=parsed.title,
+        ),
+        GraphNode(
+            id=contribution.semantic_unit_id,
+            paper_id=parsed.paper_id,
+            node_type=NodeType.CONTRIBUTION,
+            title=contribution.title,
+            semantic_unit_ids=[contribution.semantic_unit_id],
+        ),
+        *[
+            GraphNode(
+                id=facet_id,
+                paper_id=parsed.paper_id,
+                node_type=facet_type,
+                title=facet_type.value,
+            )
+            for facet_type, facet_id in facet_ids.items()
+        ],
+    ]
+    edges = [
+        GraphEdge(
+            id=f"{paper_node_id}-contribution",
+            paper_id=parsed.paper_id,
+            source_node_id=paper_node_id,
+            target_node_id=contribution.semantic_unit_id,
+            edge_type=EdgeType.HAS_CONTRIBUTION,
+        ),
+        *[
+            GraphEdge(
+                id=f"{contribution.semantic_unit_id}-{facet_type.value.casefold()}",
+                paper_id=parsed.paper_id,
+                source_node_id=contribution.semantic_unit_id,
+                target_node_id=facet_id,
+                edge_type=EdgeType.CONTAINS,
+            )
+            for facet_type, facet_id in facet_ids.items()
+        ],
+    ]
+    for unit in parsed.semantic_units:
+        if unit.role == "contribution":
+            continue
+        nodes.append(
+            GraphNode(
+                id=unit.semantic_unit_id,
+                paper_id=parsed.paper_id,
+                node_type=NodeType.MODULE,
+                title=unit.title,
+                semantic_unit_ids=[unit.semantic_unit_id],
+            )
+        )
+        edges.append(
+            GraphEdge(
+                id=f"{facet_ids[NodeType.HOW]}-{unit.semantic_unit_id}",
+                paper_id=parsed.paper_id,
+                source_node_id=facet_ids[NodeType.HOW],
+                target_node_id=unit.semantic_unit_id,
+                edge_type=EdgeType.CONTAINS,
+                semantic_unit_ids=[unit.semantic_unit_id],
+            )
+        )
+    return PaperArgumentGraph(paper_id=parsed.paper_id, nodes=nodes, edges=edges)
+
+
 def test_node_reference_expansion_links_directly_to_external_contribution(monkeypatch):
     current, target = _paper_pair()
-    target_graph = PaperArgumentGraphBuilder().build(target)
-    current_graph = PaperArgumentGraphBuilder().build(current)
+    target_graph = _graph_for(target)
+    current_graph = _graph_for(current)
     target_contribution = next(
         node for node in target_graph.nodes if str(node.node_type) == "Contribution"
     )

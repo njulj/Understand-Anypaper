@@ -1,5 +1,3 @@
-CREATE EXTENSION IF NOT EXISTS vector;
-
 CREATE TABLE IF NOT EXISTS papers (
   id UUID PRIMARY KEY,
   title TEXT NOT NULL,
@@ -21,7 +19,6 @@ CREATE TABLE IF NOT EXISTS nodes (
   source_type TEXT NOT NULL,
   created_by TEXT NOT NULL,
   verified BOOLEAN NOT NULL DEFAULT false,
-  embedding vector,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

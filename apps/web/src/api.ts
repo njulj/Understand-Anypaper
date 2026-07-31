@@ -35,8 +35,9 @@ export type PageSourceSegment = {
   page: number;
   bbox: number[];
   extracted_text: string;
-  start_text: string;
-  end_text: string;
+  block_id: string;
+  start_offset: number;
+  end_offset: number;
   extraction_method: string;
 };
 

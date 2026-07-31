@@ -104,8 +104,9 @@ type SourceLocation struct {
 	Page             int             `json:"page"`
 	BBox             []float64       `json:"bbox"`
 	ExtractedText    string          `json:"extracted_text"`
-	StartText        string          `json:"start_text"`
-	EndText          string          `json:"end_text"`
+	BlockID          string          `json:"block_id"`
+	StartOffset      int             `json:"start_offset"`
+	EndOffset        int             `json:"end_offset"`
 	ExtractionMethod string          `json:"extraction_method"`
 	Segments         []SourceSegment `json:"segments"`
 }
@@ -114,8 +115,9 @@ type SourceSegment struct {
 	Page             int       `json:"page"`
 	BBox             []float64 `json:"bbox"`
 	ExtractedText    string    `json:"extracted_text"`
-	StartText        string    `json:"start_text"`
-	EndText          string    `json:"end_text"`
+	BlockID          string    `json:"block_id"`
+	StartOffset      int       `json:"start_offset"`
+	EndOffset        int       `json:"end_offset"`
 	ExtractionMethod string    `json:"extraction_method"`
 }
 

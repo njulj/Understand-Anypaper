@@ -5,7 +5,7 @@ import re
 from typing import TypeVar
 
 from agent_framework import Agent, Message
-from agent_framework.openai import OpenAIChatCompletionClient
+from agent_framework.openai import OpenAIChatClient, OpenAIChatCompletionClient
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
@@ -51,6 +51,38 @@ def create_chat_client(
         else {"x-session-id": session_id[:256]} if session_id else None
     )
     return OpenAIChatCompletionClient(
+        model=config.openai_model,
+        async_client=AsyncOpenAI(
+            api_key=config.openai_api_key,
+            base_url=config.openai_base_url,
+            default_headers=default_headers,
+            timeout=config.llm_request_timeout_seconds,
+            max_retries=0,
+        ),
+        default_headers=default_headers,
+    )
+
+
+def create_responses_client(
+    config: Settings = settings,
+    session_id: str | None = None,
+) -> OpenAIChatClient:
+    """Create Agent Framework's OpenAI Responses API client.
+
+    The graph agent uses the framework client as its provider boundary. Its raw
+    SDK handle is used only for custom-tool calls, which the current framework
+    release sends but does not yet surface back as invokable FunctionTool calls.
+    """
+    apply_desktop_api_overrides(config)
+    if not config.openai_api_key:
+        raise RuntimeError("OpenAI API key is not configured")
+
+    default_headers = (
+        None
+        if _is_openrouter(config.openai_base_url)
+        else {"x-session-id": session_id[:256]} if session_id else None
+    )
+    return OpenAIChatClient(
         model=config.openai_model,
         async_client=AsyncOpenAI(
             api_key=config.openai_api_key,

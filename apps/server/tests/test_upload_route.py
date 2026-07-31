@@ -4,6 +4,7 @@ import fitz
 from fastapi.testclient import TestClient
 
 from understand_anypaper.api import routes
+from understand_anypaper.graph.schema import GraphNode, NodeType, PaperArgumentGraph
 from understand_anypaper.main import app
 from understand_anypaper.parser.models import PageSourceLocation, SemanticUnit
 from understand_anypaper.storage import InMemoryGraphStore
@@ -34,22 +35,30 @@ def _unit(paper_id: str, unit_id: str, role: str, properties: dict | None = None
 
 
 def test_upload_paper_streams_progress_and_saves_graph(monkeypatch):
-    async def fake_slice(self, parsed):
-        return [
+    async def fake_build(self, parsed):
+        units = [
             _unit(parsed.paper_id, "unit-contribution", "contribution"),
             _unit(parsed.paper_id, "unit-method", "method"),
         ]
-
-    async def fake_assign(self, parsed, units):
-        return [
+        parsed.semantic_units = [
             units[0],
             units[1].model_copy(
                 update={"properties": {"contribution_unit_ids": ["unit-contribution"]}}
             ),
         ]
+        return PaperArgumentGraph(
+            paper_id=parsed.paper_id,
+            nodes=[
+                GraphNode(
+                    id=f"paper-{parsed.paper_id}",
+                    paper_id=parsed.paper_id,
+                    node_type=NodeType.PAPER,
+                    title=parsed.title,
+                )
+            ],
+        )
 
-    monkeypatch.setattr(routes.SemanticUnitSlicer, "slice_semantic_units", fake_slice)
-    monkeypatch.setattr(routes.ContributionEvidenceAssigner, "assign", fake_assign)
+    monkeypatch.setattr(routes.PaperGraphAgent, "build", fake_build)
     monkeypatch.setattr(routes, "_store", InMemoryGraphStore())
 
     with TestClient(app) as client:
@@ -63,8 +72,7 @@ def test_upload_paper_streams_progress_and_saves_graph(monkeypatch):
     assert [event["event"] for event in events] == [
         "upload_received",
         "rendered_pages",
-        "generated_semantic_units",
-        "assigned_contribution_evidence",
+        "started_graph_agent",
         "built_argument_graph",
         "saved_graph",
         "complete",
@@ -75,10 +83,10 @@ def test_upload_paper_streams_progress_and_saves_graph(monkeypatch):
 
 
 def test_upload_paper_reports_pipeline_errors_in_stream(monkeypatch):
-    async def failing_slice(self, parsed):
-        return None
+    async def failing_build(self, parsed):
+        raise RuntimeError("graph agent failed")
 
-    monkeypatch.setattr(routes.SemanticUnitSlicer, "slice_semantic_units", failing_slice)
+    monkeypatch.setattr(routes.PaperGraphAgent, "build", failing_build)
     monkeypatch.setattr(routes, "_store", InMemoryGraphStore())
 
     with TestClient(app) as client:
@@ -90,4 +98,4 @@ def test_upload_paper_reports_pipeline_errors_in_stream(monkeypatch):
     assert response.status_code == 200
     events = [json.loads(line) for line in response.text.strip().splitlines()]
     assert events[-1]["event"] == "error"
-    assert "semantic slicing" in events[-1]["message"]
+    assert "graph agent failed" in events[-1]["message"]

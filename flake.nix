@@ -16,17 +16,6 @@
       forAllSystems = nixpkgs.lib.genAttrs systems;
     in
     {
-      packages = forAllSystems (system:
-        let
-          pkgs = nixpkgs.legacyPackages.${system};
-        in
-        rec {
-          postgresql-pgvector = pkgs.postgresql_16.withPackages (ps: [
-            ps.pgvector
-          ]);
-          default = postgresql-pgvector;
-        });
-
       devShells = forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
