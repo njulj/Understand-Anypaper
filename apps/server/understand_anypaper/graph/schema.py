@@ -72,7 +72,7 @@ class EdgeType(StrEnum):
 class GraphNode(BaseModel):
     """A typed argument or evidence node extracted from one paper."""
 
-    id: str = Field(description="Graph-wide unique identifier for this node.")
+    id: str = Field(description="Identifier unique within the owning paper graph.")
     paper_id: str = Field(description="Identifier of the paper that owns this node.")
     node_type: NodeType = Field(description="Semantic role of the node in the argument graph.")
     title: str = Field(description="Short, concrete label displayed in the graph.")
@@ -119,9 +119,12 @@ class GraphNode(BaseModel):
 class GraphEdge(BaseModel):
     """A directed semantic relationship between two graph nodes."""
 
-    id: str = Field(description="Graph-wide unique identifier for this edge.")
-    paper_id: str = Field(description="Identifier of the paper graph that owns this edge.")
+    id: str = Field(description="Identifier unique within the source node's paper graph.")
+    source_paper_id: str = Field(
+        description="Identifier of the source node's paper and the graph that owns this edge."
+    )
     source_node_id: str = Field(description="Identifier of the edge's source node.")
+    target_paper_id: str = Field(description="Identifier of the target node's paper.")
     target_node_id: str = Field(description="Identifier of the edge's target node.")
     edge_type: EdgeType = Field(description="Semantic relationship from source to target.")
     confidence: float = Field(

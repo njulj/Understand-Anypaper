@@ -81,16 +81,18 @@ def _valid_graph() -> dict:
     edges = [
         {
             "id": "paper-contribution",
-            "paper_id": paper_id,
+            "source_paper_id": paper_id,
             "source_node_id": "paper",
+            "target_paper_id": paper_id,
             "target_node_id": "contribution",
             "edge_type": "HAS_CONTRIBUTION",
         },
         *[
             {
                 "id": f"contribution-{facet}",
-                "paper_id": paper_id,
+                "source_paper_id": paper_id,
                 "source_node_id": "contribution",
+                "target_paper_id": paper_id,
                 "target_node_id": facet,
                 "edge_type": "CONTAINS",
             }

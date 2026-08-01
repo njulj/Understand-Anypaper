@@ -468,7 +468,13 @@ class PdfParser:
     @staticmethod
     def _build_reference(index: int, marker: str | None, raw: str, prefix: str) -> PaperReference:
         raw = re.sub(r"\s+", " ", raw).strip()
-        year_match = _YEAR.search(raw)
+        parenthesized_years = list(re.finditer(r"\(((?:19|20)\d{2})[a-z]?\)", raw))
+        year_matches = list(_YEAR.finditer(raw))
+        year = (
+            int(parenthesized_years[-1].group(1))
+            if parenthesized_years
+            else (int(year_matches[-1].group(0)) if year_matches else None)
+        )
         doi_match = _DOI.search(raw)
         arxiv_match = _ARXIV.search(raw)
         title = None
@@ -496,7 +502,7 @@ class PdfParser:
             raw_text=raw,
             title=title,
             authors=authors,
-            year=int(year_match.group(0)) if year_match else None,
+            year=year,
             doi=doi_match.group(0).rstrip(".") if doi_match else None,
             arxiv_id=arxiv_match.group(1) if arxiv_match else None,
         )

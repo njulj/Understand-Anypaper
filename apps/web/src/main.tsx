@@ -31,13 +31,13 @@ import {
   SemanticUnit,
   deletePaper,
   documentPageImageUrl,
-  expandNodeReferences,
   fetchDocumentInfo,
   fetchExternalContributionSubgraph,
   fetchSemanticUnits,
   fetchGraph,
   listPapers,
   patchGraph,
+  streamNodeReferences,
   uploadPaper,
 } from './api';
 import { GraphView, NODE_COLORS } from './GraphView';
@@ -89,6 +89,104 @@ const DEFAULT_DESKTOP_SETUP: DesktopSetupInfo = {
   launcherSourcePath: '',
   initializedAt: '',
 };
+
+const CITATION_ANALYSIS_MODE = 'citation-analysis';
+const CITATION_PROGRESS_MODE = 'citation-progress';
+const CITATION_ANALYSIS_CHANNEL = 'understand-anypaper-citation-analysis';
+
+type AppLocation = {
+  paperId: string | null;
+  nodeId: string | null;
+  mode: string | null;
+  sourcePaperId?: string | null;
+  taskId?: string | null;
+};
+
+type CitationTaskSnapshot = {
+  taskId: string;
+  sourcePaperId: string;
+  sourceNodeId: string;
+  targetPaperId: string | null;
+  targetNodeId: string | null;
+  status: 'preparing' | 'analyzing' | 'complete' | 'error';
+  progress: number;
+  message: string;
+  activities: AgentActivity[];
+};
+
+function readAppLocation(): AppLocation {
+  const params = new URLSearchParams(window.location.search);
+  return {
+    paperId: params.get('paper'),
+    nodeId: params.get('node'),
+    mode: params.get('mode'),
+    sourcePaperId: params.get('source_paper'),
+    taskId: params.get('task'),
+  };
+}
+
+function appUrl(paperId: string, nodeId?: string | null, mode?: string | null): string {
+  const url = new URL(window.location.href);
+  url.search = '';
+  url.searchParams.set('paper', paperId);
+  if (nodeId) url.searchParams.set('node', nodeId);
+  if (mode) url.searchParams.set('mode', mode);
+  return url.toString();
+}
+
+function replaceAppLocation(paperId: string, nodeId?: string | null, mode?: string | null) {
+  window.history.replaceState({}, '', appUrl(paperId, nodeId, mode));
+}
+
+function citationProgressUrl(
+  task: CitationTaskSnapshot,
+): string {
+  const url = new URL(window.location.href);
+  url.search = '';
+  if (task.targetPaperId) url.searchParams.set('paper', task.targetPaperId);
+  url.searchParams.set('source_paper', task.sourcePaperId);
+  url.searchParams.set('node', task.sourceNodeId);
+  url.searchParams.set('task', task.taskId);
+  url.searchParams.set('mode', CITATION_PROGRESS_MODE);
+  return url.toString();
+}
+
+function citationTaskStorageKey(taskId: string): string {
+  return `understand-anypaper:citation-task:${taskId}`;
+}
+
+function saveCitationTask(task: CitationTaskSnapshot) {
+  try {
+    localStorage.setItem(citationTaskStorageKey(task.taskId), JSON.stringify(task));
+  } catch {
+    // BroadcastChannel still provides live progress when storage is unavailable.
+  }
+  if (typeof BroadcastChannel !== 'undefined') {
+    const channel = new BroadcastChannel(CITATION_ANALYSIS_CHANNEL);
+    channel.postMessage({ type: 'citation-task-progress', task });
+    channel.close();
+  }
+}
+
+function readCitationTask(taskId: string): CitationTaskSnapshot | null {
+  try {
+    const serialized = localStorage.getItem(citationTaskStorageKey(taskId));
+    if (!serialized) return null;
+    return JSON.parse(serialized) as CitationTaskSnapshot;
+  } catch {
+    return null;
+  }
+}
+
+function announceCitationAnalysisComplete(sourcePaperId: string) {
+  const payload = { type: 'citation-analysis-complete', sourcePaperId };
+  window.opener?.postMessage(payload, '*');
+  if (typeof BroadcastChannel !== 'undefined') {
+    const channel = new BroadcastChannel(CITATION_ANALYSIS_CHANNEL);
+    channel.postMessage(payload);
+    channel.close();
+  }
+}
 
 function isNavigationEdge(edge: GraphEdge): boolean {
   return edge.edge_type !== 'NEXT' && edge.edge_type !== 'PREVIOUS';
@@ -199,6 +297,9 @@ function App() {
   const blockRefs = useRef(new Map<string, HTMLElement>());
   const referenceExpansionKeys = useRef(new Set<string>());
   const externalExpansionKeys = useRef(new Set<string>());
+  const initialLocation = useRef<AppLocation>(readAppLocation());
+  const citationAnalysisStarted = useRef(false);
+  const citationProgressLoaded = useRef(false);
   const [papers, setPapers] = useState<PaperSummary[]>([]);
   const [graph, setGraph] = useState<PaperArgumentGraph | null>(null);
   const [semanticUnits, setSemanticUnits] = useState<SemanticUnit[]>([]);
@@ -208,9 +309,10 @@ function App() {
   const [graphFocusRevision, setGraphFocusRevision] = useState(0);
   const [focusedContributionId, setFocusedContributionId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  const [status, setStatus] = useState<'idle' | 'uploading' | 'ready' | 'error'>('idle');
+  const [status, setStatus] = useState<'idle' | 'uploading' | 'analyzing' | 'ready' | 'error'>('idle');
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [agentActivities, setAgentActivities] = useState<AgentActivity[]>([]);
+  const [citationTask, setCitationTask] = useState<CitationTaskSnapshot | null>(null);
   const [message, setMessage] = useState('Upload a .txt, .md, or PDF to build a Paper Argument Graph.');
   const [editTitle, setEditTitle] = useState('');
   const [editSummary, setEditSummary] = useState('');
@@ -224,7 +326,6 @@ function App() {
   const [newEdgeTargetId, setNewEdgeTargetId] = useState('');
   const [newEdgeType, setNewEdgeType] = useState('SUPPORTED_BY');
   const [newEdgeEvidenceId, setNewEdgeEvidenceId] = useState('');
-  const [referenceLoadingNodeId, setReferenceLoadingNodeId] = useState<string | null>(null);
   const [desktopSettingsOpen, setDesktopSettingsOpen] = useState(false);
   const [desktopSettingsSaving, setDesktopSettingsSaving] = useState(false);
   const [showDesktopApiKey, setShowDesktopApiKey] = useState(false);
@@ -330,12 +431,66 @@ function App() {
     listPapers()
       .then(async (existing) => {
         setPapers(existing);
-        if (existing.length) {
-          await loadPaper(existing[0].paper_id, `Restored “${existing[0].title}” from storage.`);
+        if (
+          initialLocation.current.mode === CITATION_ANALYSIS_MODE ||
+          initialLocation.current.mode === CITATION_PROGRESS_MODE
+        ) {
+          return;
+        }
+        const requestedPaper = initialLocation.current.paperId
+          ? existing.find((paper) => paper.paper_id === initialLocation.current.paperId)
+          : null;
+        const paper = requestedPaper ?? existing[0];
+        if (paper) {
+          await loadPaper(
+            paper.paper_id,
+            requestedPaper
+              ? `Loaded “${paper.title}” from URL.`
+              : `Restored “${paper.title}” from storage.`,
+            requestedPaper ? initialLocation.current.nodeId : null,
+          );
+          if (!requestedPaper) {
+            initialLocation.current = { paperId: paper.paper_id, nodeId: null, mode: null };
+            replaceAppLocation(paper.paper_id);
+          }
         }
       })
-      .catch(() => undefined);
+      .catch((error) => {
+        setStatus('error');
+        setMessage(error instanceof Error ? error.message : 'Failed to restore the requested paper.');
+      });
   }, []);
+
+  useEffect(() => {
+    const handleCompletion = (payload: unknown) => {
+      if (!payload || typeof payload !== 'object') return;
+      const event = payload as { type?: string; sourcePaperId?: string };
+      if (
+        event.type !== 'citation-analysis-complete' ||
+        !event.sourcePaperId ||
+        graph?.paper_id !== event.sourcePaperId ||
+        status === 'analyzing'
+      ) {
+        return;
+      }
+      void loadPaper(
+        event.sourcePaperId,
+        'Citation analysis completed in another tab. Refreshed cross-paper links.',
+        selectedNodeId,
+      );
+    };
+    const handleWindowMessage = (event: MessageEvent) => handleCompletion(event.data);
+    window.addEventListener('message', handleWindowMessage);
+    const channel =
+      typeof BroadcastChannel !== 'undefined'
+        ? new BroadcastChannel(CITATION_ANALYSIS_CHANNEL)
+        : null;
+    if (channel) channel.onmessage = (event) => handleCompletion(event.data);
+    return () => {
+      window.removeEventListener('message', handleWindowMessage);
+      channel?.close();
+    };
+  }, [graph?.paper_id, selectedNodeId, status]);
 
   useEffect(() => {
     if (!desktopBridge?.getApiConfig) return;
@@ -375,6 +530,89 @@ function App() {
   }, [sourceMode, documentInfo, selectedNodeId, unitById]);
 
   useEffect(() => {
+    const location = initialLocation.current;
+    const sourcePaperId = location.sourcePaperId ?? location.paperId;
+    if (
+      location.mode !== CITATION_ANALYSIS_MODE ||
+      citationAnalysisStarted.current ||
+      !sourcePaperId ||
+      !location.nodeId
+    ) {
+      return;
+    }
+    citationAnalysisStarted.current = true;
+    void runCitationAnalysis(sourcePaperId, location.nodeId);
+  }, []);
+
+  useEffect(() => {
+    const location = initialLocation.current;
+    if (location.mode !== CITATION_PROGRESS_MODE || !location.taskId) return;
+    const taskId = location.taskId;
+
+    const applyTask = (task: CitationTaskSnapshot) => {
+      if (task.taskId !== taskId) return;
+      setCitationTask(task);
+      setUploadProgress(task.progress);
+      setMessage(task.message);
+      setAgentActivities(task.activities);
+      if (task.status === 'error') {
+        setStatus('error');
+        return;
+      }
+      if (task.status !== 'complete' || !task.targetPaperId) {
+        setStatus('analyzing');
+        return;
+      }
+      if (citationProgressLoaded.current) return;
+      citationProgressLoaded.current = true;
+      initialLocation.current = {
+        paperId: task.targetPaperId,
+        sourcePaperId: null,
+        nodeId: task.targetNodeId,
+        mode: null,
+        taskId: null,
+      };
+      replaceAppLocation(task.targetPaperId, task.targetNodeId);
+      void loadPaper(
+        task.targetPaperId,
+        'Cited-paper analysis complete. Loaded the analyzed paper.',
+        task.targetNodeId,
+      );
+    };
+
+    const storedTask = readCitationTask(taskId);
+    if (storedTask) applyTask(storedTask);
+    else {
+      setStatus('analyzing');
+      setMessage('Waiting for cited-paper analysis progress.');
+    }
+
+    const channel =
+      typeof BroadcastChannel !== 'undefined'
+        ? new BroadcastChannel(CITATION_ANALYSIS_CHANNEL)
+        : null;
+    if (channel) {
+      channel.onmessage = (event) => {
+        const payload = event.data as { type?: string; task?: CitationTaskSnapshot };
+        if (payload.type === 'citation-task-progress' && payload.task) applyTask(payload.task);
+      };
+    }
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== citationTaskStorageKey(taskId) || !event.newValue) return;
+      try {
+        applyTask(JSON.parse(event.newValue) as CitationTaskSnapshot);
+      } catch {
+        // Ignore a partially written or malformed snapshot.
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => {
+      channel?.close();
+      window.removeEventListener('storage', handleStorage);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!graph) return;
     const editableNodes = graph.nodes.filter((node) => node.paper_id === graph.paper_id);
     const source =
@@ -389,7 +627,11 @@ function App() {
     setNewEdgeEvidenceId(evidence);
   }, [graph?.paper_id, selectedNodeId, unitById]);
 
-  async function loadPaper(paperId: string, readyMessage?: string) {
+  async function loadPaper(
+    paperId: string,
+    readyMessage?: string,
+    requestedNodeId?: string | null,
+  ) {
     const [nextGraph, nextSemanticUnits, nextDocumentInfo] = await Promise.all([
       fetchGraph(paperId),
       fetchSemanticUnits(paperId),
@@ -399,11 +641,13 @@ function App() {
     setSemanticUnits(nextSemanticUnits);
     setDocumentInfo(nextDocumentInfo);
     setSourceMode(nextDocumentInfo ? 'pages' : 'units');
-    setSelectedNodeId(nextGraph.nodes[0]?.id ?? null);
+    const requestedNode = requestedNodeId
+      ? nextGraph.nodes.find((node) => node.id === requestedNodeId)
+      : null;
+    setSelectedNodeId(requestedNode?.id ?? nextGraph.nodes[0]?.id ?? null);
     setFocusedContributionId(null);
     referenceExpansionKeys.current.clear();
     externalExpansionKeys.current.clear();
-    setReferenceLoadingNodeId(null);
     setStatus('ready');
     setUploadProgress(null);
     setMessage(readyMessage ?? `Graph ready: ${nextGraph.nodes.length} nodes, ${nextGraph.edges.length} edges.`);
@@ -417,7 +661,6 @@ function App() {
     setFocusedContributionId(null);
     referenceExpansionKeys.current.clear();
     externalExpansionKeys.current.clear();
-    setReferenceLoadingNodeId(null);
     setQuery('');
     setStatus('idle');
     setUploadProgress(null);
@@ -452,6 +695,10 @@ function App() {
       if (owner) setFocusedContributionId(owner);
     }
     setSelectedNodeId(nodeId);
+    if (node.paper_id === graph.paper_id && initialLocation.current.mode !== CITATION_ANALYSIS_MODE) {
+      initialLocation.current = { paperId: graph.paper_id, nodeId, mode: null };
+      replaceAppLocation(graph.paper_id, nodeId);
+    }
   }
 
   function returnToPaperOverview() {
@@ -465,16 +712,66 @@ function App() {
     revealNode(nodeId);
   }
 
-  async function connectNodeReferences(nodeId: string) {
-    if (!graph) return;
-    const sourceNode = graph.nodes.find((node) => node.id === nodeId);
-    if (!sourceNode || sourceNode.paper_id !== graph.paper_id) return;
-    const key = `${graph.paper_id}:${nodeId}`;
+  function openCitationProgressTab(task: CitationTaskSnapshot) {
+    if (!task.targetPaperId) return;
+    const analysisWindow = window.open(citationProgressUrl(task), '_blank');
+    if (!analysisWindow) {
+      setStatus('error');
+      setMessage('The browser blocked the citation-analysis tab. Allow pop-ups and try again.');
+      return;
+    }
+  }
+
+  async function runCitationAnalysis(paperId: string, nodeId: string) {
+    const key = `${paperId}:${nodeId}`;
     if (referenceExpansionKeys.current.has(key)) return;
     referenceExpansionKeys.current.add(key);
-    setReferenceLoadingNodeId(nodeId);
+    const taskId =
+      typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    let latestTask: CitationTaskSnapshot = {
+      taskId,
+      sourcePaperId: paperId,
+      sourceNodeId: nodeId,
+      targetPaperId: null,
+      targetNodeId: null,
+      status: 'preparing',
+      progress: 0,
+      message: 'Downloading and parsing cited papers.',
+      activities: [],
+    };
+
+    const updateTask = (changes: Partial<CitationTaskSnapshot>) => {
+      latestTask = { ...latestTask, ...changes };
+      setCitationTask(latestTask);
+      saveCitationTask(latestTask);
+    };
+
+    updateTask({});
+    setStatus('analyzing');
+    setUploadProgress(0);
+    setAgentActivities([]);
+    setMessage(latestTask.message);
     try {
-      const expansion = await expandNodeReferences(graph.paper_id, nodeId);
+      const expansion = await streamNodeReferences(paperId, nodeId, {
+        onStageProgress: (progress) => {
+          setUploadProgress(progress.progress);
+          if (progress.event !== 'agent_activity') setMessage(progress.message);
+          const activities = progress.activity
+            ? appendAgentActivity(latestTask.activities, progress.activity)
+            : latestTask.activities;
+          const targetPaperId = latestTask.targetPaperId ?? progress.target_paper_id ?? null;
+          updateTask({
+            targetPaperId,
+            status: targetPaperId ? 'analyzing' : 'preparing',
+            progress: progress.progress,
+            message: progress.message,
+            activities,
+          });
+          setAgentActivities(activities);
+        },
+      });
       setGraph((current) =>
         current?.paper_id === expansion.paper_id ? expansion.graph : current,
       );
@@ -482,7 +779,6 @@ function App() {
         ['linked', 'cached_link'].includes(result.status),
       );
       if (linked.length) {
-        setStatus('ready');
         setMessage(
           `Connected ${linked.length} citation${linked.length === 1 ? '' : 's'} to referenced contributions.`,
         );
@@ -492,12 +788,30 @@ function App() {
       } else {
         setMessage('This node has no citation context to analyze.');
       }
+      announceCitationAnalysisComplete(paperId);
+      const target = expansion.results.find((result) => result.target_paper_id);
+      setPapers(await listPapers());
+      const targetPaperId = target?.target_paper_id ?? latestTask.targetPaperId;
+      const targetNodeId = target?.target_node_id ?? null;
+      updateTask({
+        targetPaperId,
+        targetNodeId,
+        status: 'complete',
+        progress: 100,
+        message: targetPaperId
+          ? 'Cited-paper analysis complete. Open it in the progress tab.'
+          : 'Citation analysis finished without an analyzable cited paper.',
+      });
+      setStatus('ready');
+      setUploadProgress(100);
     } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Failed to resolve cited contributions.';
+      updateTask({ status: 'error', message: errorMessage });
       setStatus('error');
-      setMessage(error instanceof Error ? error.message : 'Failed to resolve cited contributions.');
+      setMessage(errorMessage);
     } finally {
       referenceExpansionKeys.current.delete(key);
-      setReferenceLoadingNodeId((current) => (current === nodeId ? null : current));
     }
   }
 
@@ -558,6 +872,8 @@ function App() {
       setUploadProgress(100);
       setMessage('Graph generated. Loading source locations...');
       await loadPaper(nextGraph.paper_id);
+      initialLocation.current = { paperId: nextGraph.paper_id, nodeId: null, mode: null };
+      replaceAppLocation(nextGraph.paper_id);
       setQuery('');
       setPapers(await listPapers());
     } catch (error) {
@@ -579,6 +895,8 @@ function App() {
       setPapers(result.papers);
       const nextPaper = result.papers[0];
       if (nextPaper) {
+        initialLocation.current = { paperId: nextPaper.paper_id, nodeId: null, mode: null };
+        replaceAppLocation(nextPaper.paper_id);
         await loadPaper(nextPaper.paper_id, `Deleted “${title}”.`);
       } else {
         clearPaperState(`Deleted “${title}”.`);
@@ -673,8 +991,9 @@ function App() {
     const evidenceUnit = newEdgeEvidenceId ? unitById.get(newEdgeEvidenceId) : null;
     const edge: GraphEdge = {
       id: `manual-edge-${graph.paper_id.slice(0, 8)}-${Date.now()}`,
-      paper_id: graph.paper_id,
+      source_paper_id: graph.paper_id,
       source_node_id: newEdgeSourceId,
+      target_paper_id: graph.paper_id,
       target_node_id: newEdgeTargetId,
       edge_type: newEdgeType,
       confidence: 1,
@@ -752,18 +1071,41 @@ function App() {
     if (!viewGraph) return [];
     return [...new Set(viewGraph.nodes.map((node) => node.node_type))];
   }, [viewGraph]);
+  const isBusy = status === 'uploading' || status === 'analyzing';
+  const isCitationAnalysisTask =
+    initialLocation.current.mode === CITATION_ANALYSIS_MODE ||
+    initialLocation.current.mode === CITATION_PROGRESS_MODE;
+  const selectedCitationTask =
+    citationTask &&
+    graph &&
+    selectedNodeId === citationTask.sourceNodeId &&
+    graph.paper_id === citationTask.sourcePaperId
+      ? citationTask
+      : null;
+  const citationIsPreparing = Boolean(
+    selectedCitationTask &&
+      selectedCitationTask.status === 'preparing' &&
+      !selectedCitationTask.targetPaperId,
+  );
 
   return (
     <main className="shell">
       <header className="toolbar">
         <div className="brand"><GitBranch size={22} /> Understand Anypaper</div>
         <div className="toolbar-actions">
-          {papers.length ? (
+          {papers.length && !isCitationAnalysisTask ? (
             <select
               className="paper-select"
               value={graph?.paper_id ?? ''}
+              disabled={isBusy}
               onChange={(event) => {
                 const paper = papers.find((item) => item.paper_id === event.target.value);
+                initialLocation.current = {
+                  paperId: event.target.value,
+                  nodeId: null,
+                  mode: null,
+                };
+                replaceAppLocation(event.target.value);
                 loadPaper(
                   event.target.value,
                   paper ? `Loaded “${paper.title}”.` : undefined,
@@ -785,9 +1127,13 @@ function App() {
             title="Add paper"
             aria-label="Add paper"
             onClick={() => fileInputRef.current?.click()}
-            disabled={status === 'uploading'}
+            disabled={isBusy}
           >
-            {status === 'uploading' ? <Loader2 className="spin" size={16} /> : <UploadCloud size={16} />}
+            {status === 'uploading' ? (
+              <Loader2 className="spin" size={16} />
+            ) : (
+              <UploadCloud size={16} />
+            )}
           </button>
           <button
             className="icon-action toolbar-icon-action danger-icon-action"
@@ -795,7 +1141,7 @@ function App() {
             title="Delete current paper"
             aria-label="Delete current paper"
             onClick={deleteCurrentPaper}
-            disabled={!graph || saving}
+            disabled={!graph || saving || isBusy}
           >
             <Trash2 size={16} />
           </button>
@@ -805,7 +1151,7 @@ function App() {
             title="API settings"
             aria-label="API settings"
             onClick={openDesktopSettings}
-            disabled={status === 'uploading' || saving}
+            disabled={isBusy || saving}
           >
             <Settings2 size={16} />
           </button>
@@ -859,7 +1205,7 @@ function App() {
           </div>
           <div className={`status-line ${status}`}>
             <div className="status-message">
-              {status === 'uploading' ? (
+              {isBusy ? (
                 <Loader2 className="spin" size={18} />
               ) : status === 'error' ? (
                 <AlertCircle size={18} />
@@ -868,11 +1214,11 @@ function App() {
               )}
               <span>{message}</span>
             </div>
-            {status === 'uploading' ? (
+            {isBusy ? (
               <div
                 className="upload-progress"
                 role="progressbar"
-                aria-label="Upload progress"
+                aria-label={status === 'analyzing' ? 'Citation analysis progress' : 'Upload progress'}
                 aria-valuemin={0}
                 aria-valuemax={100}
                 aria-valuenow={uploadProgress ?? 0}
@@ -880,10 +1226,13 @@ function App() {
                 <span style={{ width: `${uploadProgress ?? 0}%` }} />
               </div>
             ) : null}
-            {status === 'uploading' && agentActivities.length ? (
+            {isBusy && agentActivities.length ? (
               <ol className="agent-activities" aria-label="Graph agent activity">
                 {agentActivities.map((activity) => (
-                  <li className={`agent-activity ${activity.kind}`} key={activity.id}>
+                  <li
+                    className={`agent-activity agent-activity-${activity.kind}`}
+                    key={activity.id}
+                  >
                     {activity.kind === 'thinking' ? (
                       <Loader2 className="spin" size={14} />
                     ) : activity.kind === 'thought' ? (
@@ -1100,15 +1449,27 @@ function App() {
                     <button
                       type="button"
                       className="subtle-inline-action"
-                      onClick={() => void connectNodeReferences(selectedNode.id)}
-                      disabled={referenceLoadingNodeId === selectedNode.id}
+                      onClick={() => {
+                        if (selectedCitationTask?.targetPaperId) {
+                          openCitationProgressTab(selectedCitationTask);
+                        } else if (graph) {
+                          void runCitationAnalysis(graph.paper_id, selectedNode.id);
+                        }
+                      }}
+                      disabled={citationIsPreparing || (status === 'analyzing' && !selectedCitationTask)}
                     >
-                      {referenceLoadingNodeId === selectedNode.id ? (
+                      {citationIsPreparing ? (
                         <Loader2 className="spin" size={13} />
                       ) : (
                         <Link2 size={13} />
                       )}
-                      Analyze citations
+                      {citationIsPreparing
+                        ? 'Downloading cited paper…'
+                        : selectedCitationTask?.targetPaperId
+                          ? selectedCitationTask.status === 'complete'
+                            ? 'View cited paper'
+                            : 'Citation downloaded · View analysis progress'
+                          : 'Analyze citations'}
                     </button>
                   ) : null}
                 </div>
@@ -1117,10 +1478,6 @@ function App() {
                     <strong>{String(selectedNode.properties.target_paper_title || selectedNode.paper_id)}</strong>
                     <span>Contribution from a referenced paper. Its WHY / HOW / PROOF is loaded on demand.</span>
                   </article>
-                ) : referenceLoadingNodeId === selectedNode.id ? (
-                  <p className="muted citation-status">
-                    <Loader2 className="spin" size={14} /> Analyzing cited papers… this may take several minutes.
-                  </p>
                 ) : crossPaperEdges.length ? (
                   crossPaperEdges.map((edge) => {
                     const otherId =
@@ -1276,7 +1633,7 @@ function App() {
                     <article className="edge-item" key={edge.id}>
                       <div className="edge-item-header">
                         <strong>{edge.edge_type}</strong>
-                        {edge.paper_id === graph?.paper_id ? (
+                        {edge.source_paper_id === graph?.paper_id ? (
                           <button
                             type="button"
                             className="icon-action"

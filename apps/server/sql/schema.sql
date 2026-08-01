@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS papers (
 );
 
 CREATE TABLE IF NOT EXISTS nodes (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL,
   paper_id UUID NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
   node_type TEXT NOT NULL,
   title TEXT NOT NULL,
@@ -20,24 +20,31 @@ CREATE TABLE IF NOT EXISTS nodes (
   source_type TEXT NOT NULL,
   created_by TEXT NOT NULL,
   verified BOOLEAN NOT NULL DEFAULT false,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (paper_id, id)
 );
 
 CREATE TABLE IF NOT EXISTS edges (
-  id TEXT PRIMARY KEY,
-  paper_id UUID NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
-  source_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
-  target_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  id TEXT NOT NULL,
+  source_paper_id UUID NOT NULL,
+  source_node_id TEXT NOT NULL,
+  target_paper_id UUID NOT NULL,
+  target_node_id TEXT NOT NULL,
   edge_type TEXT NOT NULL,
   semantic_unit_ids TEXT[] NOT NULL DEFAULT '{}',
   confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
   inference_type TEXT NOT NULL DEFAULT 'direct_extraction',
   properties_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (source_paper_id, id),
+  FOREIGN KEY (source_paper_id, source_node_id)
+    REFERENCES nodes(paper_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (target_paper_id, target_node_id)
+    REFERENCES nodes(paper_id, id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS semantic_units (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL,
   paper_id UUID NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
   role TEXT NOT NULL,
   title TEXT NOT NULL,
@@ -46,7 +53,8 @@ CREATE TABLE IF NOT EXISTS semantic_units (
   confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
   created_by TEXT NOT NULL,
   properties_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (paper_id, id)
 );
 
 CREATE TABLE IF NOT EXISTS paper_references (

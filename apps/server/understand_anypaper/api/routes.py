@@ -4,10 +4,13 @@ import logging
 import re
 import time
 from contextlib import suppress
+from difflib import SequenceMatcher
+from functools import lru_cache
+from html import unescape
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Annotated, Literal
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse, urlunparse
 from uuid import uuid4
 
 import fitz
@@ -337,8 +340,7 @@ def resolve_reference(reference_id: str) -> PaperReference:
     reference = store.find_reference(reference_id)
     if reference is None:
         raise HTTPException(status_code=404, detail="Reference not found")
-    enriched = _crossref_enrich(reference) or reference
-    enriched = _semantic_scholar_enrich(enriched) or enriched
+    enriched = _resolve_reference_metadata(reference)
     if enriched != reference:
         store.update_reference(enriched)
     return enriched
@@ -371,6 +373,101 @@ async def expand_node_references(
     node_id: str,
     request: NodeReferenceExpansionRequest,
 ) -> dict:
+    return await _expand_node_references_impl(paper_id, node_id, request)
+
+
+@router.post("/papers/{paper_id}/nodes/{node_id}/references/expand/stream")
+async def stream_node_references(
+    paper_id: str,
+    node_id: str,
+    request: NodeReferenceExpansionRequest,
+) -> StreamingResponse:
+    async def progress_stream():
+        progress_queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+        async def report_progress(progress: dict) -> None:
+            await progress_queue.put(progress)
+
+        async def run_expansion() -> dict:
+            try:
+                return await _expand_node_references_impl(
+                    paper_id,
+                    node_id,
+                    request,
+                    on_progress=report_progress,
+                )
+            finally:
+                await progress_queue.put(None)
+
+        expansion_task = asyncio.create_task(run_expansion())
+        try:
+            while True:
+                progress = await progress_queue.get()
+                if progress is None:
+                    break
+                yield json.dumps(progress, ensure_ascii=False) + "\n"
+            expansion = await expansion_task
+            yield json.dumps(
+                {
+                    "event": "complete",
+                    "progress": 100,
+                    "message": "Citation analysis complete.",
+                    "expansion": expansion,
+                },
+                ensure_ascii=False,
+            ) + "\n"
+        except Exception as exc:  # noqa: BLE001 - preserve the NDJSON stream contract
+            logger.exception(
+                "Citation analysis stream failed paper_id=%s node_id=%s",
+                paper_id,
+                node_id,
+            )
+            yield json.dumps(
+                {
+                    "event": "error",
+                    "progress": 100,
+                    "message": f"Citation analysis failed: {exc}",
+                },
+                ensure_ascii=False,
+            ) + "\n"
+        finally:
+            if not expansion_task.done():
+                expansion_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await expansion_task
+
+    return StreamingResponse(progress_stream(), media_type="application/x-ndjson")
+
+
+async def _emit_citation_progress(
+    on_progress: AgentProgressCallback | None,
+    event: str,
+    progress: int,
+    message: str,
+    **payload: object,
+) -> None:
+    if on_progress is None:
+        return
+    try:
+        await on_progress(
+            {
+                "event": event,
+                "progress": max(0, min(100, progress)),
+                "message": message,
+                **payload,
+            }
+        )
+    except Exception:  # noqa: BLE001 - progress reporting must not stop citation analysis
+        logger.exception("Failed to report citation analysis progress")
+
+
+async def _expand_node_references_impl(
+    paper_id: str,
+    node_id: str,
+    request: NodeReferenceExpansionRequest,
+    *,
+    on_progress: AgentProgressCallback | None = None,
+) -> dict:
     """Resolve a node's citations directly to contributions in referenced papers."""
     trace_id = f"{paper_id[:8]}:{node_id}:{uuid4().hex[:8]}"
     started_at = time.monotonic()
@@ -380,6 +477,14 @@ async def expand_node_references(
         paper_id,
         node_id,
         request.depth,
+    )
+    await _emit_citation_progress(
+        on_progress,
+        "started",
+        2,
+        "Finding citation contexts for the selected node.",
+        source_paper_id=paper_id,
+        source_node_id=node_id,
     )
     store = get_store()
     graph = await asyncio.to_thread(_get_graph, paper_id)
@@ -396,6 +501,13 @@ async def expand_node_references(
         len(scheduled_contexts),
         settings.recursion_max_papers,
     )
+    await _emit_citation_progress(
+        on_progress,
+        "contexts_found",
+        5,
+        f"Found {len(scheduled_contexts)} cited paper context(s) to analyze.",
+        reference_count=len(scheduled_contexts),
+    )
     policy = TraversalPolicy(
         max_depth=min(request.depth, settings.recursion_max_depth),
         max_papers=settings.recursion_max_papers,
@@ -407,6 +519,8 @@ async def expand_node_references(
     for context_index, context in enumerate(scheduled_contexts, start=1):
         reference_started_at = time.monotonic()
         reference: PaperReference = context["reference"]
+        slot_start = 5 + round(((context_index - 1) / len(scheduled_contexts)) * 85)
+        slot_end = 5 + round((context_index / len(scheduled_contexts)) * 85)
         logger.info(
             "[citation-expand:%s] reference %s/%s started reference_id=%s marker=%s arxiv_id=%s doi=%s",
             trace_id,
@@ -417,11 +531,22 @@ async def expand_node_references(
             reference.arxiv_id,
             reference.doi,
         )
+        await _emit_citation_progress(
+            on_progress,
+            "reference_started",
+            slot_start,
+            f"Analyzing cited paper {context_index} of {len(scheduled_contexts)}.",
+            reference_id=reference.reference_id,
+            reference_marker=reference.marker,
+            reference_index=context_index,
+            reference_count=len(scheduled_contexts),
+        )
         existing = next(
             (
                 edge
                 for edge in graph.edges
-                if edge.source_node_id == source_node.id
+                if edge.source_paper_id == paper_id
+                and edge.source_node_id == source_node.id
                 and edge.properties.get("cross_paper") is True
                 and edge.properties.get("reference_id") == reference.reference_id
             ),
@@ -434,11 +559,20 @@ async def expand_node_references(
                 reference.reference_id,
                 time.monotonic() - reference_started_at,
             )
+            await _emit_citation_progress(
+                on_progress,
+                "reference_cached",
+                slot_end,
+                "Reused an existing contribution link.",
+                reference_id=reference.reference_id,
+                target_paper_id=existing.target_paper_id,
+                target_node_id=existing.target_node_id,
+            )
             results.append(
                 {
                     "reference_id": reference.reference_id,
                     "status": "cached_link",
-                    "target_paper_id": existing.properties.get("target_paper_id"),
+                    "target_paper_id": existing.target_paper_id,
                     "target_node_id": existing.target_node_id,
                     "relation_type": str(existing.edge_type),
                     "confidence": existing.confidence,
@@ -459,6 +593,13 @@ async def expand_node_references(
                 reference.reference_id,
             )
             metadata_started_at = time.monotonic()
+            await _emit_citation_progress(
+                on_progress,
+                "resolving_metadata",
+                slot_start + round((slot_end - slot_start) * 0.08),
+                "Resolving cited-paper metadata.",
+                reference_id=reference.reference_id,
+            )
             enriched = await asyncio.to_thread(_resolve_reference_metadata, reference)
             logger.info(
                 "[citation-expand:%s] reference_id=%s metadata resolved elapsed=%.2fs arxiv_id=%s doi=%s changed=%s",
@@ -495,7 +636,14 @@ async def expand_node_references(
                 trace_id,
                 reference.reference_id,
             )
-            expansion = await _expand_reference(reference, store, trace_id=trace_id)
+            expansion = await _expand_reference(
+                reference,
+                store,
+                trace_id=trace_id,
+                on_progress=on_progress,
+                progress_start=slot_start,
+                progress_end=slot_end,
+            )
         else:
             expansion = {"status": "unavailable", "reason": "Traversal policy limit reached."}
         logger.info(
@@ -539,6 +687,15 @@ async def expand_node_references(
             len(target_contributions),
         )
         match_started_at = time.monotonic()
+        await _emit_citation_progress(
+            on_progress,
+            "matching_contribution",
+            slot_start + round((slot_end - slot_start) * 0.9),
+            "Matching the citation context to a contribution in the cited paper.",
+            reference_id=reference.reference_id,
+            target_paper_id=target_paper_id,
+            candidate_count=len(target_contributions),
+        )
         match_heartbeat = asyncio.create_task(
             _log_citation_heartbeat(
                 trace_id,
@@ -583,20 +740,30 @@ async def expand_node_references(
                 reference.reference_id,
                 time.monotonic() - reference_started_at,
             )
+            await _emit_citation_progress(
+                on_progress,
+                "reference_unmatched",
+                slot_end,
+                "The cited paper was analyzed, but no contribution matched confidently.",
+                reference_id=reference.reference_id,
+                target_paper_id=target_paper_id,
+            )
             results.append(
                 {
                     "reference_id": reference.reference_id,
                     "status": "unmatched",
                     "reason": match.rationale,
                     "confidence": match.confidence,
+                    "target_paper_id": target_paper_id,
                 }
             )
             continue
 
         edge = GraphEdge(
             id=f"edge-cross-paper-{uuid4()}",
-            paper_id=paper_id,
+            source_paper_id=paper_id,
             source_node_id=source_node.id,
+            target_paper_id=target_paper_id,
             target_node_id=target_node.id,
             edge_type=EdgeType(match.relation_type),
             confidence=match.confidence,
@@ -608,9 +775,6 @@ async def expand_node_references(
                 "reference_id": reference.reference_id,
                 "reference_marker": reference.marker,
                 "reference_raw_text": reference.raw_text,
-                "source_paper_id": paper_id,
-                "target_paper_id": target_paper_id,
-                "target_node_id": target_node.id,
                 "target_paper_title": target_title,
                 "target_contribution_title": target_node.title,
                 "match_rationale": match.rationale,
@@ -625,6 +789,15 @@ async def expand_node_references(
             target_node.id,
             match.relation_type,
             time.monotonic() - reference_started_at,
+        )
+        await _emit_citation_progress(
+            on_progress,
+            "reference_linked",
+            slot_end,
+            f"Linked citation to contribution: {target_node.title}",
+            reference_id=reference.reference_id,
+            target_paper_id=target_paper_id,
+            target_node_id=target_node.id,
         )
         results.append(
             {
@@ -641,6 +814,12 @@ async def expand_node_references(
 
     if graph_changed:
         logger.info("[citation-expand:%s] saving updated source graph", trace_id)
+        await _emit_citation_progress(
+            on_progress,
+            "saving_links",
+            95,
+            "Saving cross-paper contribution links.",
+        )
         await asyncio.to_thread(store.replace_graph, paper_id, graph)
     view_graph = await asyncio.to_thread(_materialize_cross_paper_contributions, graph, store)
     logger.info(
@@ -649,6 +828,13 @@ async def expand_node_references(
         len(results),
         graph_changed,
         time.monotonic() - started_at,
+    )
+    await _emit_citation_progress(
+        on_progress,
+        "finished",
+        98,
+        "Citation links are ready.",
+        result_count=len(results),
     )
     return {
         "paper_id": paper_id,
@@ -671,7 +857,7 @@ def get_external_contribution_subgraph(
     allowed = any(
         edge.target_node_id == contribution_node_id
         and edge.properties.get("cross_paper") is True
-        and edge.properties.get("target_paper_id") == target_paper_id
+        and edge.target_paper_id == target_paper_id
         for edge in current_graph.edges
     )
     if not allowed:
@@ -806,7 +992,8 @@ def _apply_patch_operation(graph: PaperArgumentGraph, operation: PatchOperation)
         node_ids = {node.id for node in graph.nodes}
         if operation.edge.source_node_id not in node_ids or operation.edge.target_node_id not in node_ids:
             raise HTTPException(status_code=422, detail="Edge endpoints must exist in the graph")
-        operation.edge.paper_id = graph.paper_id
+        operation.edge.source_paper_id = graph.paper_id
+        operation.edge.target_paper_id = graph.paper_id
         graph.edges.append(operation.edge)
     elif operation.op == "update_edge":
         edge = next((e for e in graph.edges if e.id == operation.id), None)
@@ -943,6 +1130,11 @@ def _resolve_reference_metadata(reference: PaperReference) -> PaperReference:
     if reference.arxiv_id:
         return reference
     enriched = _crossref_enrich(reference) or reference
+    # A DOI is sufficient for OpenAlex, while a title is sufficient for the
+    # official venue + DBLP lookup. Do not make either path depend on Semantic
+    # Scholar, whose unauthenticated API is commonly rate limited.
+    if enriched.doi or enriched.title:
+        return enriched
     return _semantic_scholar_enrich(enriched) or enriched
 
 
@@ -973,13 +1165,12 @@ def _materialize_cross_paper_contributions(
     store: GraphStore,
 ) -> PaperArgumentGraph:
     nodes = list(graph.nodes)
-    known_node_ids = {node.id for node in nodes}
+    known_node_keys = {(node.paper_id, node.id) for node in nodes}
     for edge in graph.edges:
-        if edge.properties.get("cross_paper") is not True or edge.target_node_id in known_node_ids:
+        target_key = (edge.target_paper_id, edge.target_node_id)
+        if edge.properties.get("cross_paper") is not True or target_key in known_node_keys:
             continue
-        target_paper_id = edge.properties.get("target_paper_id")
-        if not isinstance(target_paper_id, str):
-            continue
+        target_paper_id = edge.target_paper_id
         target_graph = store.get_graph(target_paper_id)
         if target_graph is None:
             continue
@@ -997,33 +1188,56 @@ def _materialize_cross_paper_contributions(
             edge.properties.get("target_paper_title") or _paper_title(target_paper_id, store)
         )
         nodes.append(_externalize_node(target_node, target_title, str(edge.edge_type)))
-        known_node_ids.add(target_node.id)
+        known_node_keys.add(target_key)
     return graph.model_copy(update={"nodes": nodes})
 
 
 def _crossref_enrich(reference: PaperReference) -> PaperReference | None:
     """Best-effort metadata enrichment via Crossref. Returns None when unavailable."""
     try:
+        headers = {"User-Agent": "Understand-AnyPaper/1.0"}
         if reference.doi:
-            response = httpx.get(f"https://api.crossref.org/works/{reference.doi}", timeout=8)
+            response = _http_get_with_retry(
+                f"https://api.crossref.org/works/{reference.doi}",
+                timeout=8,
+                headers=headers,
+            )
         else:
             query = reference.title or re.sub(r"\[\d+\]", "", reference.raw_text)[:200]
-            response = httpx.get(
+            response = _http_get_with_retry(
                 "https://api.crossref.org/works",
                 params={"query.bibliographic": query, "rows": 1},
                 timeout=8,
+                headers=headers,
             )
-        response.raise_for_status()
         payload = response.json()["message"]
         item = payload["items"][0] if "items" in payload else payload
         if not item:
             return None
-        updated = reference.model_copy()
         titles = item.get("title") or []
+        issued = (item.get("issued", {}).get("date-parts") or [[None]])[0][0]
+        if not reference.doi:
+            if reference.title and titles and not _titles_match(reference.title, titles[0]):
+                logger.info(
+                    "Crossref rejected title mismatch for %s: expected=%r candidate=%r",
+                    reference.reference_id,
+                    reference.title,
+                    titles[0],
+                )
+                return None
+            if reference.year and issued and abs(reference.year - int(issued)) > 1:
+                logger.info(
+                    "Crossref rejected year mismatch for %s: expected=%s candidate=%s",
+                    reference.reference_id,
+                    reference.year,
+                    issued,
+                )
+                return None
+
+        updated = reference.model_copy()
         if titles:
             updated.title = titles[0]
         updated.doi = item.get("DOI", updated.doi)
-        issued = (item.get("issued", {}).get("date-parts") or [[None]])[0][0]
         if issued:
             updated.year = int(issued)
         authors = [
@@ -1077,6 +1291,468 @@ def _semantic_scholar_enrich(reference: PaperReference) -> PaperReference | None
         return None
 
 
+def _http_get_with_retry(url: str, **kwargs) -> httpx.Response:
+    """Retry short-lived catalogue failures without hiding permanent client errors."""
+    for attempt in range(3):
+        try:
+            response = httpx.get(url, **kwargs)
+            response.raise_for_status()
+            return response
+        except httpx.HTTPError as exc:
+            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            retryable = status == 429 or (status is not None and status >= 500) or status is None
+            if not retryable or attempt == 2:
+                raise
+            time.sleep(0.5 * (2**attempt))
+    raise RuntimeError("unreachable")
+
+
+def _openalex_pdf_urls(reference: PaperReference) -> list[str]:
+    """Resolve direct open-access PDF candidates for a DOI via OpenAlex."""
+    if not reference.doi:
+        return []
+
+    doi = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", reference.doi, flags=re.I)
+    work_id = quote(f"doi:{doi.strip()}", safe=":/")
+    params: dict[str, str] = {
+        "select": "best_oa_location,locations,primary_location,open_access",
+    }
+    if settings.openalex_api_key:
+        params["api_key"] = settings.openalex_api_key
+
+    try:
+        response = httpx.get(
+            f"https://api.openalex.org/works/{work_id}",
+            params=params,
+            timeout=10,
+            headers={"User-Agent": "Understand-AnyPaper/1.0"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        logger.warning("OpenAlex PDF resolution failed for %s: %s", reference.reference_id, exc)
+        return []
+    if not isinstance(payload, dict):
+        logger.warning("OpenAlex returned an invalid work payload for %s", reference.reference_id)
+        return []
+
+    candidates: list[str] = []
+
+    def add_location(location: object, *, require_open_access: bool = True) -> None:
+        if not isinstance(location, dict):
+            return
+        if require_open_access and location.get("is_oa") is not True:
+            return
+        pdf_url = location.get("pdf_url")
+        if isinstance(pdf_url, str):
+            candidates.append(pdf_url)
+
+    # best_oa_location is OpenAlex's preferred OA copy. Other locations are
+    # retained as fallbacks because repositories occasionally return stale URLs.
+    add_location(payload.get("best_oa_location"), require_open_access=False)
+    for location in payload.get("locations") or []:
+        add_location(location)
+    add_location(payload.get("primary_location"))
+
+    open_access = payload.get("open_access")
+    if isinstance(open_access, dict) and open_access.get("is_oa") is True:
+        oa_url = open_access.get("oa_url")
+        if isinstance(oa_url, str):
+            candidates.append(oa_url)
+
+    normalized: list[str] = []
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if not candidate.startswith(("http://", "https://")):
+            continue
+        arxiv_match = re.match(
+            r"https?://(?:export\.)?arxiv\.org/abs/([^?#]+)", candidate, flags=re.I
+        )
+        if arxiv_match:
+            candidate = f"https://arxiv.org/pdf/{arxiv_match.group(1)}.pdf"
+        if candidate not in normalized:
+            normalized.append(candidate)
+    return normalized[:6]
+
+
+def _titles_match(left: str, right: str) -> bool:
+    """Conservatively match a citation title to a catalogue result."""
+    compact_left = re.sub(r"\W+", "", unescape(left)).casefold()
+    compact_right = re.sub(r"\W+", "", unescape(right)).casefold()
+    if compact_left and compact_left == compact_right:
+        return True
+    normalized_left = _normalize_title(left)
+    normalized_right = _normalize_title(right)
+    if not normalized_left or not normalized_right:
+        return False
+    if normalized_left == normalized_right:
+        return True
+    shorter, longer = sorted((normalized_left, normalized_right), key=len)
+    if len(shorter.split()) >= 5 and shorter in longer:
+        return True
+    left_tokens = set(normalized_left.split())
+    right_tokens = set(normalized_right.split())
+    token_overlap = len(left_tokens & right_tokens) / max(len(left_tokens | right_tokens), 1)
+    return token_overlap >= 0.9 and SequenceMatcher(
+        None, normalized_left, normalized_right
+    ).ratio() >= 0.94
+
+
+def _reference_http_urls(reference: PaperReference) -> list[str]:
+    text = unescape(" ".join(filter(None, (reference.raw_text, reference.title))))
+    urls: list[str] = []
+    for match in re.findall(r"https?://[^\s<>\"'\]]+", text, flags=re.I):
+        candidate = match.rstrip(".,;:)}]")
+        if candidate not in urls:
+            urls.append(candidate)
+    return urls
+
+
+def _dblp_publication_urls(reference: PaperReference) -> list[str]:
+    """Find exact-title publication landing pages via DBLP's public search API."""
+    if not reference.title:
+        return []
+    query_title = re.sub(r"(?<=\w)-\s+(?=\w)", "-", reference.title)
+    first_author = reference.authors[0] if reference.authors else ""
+    query = " ".join(part for part in (query_title, first_author) if part)
+    try:
+        response = _http_get_with_retry(
+            "https://dblp.org/search/publ/api",
+            params={"q": query, "format": "json", "h": "20"},
+            timeout=10,
+            headers={"User-Agent": "Understand-AnyPaper/1.0"},
+        )
+        hits = response.json().get("result", {}).get("hits", {}).get("hit", [])
+    except (httpx.HTTPError, AttributeError, ValueError, TypeError) as exc:
+        logger.warning("DBLP venue resolution failed for %s: %s", reference.reference_id, exc)
+        return []
+    if isinstance(hits, dict):
+        hits = [hits]
+    if not isinstance(hits, list):
+        return []
+
+    matches: list[tuple[int, dict]] = []
+    for hit in hits:
+        info = hit.get("info") if isinstance(hit, dict) else None
+        if not isinstance(info, dict) or not _titles_match(
+            reference.title, str(info.get("title", ""))
+        ):
+            continue
+        year_score = 0
+        try:
+            result_year = int(info.get("year"))
+            if reference.year is not None:
+                year_score = max(0, 2 - abs(result_year - reference.year))
+        except (TypeError, ValueError):
+            pass
+        matches.append((year_score, info))
+    matches.sort(key=lambda item: item[0], reverse=True)
+
+    urls: list[str] = []
+    for _score, info in matches[:3]:
+        external = info.get("ee") or []
+        if isinstance(external, str):
+            external = [external]
+        if isinstance(external, list):
+            urls.extend(url for url in external if isinstance(url, str))
+        doi = info.get("doi")
+        if isinstance(doi, str):
+            urls.append(f"https://doi.org/{doi}")
+    return list(dict.fromkeys(urls))
+
+
+def _acl_anthology_pdf_url(candidate: str) -> str | None:
+    parsed = urlparse(candidate)
+    host = parsed.netloc.casefold().split(":", 1)[0]
+    path = unquote(parsed.path).strip("/")
+    if host in {"doi.org", "dx.doi.org"}:
+        match = re.match(r"10\.18653/v1/(.+)", path, flags=re.I)
+        if not match:
+            return None
+        path = match.group(1)
+    elif host not in {"aclanthology.org", "www.aclanthology.org"}:
+        return None
+    if not path or path.startswith(("info/", "search/", "people/", "events/", "volumes/")):
+        return None
+    if path.casefold().endswith(".pdf"):
+        return f"https://aclanthology.org/{path}"
+    return f"https://aclanthology.org/{path.rstrip('/')}.pdf"
+
+
+def _cvf_pdf_url(candidate: str) -> str | None:
+    parsed = urlparse(candidate)
+    if parsed.netloc.casefold().split(":", 1)[0] != "openaccess.thecvf.com":
+        return None
+    path = parsed.path
+    if path.casefold().endswith(".pdf"):
+        pdf_path = path
+    elif "/html/" in path and path.casefold().endswith(".html"):
+        pdf_path = path.replace("/html/", "/papers/", 1)[:-5] + ".pdf"
+    else:
+        return None
+    return urlunparse(("https", "openaccess.thecvf.com", pdf_path, "", "", ""))
+
+
+def _html_anchors(document: str) -> list[tuple[str, str]]:
+    anchors: list[tuple[str, str]] = []
+    for href, label in re.findall(
+        r"<a\s+[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+        document,
+        flags=re.I | re.S,
+    ):
+        text = unescape(re.sub(r"<[^>]+>", " ", label))
+        anchors.append((unescape(href), re.sub(r"\s+", " ", text).strip()))
+    return anchors
+
+
+@lru_cache(maxsize=24)
+def _cvf_index_anchors(index_url: str) -> list[tuple[str, str]]:
+    try:
+        response = _http_get_with_retry(
+            index_url,
+            timeout=10,
+            follow_redirects=True,
+            headers={"User-Agent": "Understand-AnyPaper/1.0"},
+        )
+        return _html_anchors(response.text)
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("CVF index lookup failed url=%s error=%s", index_url, exc)
+        return []
+
+
+def _cvf_index_pdf_urls(reference: PaperReference) -> list[str]:
+    """Resolve older CVF papers whose DBLP record exposes only the IEEE DOI."""
+    if not reference.title or not reference.year:
+        return []
+    venue_match = re.search(r"\b(CVPR|ICCV|WACV|ECCV)(W|\s+WORKSHOPS?)?\b", reference.raw_text, re.I)
+    if not venue_match:
+        return []
+    venue = venue_match.group(1).upper()
+    is_workshop = bool(venue_match.group(2))
+    root = f"https://openaccess.thecvf.com/{venue}{reference.year}"
+    indexes = [f"{root}?day=all"]
+    if is_workshop:
+        menu_url = f"{root}_workshops/menu"
+        title_tokens = {
+            token
+            for token in _normalize_title(reference.title).split()
+            if len(token) >= 5
+        }
+        matching_indexes = [
+            urljoin(menu_url, href)
+            for href, label in _cvf_index_anchors(menu_url)
+            if title_tokens & set(_normalize_title(label).split())
+        ]
+        indexes = matching_indexes[:5]
+
+    candidates: list[str] = []
+    for index_url in indexes:
+        for href, label in _cvf_index_anchors(index_url):
+            if not _titles_match(reference.title, label):
+                continue
+            if href.startswith("content_"):
+                href = f"/{href}"
+            pdf_url = _cvf_pdf_url(urljoin(index_url, href))
+            if pdf_url and pdf_url not in candidates:
+                candidates.append(pdf_url)
+    return candidates[:3]
+
+
+def _pmlr_pdf_url(candidate: str) -> str | None:
+    parsed = urlparse(candidate)
+    host = parsed.netloc.casefold().split(":", 1)[0]
+    if host not in {"proceedings.mlr.press", "www.proceedings.mlr.press"}:
+        return None
+    path = parsed.path
+    if path.casefold().endswith(".pdf"):
+        pdf_path = path
+    elif path.casefold().endswith(".html"):
+        paper_id = Path(path).stem
+        pdf_path = f"{path[:-5]}/{paper_id}.pdf"
+    else:
+        return None
+    return urlunparse(("https", "proceedings.mlr.press", pdf_path, "", "", ""))
+
+
+def _openreview_pdf_url(candidate: str) -> str | None:
+    parsed = urlparse(candidate)
+    host = parsed.netloc.casefold().split(":", 1)[0]
+    if host not in {"openreview.net", "www.openreview.net"}:
+        return None
+    note_id = (parse_qs(parsed.query).get("id") or [None])[0]
+    if not note_id:
+        return None
+    return urlunparse(
+        ("https", "openreview.net", "/pdf", "", urlencode({"id": note_id}), "")
+    )
+
+
+def _arxiv_pdf_url(candidate: str) -> str | None:
+    parsed = urlparse(candidate)
+    host = parsed.netloc.casefold().split(":", 1)[0]
+    path = unquote(parsed.path).strip("/")
+    if host in {"doi.org", "dx.doi.org"}:
+        match = re.match(r"10\.48550/arxiv\.(.+)", path, flags=re.I)
+        if not match:
+            return None
+        arxiv_id = match.group(1)
+    elif host in {"arxiv.org", "www.arxiv.org", "export.arxiv.org"}:
+        match = re.match(r"(?:abs|pdf)/(.+)$", path, flags=re.I)
+        if not match:
+            return None
+        arxiv_id = re.sub(r"\.pdf$", "", match.group(1), flags=re.I)
+    else:
+        return None
+    return f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+
+
+def _official_venue_pdf_candidates(
+    reference: PaperReference,
+    publication_urls: list[str] | None = None,
+) -> list[tuple[str, str]]:
+    """Return direct PDFs from supported proceedings sites and known arXiv mirrors."""
+    inputs = [*_reference_http_urls(reference), *(publication_urls or [])]
+    if reference.doi:
+        doi = re.sub(
+            r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", reference.doi, flags=re.I
+        )
+        inputs.append(f"https://doi.org/{doi.strip()}")
+
+    resolvers = (
+        ("ACL Anthology", _acl_anthology_pdf_url),
+        ("CVF Open Access", _cvf_pdf_url),
+        ("PMLR", _pmlr_pdf_url),
+        ("OpenReview", _openreview_pdf_url),
+        ("arXiv mirror", _arxiv_pdf_url),
+    )
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for candidate in inputs:
+        for source, resolver in resolvers:
+            pdf_url = resolver(candidate)
+            if pdf_url and pdf_url not in seen:
+                candidates.append((source, pdf_url))
+                seen.add(pdf_url)
+                break
+    return candidates
+
+
+async def _download_reference_pdf(
+    reference: PaperReference,
+    *,
+    trace_id: str,
+    on_progress: AgentProgressCallback | None,
+    progress: int,
+) -> tuple[bytes, str] | None:
+    headers = {
+        "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.1",
+        "User-Agent": "Understand-AnyPaper/1.0",
+    }
+
+    async def try_candidates(
+        client: httpx.AsyncClient,
+        candidates: list[tuple[str, str]],
+    ) -> tuple[bytes, str] | None:
+        for source, candidate in candidates:
+            try:
+                response = await client.get(candidate)
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                logger.warning(
+                    "[citation-expand:%s] reference_id=%s %s PDF candidate failed "
+                    "url=%s error=%s",
+                    trace_id,
+                    reference.reference_id,
+                    source,
+                    candidate,
+                    exc,
+                )
+                continue
+            data = response.content
+            if data.startswith(b"%PDF"):
+                logger.info(
+                    "[citation-expand:%s] reference_id=%s downloaded PDF via %s url=%s",
+                    trace_id,
+                    reference.reference_id,
+                    source,
+                    response.url,
+                )
+                return data, str(response.url)
+            logger.warning(
+                "[citation-expand:%s] reference_id=%s %s candidate returned non-PDF "
+                "url=%s content_type=%s bytes=%s",
+                trace_id,
+                reference.reference_id,
+                source,
+                candidate,
+                response.headers.get("content-type"),
+                len(data),
+            )
+        return None
+
+    async with httpx.AsyncClient(timeout=40, follow_redirects=True, headers=headers) as client:
+        if reference.arxiv_id:
+            return await try_candidates(
+                client,
+                [("arXiv", f"https://arxiv.org/pdf/{reference.arxiv_id}.pdf")],
+            )
+
+        await _emit_citation_progress(
+            on_progress,
+            "resolving_open_access_pdf",
+            progress,
+            "Checking ACL Anthology, CVF, PMLR, and OpenReview for an official PDF.",
+            reference_id=reference.reference_id,
+            doi=reference.doi,
+        )
+        direct_candidates = _official_venue_pdf_candidates(reference)
+        downloaded = await try_candidates(client, direct_candidates)
+        if downloaded is not None:
+            return downloaded
+
+        publication_urls = await asyncio.to_thread(_dblp_publication_urls, reference)
+        discovered_candidates = _official_venue_pdf_candidates(reference, publication_urls)
+        direct_urls = {url for _source, url in direct_candidates}
+        discovered_candidates = [
+            candidate for candidate in discovered_candidates if candidate[1] not in direct_urls
+        ]
+        downloaded = await try_candidates(client, discovered_candidates)
+        if downloaded is not None:
+            return downloaded
+
+        cvf_urls = await asyncio.to_thread(_cvf_index_pdf_urls, reference)
+        downloaded = await try_candidates(
+            client,
+            [("CVF Open Access", url) for url in cvf_urls],
+        )
+        if downloaded is not None:
+            return downloaded
+
+        if reference.doi:
+            await _emit_citation_progress(
+                on_progress,
+                "resolving_open_access_pdf",
+                progress,
+                "No official proceedings PDF matched; trying OpenAlex repositories.",
+                reference_id=reference.reference_id,
+                doi=reference.doi,
+            )
+            openalex_urls = await asyncio.to_thread(_openalex_pdf_urls, reference)
+            downloaded = await try_candidates(
+                client,
+                [("OpenAlex open-access", url) for url in openalex_urls],
+            )
+            if downloaded is not None:
+                return downloaded
+
+    logger.warning(
+        "[citation-expand:%s] reference_id=%s no usable official or open-access PDF found",
+        trace_id,
+        reference.reference_id,
+    )
+    return None
+
+
 async def _log_citation_heartbeat(
     trace_id: str,
     reference_id: str,
@@ -1099,9 +1775,16 @@ async def _expand_reference(
     store: GraphStore,
     *,
     trace_id: str | None = None,
+    on_progress: AgentProgressCallback | None = None,
+    progress_start: int = 10,
+    progress_end: int = 90,
 ) -> dict:
     log_id = trace_id or reference.reference_id
     started_at = time.monotonic()
+
+    def stage_progress(fraction: float) -> int:
+        return progress_start + round((progress_end - progress_start) * fraction)
+
     logger.info(
         "[citation-expand:%s] reference_id=%s recursive expansion entered",
         log_id,
@@ -1116,47 +1799,60 @@ async def _expand_reference(
             cached.get("paper_id"),
         )
         return {"status": "cached", "paper_id": cached["paper_id"], "title": cached["title"]}
-    if not reference.arxiv_id:
-        logger.info(
-            "[citation-expand:%s] reference_id=%s cannot download: no arXiv identifier",
-            log_id,
-            reference.reference_id,
-        )
-        return {"status": "unavailable", "reason": "No arXiv identifier or downloadable PDF is known."}
-
-    url = f"https://arxiv.org/pdf/{reference.arxiv_id}.pdf"
     download_started_at = time.monotonic()
     logger.info(
-        "[citation-expand:%s] reference_id=%s downloading arXiv PDF arxiv_id=%s timeout=40s",
+        "[citation-expand:%s] reference_id=%s resolving and downloading PDF "
+        "arxiv_id=%s doi=%s title=%r timeout=40s",
         log_id,
         reference.reference_id,
         reference.arxiv_id,
+        reference.doi,
+        reference.title,
     )
-    try:
-        async with httpx.AsyncClient(timeout=40, follow_redirects=True) as client:
-            response = await client.get(url)
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        logger.warning("arXiv PDF download failed for %s: %s", reference.reference_id, exc)
-        return {"status": "unavailable", "reason": "arXiv PDF download failed."}
-    data = response.content
+    await _emit_citation_progress(
+        on_progress,
+        "downloading_reference",
+        stage_progress(0.12),
+        (
+            f"Downloading arXiv:{reference.arxiv_id}."
+            if reference.arxiv_id
+            else "Finding an official or open-access PDF for the cited paper."
+        ),
+        reference_id=reference.reference_id,
+        arxiv_id=reference.arxiv_id,
+        doi=reference.doi,
+    )
+    downloaded = await _download_reference_pdf(
+        reference,
+        trace_id=log_id,
+        on_progress=on_progress,
+        progress=stage_progress(0.14),
+    )
+    if downloaded is None:
+        return {
+            "status": "unavailable",
+            "reason": (
+                "No downloadable PDF was found via arXiv, ACL Anthology, CVF, PMLR, "
+                "OpenReview, or OpenAlex."
+            ),
+        }
+    data, downloaded_url = downloaded
     logger.info(
-        "[citation-expand:%s] reference_id=%s arXiv PDF downloaded status=%s bytes=%s elapsed=%.2fs",
+        "[citation-expand:%s] reference_id=%s PDF downloaded url=%s bytes=%s elapsed=%.2fs",
         log_id,
         reference.reference_id,
-        response.status_code,
+        downloaded_url,
         len(data),
         time.monotonic() - download_started_at,
     )
-    if not data.startswith(b"%PDF"):
-        logger.warning(
-            "[citation-expand:%s] reference_id=%s arXiv response is not a PDF bytes=%s",
-            log_id,
-            reference.reference_id,
-            len(data),
-        )
-        return {"status": "unavailable", "reason": "Downloaded arXiv response was not a PDF."}
-
+    await _emit_citation_progress(
+        on_progress,
+        "reference_downloaded",
+        stage_progress(0.25),
+        f"Downloaded cited paper ({len(data) / 1024 / 1024:.1f} MB).",
+        reference_id=reference.reference_id,
+        downloaded_bytes=len(data),
+    )
     with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(data)
         tmp_path = Path(tmp.name)
@@ -1165,6 +1861,13 @@ async def _expand_reference(
         "[citation-expand:%s] reference_id=%s parsing downloaded PDF",
         log_id,
         reference.reference_id,
+    )
+    await _emit_citation_progress(
+        on_progress,
+        "parsing_reference",
+        stage_progress(0.3),
+        "Rendering and parsing the cited paper.",
+        reference_id=reference.reference_id,
     )
     try:
         parsed = await asyncio.to_thread(PdfParser().parse, tmp_path)
@@ -1183,12 +1886,24 @@ async def _expand_reference(
         len(parsed.references),
         time.monotonic() - parse_started_at,
     )
+    await _emit_citation_progress(
+        on_progress,
+        "reference_parsed",
+        stage_progress(0.4),
+        f"Parsed {len(parsed.pages)} page(s); starting its argument graph.",
+        reference_id=reference.reference_id,
+        target_paper_id=parsed.paper_id,
+        page_count=len(parsed.pages),
+        block_count=len(parsed.source_blocks),
+    )
 
     parsed.metadata.update(
         {
             "source_reference_id": reference.reference_id,
             "source_arxiv_id": reference.arxiv_id,
-            "source_filename": f"{reference.arxiv_id}.pdf",
+            "source_doi": reference.doi,
+            "source_url": downloaded_url,
+            "source_filename": f"{reference.arxiv_id or parsed.paper_id}.pdf",
             "source_media_type": "application/pdf",
         }
     )
@@ -1201,6 +1916,14 @@ async def _expand_reference(
         settings.openai_model,
         settings.llm_request_timeout_seconds,
     )
+    await _emit_citation_progress(
+        on_progress,
+        "started_graph_agent",
+        stage_progress(0.45),
+        "Started the cited-paper graph authoring agent.",
+        reference_id=reference.reference_id,
+        target_paper_id=parsed.paper_id,
+    )
 
     async def log_agent_activity(activity: dict) -> None:
         logger.info(
@@ -1209,6 +1932,21 @@ async def _expand_reference(
             reference.reference_id,
             activity.get("kind"),
             activity.get("label"),
+        )
+        activity_payload = {
+            **activity,
+            "id": f"{reference.reference_id}:{activity.get('id', 'activity')}",
+            "reference_id": reference.reference_id,
+            "target_paper_id": parsed.paper_id,
+        }
+        await _emit_citation_progress(
+            on_progress,
+            "agent_activity",
+            stage_progress(0.65),
+            str(activity.get("label") or "Cited-paper graph agent is working."),
+            reference_id=reference.reference_id,
+            target_paper_id=parsed.paper_id,
+            activity=activity_payload,
         )
 
     agent_heartbeat = asyncio.create_task(
@@ -1241,6 +1979,16 @@ async def _expand_reference(
         len(graph.edges),
         time.monotonic() - agent_started_at,
     )
+    await _emit_citation_progress(
+        on_progress,
+        "reference_graph_built",
+        stage_progress(0.85),
+        f"Built cited-paper graph with {len(graph.nodes)} nodes.",
+        reference_id=reference.reference_id,
+        target_paper_id=parsed.paper_id,
+        node_count=len(graph.nodes),
+        edge_count=len(graph.edges),
+    )
     logger.info(
         "[citation-expand:%s] reference_id=%s saving analyzed paper and source document",
         log_id,
@@ -1248,13 +1996,25 @@ async def _expand_reference(
     )
     await asyncio.to_thread(store.save_paper, parsed, graph)
     await asyncio.to_thread(
-        store.save_source_document, parsed.paper_id, f"{reference.arxiv_id}.pdf", "application/pdf", data
+        store.save_source_document,
+        parsed.paper_id,
+        f"{reference.arxiv_id or parsed.paper_id}.pdf",
+        "application/pdf",
+        data,
     )
     logger.info(
         "[citation-expand:%s] reference_id=%s recursive expansion saved elapsed=%.2fs",
         log_id,
         reference.reference_id,
         time.monotonic() - started_at,
+    )
+    await _emit_citation_progress(
+        on_progress,
+        "reference_saved",
+        stage_progress(0.88),
+        "Saved the cited paper and its source document.",
+        reference_id=reference.reference_id,
+        target_paper_id=parsed.paper_id,
     )
     return {
         "status": "expanded",
@@ -1280,7 +2040,8 @@ def _find_cached_reference_graph(reference: PaperReference, store: GraphStore) -
 
 
 def _normalize_title(title: str) -> str:
-    return re.sub(r"\W+", " ", title).strip().casefold()
+    dehyphenated = re.sub(r"(?<=\w)-\s+(?=\w)", "-", title)
+    return re.sub(r"\W+", " ", dehyphenated).strip().casefold()
 
 
 def _get_graph(paper_id: str) -> PaperArgumentGraph:

@@ -271,8 +271,22 @@ class AgentGraphWorkspace:
 
         for index, edge in enumerate(graph.edges):
             path = f"graph.json.edges.{index}"
-            if edge.paper_id != graph.paper_id:
-                errors.append(self._issue("edge_paper_id_mismatch", "edge paper_id differs from graph", path))
+            if edge.source_paper_id != graph.paper_id:
+                errors.append(
+                    self._issue(
+                        "edge_source_paper_id_mismatch",
+                        "edge source_paper_id differs from graph",
+                        path,
+                    )
+                )
+            if edge.target_paper_id != graph.paper_id:
+                errors.append(
+                    self._issue(
+                        "edge_target_paper_id_mismatch",
+                        "authored edge target_paper_id differs from graph",
+                        path,
+                    )
+                )
             if edge.source_node_id not in nodes_by_id:
                 errors.append(self._issue("missing_edge_source", f"unknown node {edge.source_node_id!r}", path))
             if edge.target_node_id not in nodes_by_id:

@@ -274,7 +274,8 @@ button:disabled {
   color: var(--success);
 }
 
-.status-line.uploading svg {
+.status-line.uploading svg,
+.status-line.analyzing svg {
   color: var(--accent);
 }
 
@@ -323,12 +324,12 @@ button:disabled {
   font-size: 12px;
 }
 
-.agent-activity.thinking,
-.agent-activity.thought {
+.agent-activity-thinking,
+.agent-activity-thought {
   color: var(--muted);
 }
 
-.agent-activity.thinking svg {
+.agent-activity-thinking svg {
   flex: 0 0 auto;
   color: var(--accent);
 }

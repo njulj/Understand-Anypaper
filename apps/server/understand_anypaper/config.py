@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     recursion_max_depth: int = 1
     recursion_max_papers: int = 5
     document_store_dir: str = "data/documents"
+    openalex_api_key: str = ""
 
     # LLM configuration. Graph building requires the graph-authoring agent.
     openai_api_key: str = Field(

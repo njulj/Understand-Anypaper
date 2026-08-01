@@ -402,7 +402,8 @@ properties.source_location:
 Offsets are zero-based, end-exclusive Unicode character offsets into the exact block text. Do not
 write page, bbox, copied source text, or any second locator form. A locator cannot span
 blocks; make separate nodes when necessary. Use IDs that are unique within this graph, set every
-node/edge paper_id to the graph paper_id, and ensure every edge endpoint exists.
+node.paper_id and every edge source_paper_id/target_paper_id to the graph paper_id, and ensure every
+edge endpoint exists.
 
 Editing tools persist changes even when the returned validation reports errors. Editing responses
 normally include the complete current validation report. During initial construction you may set

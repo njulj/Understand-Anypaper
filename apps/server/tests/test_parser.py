@@ -60,6 +60,19 @@ def test_parses_dot_numbered_multiline_references():
     assert references[1].year == 2021
 
 
+def test_reference_year_prefers_trailing_parenthesized_year_over_page_numbers():
+    references = PdfParser()._parse_reference_entries(
+        [
+            "49. Song, Q.: Fast image super-resolution. IEEE Trans. 27(4), 1966–1980 (2018)",
+            "50. Timofte, R.: Anchored regression. In: ICCV. pp. 1920–1927 (2013)",
+            "51. Xiong, Z.: Robust web super-resolution. IEEE Trans. 19(8), 2017–2028 (2010)",
+        ],
+        "paper123",
+    )
+
+    assert [reference.year for reference in references] == [2018, 2013, 2010]
+
+
 def test_parses_pdf_plain_text_with_cross_page_paragraph_merge(tmp_path):
     path = tmp_path / "cross-page.pdf"
     doc = fitz.open()

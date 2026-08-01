@@ -16,8 +16,9 @@ export type GraphNode = {
 
 export type GraphEdge = {
   id: string;
-  paper_id: string;
+  source_paper_id: string;
   source_node_id: string;
+  target_paper_id: string;
   target_node_id: string;
   edge_type: string;
   confidence: number;
@@ -153,6 +154,27 @@ export type NodeReferenceExpansion = {
   graph: PaperArgumentGraph;
 };
 
+export type CitationStageProgress = {
+  event: string;
+  progress: number;
+  message: string;
+  reference_id?: string;
+  reference_marker?: string;
+  reference_index?: number;
+  reference_count?: number;
+  target_paper_id?: string;
+  target_node_id?: string;
+  page_count?: number;
+  node_count?: number;
+  edge_count?: number;
+  activity?: AgentActivity;
+  expansion?: NodeReferenceExpansion;
+};
+
+export type StreamNodeReferencesOptions = {
+  onStageProgress?: (progress: CitationStageProgress) => void;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, init);
   if (!response.ok) {
@@ -270,6 +292,86 @@ export function expandNodeReferences(
       body: JSON.stringify({ depth: 1 }),
     },
   );
+}
+
+export function streamNodeReferences(
+  paperId: string,
+  nodeId: string,
+  options?: StreamNodeReferencesOptions,
+): Promise<NodeReferenceExpansion> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let processedLength = 0;
+    let settled = false;
+
+    function settleWithExpansion(expansion: NodeReferenceExpansion) {
+      if (settled) return;
+      settled = true;
+      resolve(expansion);
+    }
+
+    function settleWithError(error: Error) {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    }
+
+    function handleProgressLine(line: string) {
+      if (!line.trim()) return;
+      let progress: CitationStageProgress;
+      try {
+        progress = JSON.parse(line) as CitationStageProgress;
+      } catch {
+        settleWithError(new Error(`Invalid citation progress event: ${line}`));
+        return;
+      }
+
+      options?.onStageProgress?.(progress);
+      if (progress.event === 'error') {
+        settleWithError(new Error(progress.message || 'Citation analysis failed.'));
+        xhr.abort();
+        return;
+      }
+      if (progress.event === 'complete' && progress.expansion) {
+        settleWithExpansion(progress.expansion);
+      }
+    }
+
+    function processProgressLines(final = false) {
+      const responseText = xhr.responseText.slice(processedLength);
+      const lines = responseText.split('\n');
+      const completeLines = final ? lines : lines.slice(0, -1);
+      processedLength = final
+        ? xhr.responseText.length
+        : xhr.responseText.length - lines[lines.length - 1].length;
+      completeLines.forEach(handleProgressLine);
+    }
+
+    xhr.open(
+      'POST',
+      `${API_BASE_URL}/api/papers/${encodeURIComponent(
+        paperId,
+      )}/nodes/${encodeURIComponent(nodeId)}/references/expand/stream`,
+    );
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onprogress = () => processProgressLines();
+    xhr.onload = () => {
+      processProgressLines(true);
+      if (settled) return;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        settleWithError(new Error('Citation analysis finished without a result.'));
+        return;
+      }
+      settleWithError(
+        new Error(xhr.responseText || xhr.statusText || `Request failed with HTTP ${xhr.status}`),
+      );
+    };
+    xhr.onerror = () => settleWithError(new Error('Citation analysis request failed.'));
+    xhr.onabort = () => {
+      if (!settled) settleWithError(new Error('Citation analysis canceled.'));
+    };
+    xhr.send(JSON.stringify({ depth: 1 }));
+  });
 }
 
 export function fetchExternalContributionSubgraph(
