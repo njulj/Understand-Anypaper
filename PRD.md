@@ -4,7 +4,7 @@
 
 - 使用client/server架构，生成graph的流程放服务端
 - 使用codex+skill的方式，为了简单可以考虑cli调用给prompt的方式。
-- 使用postgres sql+pgvector
+- 使用 PostgreSQL 持久化论文、图和证据定位信息
 
 MVP PRD:
 
@@ -381,23 +381,26 @@ Equation REFERENCED_BY TextBlock
 ```json
 {
   "id": "contribution-1",
-  "type": "Contribution",
+  "paper_id": "paper-1",
+  "node_type": "Contribution",
   "title": "Hierarchical cross-modal fusion",
   "summary": "The paper proposes a hierarchical fusion mechanism...",
   "source_type": "explicit",
   "confidence": 0.94,
-  "evidence_ids": [
-    "text-page1-block12",
-    "text-page3-block41",
-    "figure-2",
-    "table-3"
-  ],
+  "semantic_unit_ids": ["contribution-1"],
   "page_ranges": [
     [1, 1],
     [3, 4],
     [7, 7]
   ],
-  "created_by": "contribution-agent",
+  "properties": {
+    "source_location": {
+      "block_id": "p0001-b0012",
+      "start_offset": 0,
+      "end_offset": 126
+    }
+  },
+  "created_by": "paper-graph-agent",
   "verified": false
 }
 ```
@@ -406,15 +409,13 @@ Equation REFERENCED_BY TextBlock
 
 ```json
 {
-  "source": "table-3",
-  "target": "contribution-1",
-  "type": "SUPPORTED_BY",
+  "id": "table-3-supports-contribution-1",
+  "paper_id": "paper-1",
+  "source_node_id": "table-3",
+  "target_node_id": "contribution-1",
+  "edge_type": "SUPPORTED_BY",
   "confidence": 0.88,
-  "evidence": {
-    "page": 7,
-    "block_id": "text-page7-block18",
-    "text": "The proposed fusion module improves..."
-  }
+  "semantic_unit_ids": ["table-3"]
 }
 ```
 
@@ -422,194 +423,67 @@ Equation REFERENCED_BY TextBlock
 
 ---
 
-# 五、Contribution 识别与内容归类流程
+# 五、单 Agent 图生成流程
 
-这是 MVP 中最重要的算法链路。
+整张 Paper Argument Graph 由同一个 Agent 直接生成；完成后没有第二轮模型理解、归属分配、规则建图或关系传播步骤。
 
-## 第一步：提取候选 Contribution
+## 第一步：准备可读工作区
 
-优先从以下位置寻找：
+Parser 固定地产生：
 
-- Abstract
-- Introduction 最后一部分
-- 明确的 `Our contributions are...`
-- Conclusion
-- Method 总结
-- 作者列出的 numbered list
+- `paper.pdf`
+- `rendered/{1,2,3,...}.png`
+- `paper_parsed_text.txt`
+- `paper_references.json`
+- `graph_schema.json`
+- 初始 `graph.json`
 
-生成候选贡献：
+`paper_parsed_text.txt` 中每个 PyMuPDF 文本块都有稳定 `block_id` 和精确文本。页面图片帮助模型理解图、表、公式和版面，但模型不输出 bbox。
+`paper_references.json` 提供可见 marker 到稳定 `PaperReference.reference_id` 的映射；`graph_schema.json` 由 `PaperArgumentGraph.model_json_schema()` 生成，是 `graph.json` 字段、类型和说明的权威定义。
 
-```json
-[
-  {
-    "title": "...",
-    "explicit_evidence": [],
-    "candidate_scope": []
-  }
-]
-```
+## 第二步：Agent 读取论文并增量编辑图
 
-需要区分：
+Agent 可使用：
 
-- `explicit`：作者明确列出
-- `implicit`：系统根据论文归纳
-- `merged`：多个相似表述合并
-- `split`：一个过于宽泛的贡献拆成多个子贡献
+- `Read`：读取文本或页面图片；
+- `apply_patch`：GPT 系列通过 Responses API 标准 function tool 编辑 `graph.json`；
+- `search_replace`：其他模型通过 Chat Completions 编辑 `graph.json`；
+- `shell`：只用于检查和计算，工具描述明确提示不要用它编辑 `graph.json`。
 
-MVP 中建议只自动生成作者明确声明的 Contribution；隐式贡献标记为“系统归纳”。
+Agent 在一次运行中同时决定 Contribution、Why/How/Proof、证据节点、引用节点和所有关系。内容可属于多个 Contribution，由图中的多条路径直接表达。
 
----
+## 第三步：每次编辑后做确定性检查
 
-## 第二步：建立内容单元
+编辑工具默认返回完整检查结果，包括：
 
-先把论文拆成可定位的原子内容：
+- JSON/schema 错误；
+- 重复 node/edge ID；
+- edge endpoint 不存在；
+- `paper_id` 不一致；
+- Contribution 缺 Why/How/Proof；
+- evidence 孤立、无法从 Paper root 到达；
+- `block_id` 不存在或 offset 越界；
+- source location 含第二种定位字段。
 
-- Paragraph
-- Sentence
-- Figure
-- Figure caption
-- Table
-- Table caption
-- Equation
-- Algorithm
-- Reference mention
+早期构建可传 `disable_checks=true` 降低噪声；结束前必须重新启用检查，并让 `graph.json` 达到 `valid=true`。
 
-每个内容单元具有：
+## 第四步：精确物化，不再二次理解
+
+每个非结构节点只写一种 authoring locator：
 
 ```json
 {
-  "content_id": "paragraph-37",
-  "page": 4,
-  "section": "3.2",
-  "bbox": [80, 120, 520, 280],
-  "text": "...",
-  "embedding": "...",
-  "entities": [],
-  "citations": [],
-  "neighbor_ids": []
-}
-```
-
----
-
-## 第三步：进行 Contribution 归属分类
-
-对每个内容单元执行多标签分类：
-
-```text
-Input:
-- contribution definitions
-- current content
-- section title
-- previous and next paragraph
-- mentioned entities
-- local figures/equations/citations
-
-Output:
-- related contributions
-- relationship type
-- confidence
-- explanation
-```
-
-输出示例：
-
-```json
-{
-  "content_id": "paragraph-37",
-  "assignments": [
-    {
-      "contribution_id": "contribution-1",
-      "relation": "EXPLAINS",
-      "confidence": 0.93
-    },
-    {
-      "contribution_id": "contribution-2",
-      "relation": "CONTEXT_FOR",
-      "confidence": 0.61
-    }
-  ]
-}
-```
-
-内容单元必须支持多归属，不能强制只属于一个 Contribution。
-
----
-
-## 第四步：图表和公式关联传播
-
-图、表和公式通常不会直接写明属于哪个贡献，需要通过周围文本建立关系。
-
-例如：
-
-```text
-Paragraph 21 → mentions Figure 3
-Paragraph 21 → belongs to Contribution 2
-```
-
-系统可推导：
-
-```text
-Figure 3 → likely illustrates Contribution 2
-```
-
-但是这条边应标记为：
-
-```json
-{
-  "inference_type": "relation_propagation",
-  "confidence": 0.82
-}
-```
-
-关联来源包括：
-
-1. 正文显式引用：`As shown in Figure 3`
-2. Caption 中出现模块名称
-3. 图中 OCR 或视觉识别出的模块名称
-4. 图前后的上下文
-5. 方法节点和公式节点的实体重合
-6. 实验小节标题
-
----
-
-## 第五步：构建 Contribution 论证闭环
-
-系统检查每个 Contribution 是否包含：
-
-```text
-Motivation / Gap
-        ↓
-Method / Mechanism
-        ↓
-Evidence / Result
-        ↓
-Conclusion
-```
-
-形成完整性评分：
-
-```json
-{
-  "contribution_id": "contribution-1",
-  "completeness": {
-    "motivation": 1.0,
-    "method": 1.0,
-    "equations": 0.8,
-    "experimental_evidence": 1.0,
-    "references": 0.6,
-    "overall": 0.88
+  "source_location": {
+    "block_id": "p0004-b0007",
+    "start_offset": 18,
+    "end_offset": 143
   }
 }
 ```
 
-前端可以提示：
+offset 为零起点、end-exclusive 的 Unicode 字符位置。Agent 完成后，服务端只做确定性物化：截取原文、根据 PyMuPDF 行信息合成 page/bbox、生成前端和存储仍使用的 `SemanticUnit`。该步骤不调用模型、不改变节点含义、不补边，也不做文本近似匹配。
 
-- Contribution 1：证据完整
-- Contribution 2：缺少直接消融验证
-- Contribution 3：主要是工程贡献，没有独立公式
-
-这会形成很强的产品辨识度。
+完整性评分是对最终图的只读产品指标，用于提示某个 Contribution 缺少动机、方法、公式、实验或引用证据，不参与生成或修复图。
 
 ---
 
@@ -644,16 +518,11 @@ Paragraph 12
   "year": 2023,
   "doi": "...",
   "arxiv_id": "...",
-  "citation_mentions": [
-    {
-      "page": 2,
-      "paragraph_id": "paragraph-12",
-      "sentence": "...",
-      "intent": "method_comparison"
-    }
-  ]
+  "marker": "[8]"
 }
 ```
+
+引用出现位置由实际包含该 marker 的图节点 source span 表达；marker 同时保存在该节点的 `properties.citation_markers`，不再维护第二份 citation mention locator。Agent 从 `paper_references.json` 选择对应的稳定 ID 写入节点 `reference_ids`，validator 检查 ID 和 marker 的一致性。
 
 ---
 
@@ -861,24 +730,15 @@ understand-anypaper/
 │
 ├── graph/
 │   ├── schema.py
-│   ├── graph_builder.py
-│   ├── graph_store.py
-│   ├── graph_query.py
+│   ├── agent_workspace.py
 │   └── graph_validator.py
 │
 ├── analyzers/
-│   ├── contribution_extractor.py
-│   ├── semantic_role_classifier.py
-│   ├── content_assigner.py
-│   ├── evidence_linker.py
-│   ├── citation_intent_classifier.py
-│   └── relation_reviewer.py
+│   ├── llm.py
+│   └── paper_graph_agent.py
 │
-├── retrieval/
-│   ├── lexical.py
-│   ├── vector.py
-│   ├── graph_retrieval.py
-│   └── citation_resolver.py
+├── storage/
+│   └── graph_store.py
 │
 ├── recursive/
 │   ├── paper_resolver.py
@@ -902,25 +762,22 @@ understand-anypaper/
 
 MVP 不建议一开始引入 Neo4j，部署会变复杂。
 
-可以使用：
+当前使用：
 
-- SQLite：论文、节点和边的持久化
-- JSON：图谱导出和版本管理
-- LanceDB 或 Qdrant：语义检索
-- 本地文件夹：图、表、PDF 和缩略图
-- NetworkX：服务端图算法
+- PostgreSQL：服务端论文、节点、边、证据单元和引用持久化；
+- SQLite：桌面端工作区的等价本地持久化；
+- JSON：Agent 工作区中的 graph authoring 格式；
+- 本地文件夹：源 PDF 和渲染资产。
 
-SQLite 表结构：
+核心表结构：
 
 ```sql
 papers
 nodes
 edges
-content_blocks
+semantic_units
 references
-citation_mentions
-analysis_tasks
-paper_assets
+graph_patches
 ```
 
 `nodes` 表：
@@ -980,12 +837,6 @@ GET /api/papers/{paper_id}/graph/subgraph
 
 ```http
 GET /api/nodes/{node_id}/evidence
-```
-
-## 查找内容所属 Contribution
-
-```http
-GET /api/content/{content_id}/assignments
 ```
 
 ## 展开引用

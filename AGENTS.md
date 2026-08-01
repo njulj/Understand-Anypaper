@@ -18,7 +18,7 @@
 
 ```text
 docker-compose.yml
-├── db      PostgreSQL 16 + pgvector，加载 apps/server/sql/schema.sql
+├── db      PostgreSQL 16，加载 apps/server/sql/schema.sql
 ├── server  FastAPI 后端，负责 PDF 解析、PAG 构建和 API
 └── web     Vite + React 前端壳，展示 PDF / 图谱 / Inspector 三栏工作区
 ```
@@ -27,11 +27,11 @@ docker-compose.yml
 
 1. 前端或调用方上传论文到 `POST /api/papers`。
 2. `apps/server/understand_anypaper/api/routes.py` 把上传文件写到临时文件。
-3. `PdfParser` 产出 `ParsedPaper`，对 PDF 渲染页面图片，并保留原始 PDF bytes 供后续 bbox 文本提取。
-4. `SemanticUnitSlicer` 把页面图片发给多模态 LLM，切分一组 `SemanticUnit`，每个 unit 只有一个 semantic role，并记录 `page + bbox` 形式的 evidence。bbox 采用归一化 `[ymin, xmin, ymax, xmax]`。
-5. `ContributionEvidenceAssigner` 再调一次 LLM，把每个 evidence unit 分配给它支撑的 contribution（写入 `properties.contribution_unit_ids`）。
-6. `PaperArgumentGraphBuilder` 构建 `PaperArgumentGraph`：paper 节点 → contribution 节点 → why/how/proof facet 节点 → evidence 节点，节点和边统一引用 `semantic_unit_ids` 作为证据。
-7. 图通过 `GraphStore` 保存；数据库可用时写入 PostgreSQL，否则回退到进程内内存 store。
+3. `PdfParser` 产出 `ParsedPaper`：渲染页面图片，并为 PyMuPDF 文本块建立稳定的 `block_id + offset` 索引；行级 bbox 只作为服务端派生高亮的数据。
+4. `PaperGraphAgent` 创建临时工作区：`paper.pdf`、`rendered/{page}.png`、`paper_parsed_text.txt`、`paper_references.json`、`graph_schema.json`、`graph.json`，让模型通过 Read/编辑/shell 工具逐步构建完整 PAG。
+5. 编辑工具每次修改 `graph.json` 后运行 `AgentGraphWorkspace` 校验并把问题返回模型；构建早期可传 `disable_checks`。GPT 模型走 Responses API 和标准 function `apply_patch`，其他模型走 Chat Completions 和 `search_replace`；两条路径都由 Agent Framework 管理工具循环。
+6. Agent 根据 `paper_references.json` 把引用节点绑定到稳定的 `reference_ids`；最终图通过校验后，服务端把 `block_id + offset` 精确物化成 `SemanticUnit`、page 和归一化 bbox，供 PDF 高亮、前作查询及现有 API 使用；模型不生成 quote/bbox。
+7. 图通过 `GraphStore` 保存；服务端使用 PostgreSQL，桌面端使用 SQLite，数据库不可用时回退到进程内内存 store。
 
 ## 目录和文件职责
 
@@ -47,26 +47,24 @@ docker-compose.yml
 
 - `Dockerfile`：构建 FastAPI 服务镜像，安装 Python 包并启动 uvicorn。
 - `pyproject.toml`：Python 项目元数据、依赖、dev 依赖和 ruff 配置。
-- `sql/schema.sql`：PostgreSQL/pgvector schema。核心表包括 `papers`、`nodes`、`edges`、`semantic_units`、`paper_references`、`graph_patches`。
-- `tests/test_graph_builder.py`：覆盖当前 PAG builder 的核心行为：能创建 contribution 节点，并保证节点/边带 evidence。
+- `sql/schema.sql`：PostgreSQL schema。核心表包括 `papers`、`nodes`、`edges`、`semantic_units`、`paper_references`、`graph_patches`。
+- `tests/test_agent_graph_workspace.py`：覆盖 agent 工作区的图校验、精确 locator 与最终物化行为。
 
 ### 后端包：`apps/server/understand_anypaper`
 
 - `main.py`：FastAPI 应用入口，配置 CORS、挂载 API router，并提供 `/health`。
-- `config.py`：`pydantic-settings` 配置入口。默认值包括数据库 URL、递归深度/数量限制和 OpenAI/embedding 配置。
+- `config.py`：`pydantic-settings` 配置入口。默认值包括数据库 URL、递归深度/数量限制和图生成模型配置。
 - `observability.py`：LLM 可观测性入口。当环境里配置了 `OTEL_EXPORTER_OTLP_*` endpoint 时，安装 OTel providers 把 agent-framework 自带的 LLM span 导出到 Arize Phoenix（或任意 OTLP 后端）；未配置时完全不生效。
 - `api/routes.py`：当前所有 REST API。上传接口以 NDJSON 流返回处理进度，图数据通过 `GraphStore` 持久化。
-- `parser/models.py`：解析和语义切分数据模型。`DocumentPage` 表示渲染后的页面图片元数据，`PageSourceLocation` 表示 semantic unit 的 `page + bbox + extracted_text`，`SemanticUnit` 表示 LLM 切出的论证语义单元。
-- `parser/pdf_parser.py`：parser facade。对 PDF 用 PyMuPDF 渲染页面图片，并提取 title/abstract/reference 元数据；semantic role 和 evidence bbox 由多模态 LLM 负责。`.txt`/`.md` 仍作为文本 fallback。
+- `parser/models.py`：解析和溯源数据模型。`SourceBlock` 是 agent 使用的唯一 authoring locator 基础；`PageSourceLocation` 是服务端物化后的读取模型。
+- `parser/pdf_parser.py`：parser facade。对 PDF 用 PyMuPDF 渲染页面图片，提取 title/abstract/reference，并建立稳定文本块、offset 和内部行 bbox 索引。`.txt`/`.md` 仍作为文本 fallback。
 - `graph/schema.py`：Paper Argument Graph 的 Pydantic 模型和枚举，包括 `NodeType`、`EdgeType`、`GraphNode`、`GraphEdge`、`PaperArgumentGraph`。节点和边通过 `semantic_unit_ids` 溯源。
-- `graph/graph_builder.py`：从 `ParsedPaper.semantic_units` 构建 PAG。为每个 contribution 生成节点和 why/how/proof facet 节点，再按 `properties.contribution_unit_ids` 把 evidence 节点挂到对应 facet 下。
+- `graph/agent_workspace.py`：创建 agent 工作区，实现 Read、原子编辑、逐次 graph 校验，以及 block offset → semantic unit/page/bbox 的最终物化。
 - `graph/graph_validator.py`：贡献完整度评分，检查每个 contribution 是否有 motivation/gap、method/module、equation、experiment/result、reference 类型邻居。
-- `analyzers/llm.py`：analyzers 共享的 agent-framework chat client 工厂、结构化输出 options 和 `run_structured` async helper。
-- `analyzers/semantic_unit_slicer.py`：多模态语义切分器，把页面图片发给 LLM 并把返回的 text/bbox locator 解析成 `PageSourceLocation`。
-- `analyzers/contribution_evidence_assigner.py`：LLM evidence→contribution 分配器，按 contribution 并行调用。
-- `storage/graph_store.py`：`GraphStore` 抽象及 PostgreSQL/内存两个实现，负责论文、图、semantic units、references 和源 PDF 的持久化。
+- `analyzers/llm.py`：analyzers 共享的 Microsoft Agent Framework Responses/Chat Completions client 工厂、结构化输出 options 和 helper。
+- `analyzers/paper_graph_agent.py`：当前主构图流程。提供 Read、GPT function `apply_patch` / 非 GPT `search_replace`、shell 工具，并由 Agent Framework 驱动工具调用与校验—修复循环。
+- `storage/graph_store.py`：`GraphStore` 抽象及 PostgreSQL/SQLite/内存实现，负责论文、图、semantic units、references 和源 PDF 的持久化。
 - `recursive/traversal_policy.py`：参考文献递归分析的边界策略，限制最大深度、最大论文数和重复访问。
-- `retrieval/embeddings.py`：OpenAI 兼容 embedding 客户端，供 Postgres store 的向量检索使用。
 
 ### 前端：`apps/web`
 
@@ -90,14 +88,4 @@ docker-compose.yml
 
 ## 切换模型
 
-不同模型输出图像坐标的方式不一样：
-
-| Model Family | Inherent Grounding? | Coordinate Scale | Box Array Sequence | Core Quirk / Feature |
-|---|---|---|---|---|
-| Gemini (Flash/Pro) | Yes | Integer Grid (0–1000) | [ymin, xmin, ymax, xmax] | Inverted matrix order. |
-| Claude (Anthropic) | Yes | Absolute Pixels | [xmin, ymin, xmax, ymax] | Requires tracking image resize factors. |
-| Qwen-VL (Alibaba) | Yes | Integer Grid (0–1000) | [xmin, ymin, xmax, ymax] | Encloses bounding boxes in native <box> tags. |
-| Xiaomi (Mimo) | Yes | Normalized Floats (0.0–1.0) | [xmin, ymin, xmax, ymax] | Native support for decimal float coordinates. |
-| OpenAI (GPT-4o) | No | N/A | N/A | Typically hallucinates coordinates; requires an external object detector. |
-
-目前是对着`gemini-3-flash`优化的。如果要换模型，除了可能要改prompt外，还需要在`apps/server/understand_anypaper/analyzers/semantic_unit_slicer.py`中修改坐标的输出/解析方式。
+模型只负责在 `graph.json` 中写 `block_id + start_offset + end_offset`，不直接输出 bbox。切换模型时主要检查工具调用协议、图校验反馈和 prompt 的覆盖密度；PDF bbox 由服务端根据精确文本跨度统一派生。

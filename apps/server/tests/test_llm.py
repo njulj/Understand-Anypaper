@@ -69,7 +69,7 @@ def test_create_chat_client_uses_chat_completions_api():
             openai_base_url="https://openrouter.ai/api/v1",
             openai_model="openai/gpt-4o-mini",
         ),
-        session_id="semantic-slice:test",
+        session_id="paper-graph:test",
     )
 
     assert isinstance(client, OpenAIChatCompletionClient)
@@ -79,19 +79,19 @@ def test_create_chat_client_uses_chat_completions_api():
 def test_openrouter_structured_options_include_cache_key_when_enabled():
     options = structured_output_options(
         DemoOutput,
-        prompt_cache_key="semantic-slice:test",
+        prompt_cache_key="paper-graph:test",
         base_url="https://openrouter.ai/api/v1",
     )
 
     assert options["extra_body"] == {"provider": {"require_parameters": True}}
-    assert options["prompt_cache_key"] == "semantic-slice:test"
+    assert options["prompt_cache_key"] == "paper-graph:test"
     assert "store" not in options
 
 
 def test_structured_options_omit_cache_key_when_disabled():
     options = structured_output_options(
         DemoOutput,
-        prompt_cache_key="semantic-slice:test",
+        prompt_cache_key="paper-graph:test",
         send_prompt_cache_key=False,
         base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
     )

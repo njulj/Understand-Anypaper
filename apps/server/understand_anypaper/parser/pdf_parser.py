@@ -5,7 +5,13 @@ from uuid import uuid4
 
 import fitz  # PyMuPDF
 
-from understand_anypaper.parser.models import DocumentPage, PaperReference, ParsedPaper
+from understand_anypaper.parser.models import (
+    DocumentPage,
+    PaperReference,
+    ParsedPaper,
+    SourceBlock,
+    SourceBlockSpan,
+)
 
 _REFERENCE_SECTION = re.compile(r"^\s*(references|bibliography)\s*$", re.IGNORECASE)
 _YEAR = re.compile(r"\b(19|20)\d{2}\b")
@@ -14,10 +20,11 @@ _ARXIV = re.compile(r"arxiv[:\s]*(\d{4}\.\d{4,5})", re.IGNORECASE)
 
 
 class PdfParser:
-    """Parses papers into page images plus lightweight metadata.
+    """Parse papers into page images, metadata, and stable source blocks.
 
-    For PDFs the LLM receives rendered page images and returns page source locations.
-    PyMuPDF text extraction remains only for metadata and post-LLM source text clips.
+    The graph agent reads the rendered pages and exact block text, then authors
+    only block IDs and character offsets. PyMuPDF geometry is kept server-side
+    to materialize those spans into PDF highlights.
     """
 
     def parse(self, path: Path) -> ParsedPaper:
@@ -67,11 +74,13 @@ class PdfParser:
         body_texts = [paragraph["text"] for paragraph in body_paragraphs]
         abstract = self._detect_abstract(body_texts)
         references = self._parse_reference_entries(reference_lines, prefix)
+        source_blocks = self._source_blocks(raw_blocks, pages)
         return ParsedPaper(
             paper_id=paper_id,
             title=title or path.stem,
             abstract=abstract,
             pages=pages,
+            source_blocks=source_blocks,
             references=references,
             metadata={
                 "plain_text": "\n\n".join(body_texts),
@@ -117,10 +126,12 @@ class PdfParser:
                 spans = [span for line in block.get("lines", []) for span in line.get("spans", [])]
                 if not spans:
                     continue
-                text = "\n".join(
-                    " ".join(span["text"] for span in line.get("spans", [])).strip()
-                    for line in block.get("lines", [])
-                ).strip()
+                lines: list[dict] = []
+                for line in block.get("lines", []):
+                    line_text = "".join(span["text"] for span in line.get("spans", [])).strip()
+                    if line_text:
+                        lines.append({"text": line_text, "bbox": line["bbox"]})
+                text = "\n".join(line["text"] for line in lines)
                 sizes = [round(span["size"], 1) for span in spans]
                 page_blocks.append(
                     {
@@ -130,10 +141,74 @@ class PdfParser:
                         "max_size": max(sizes),
                         "mode_size": Counter(sizes).most_common(1)[0][0],
                         "bold": all(span.get("flags", 0) & 16 for span in spans),
+                        "lines": lines,
                     }
                 )
             raw_blocks.extend(PdfParser._sort_page_blocks(page_blocks, page.rect.width, page.rect.height))
         return raw_blocks
+
+    @staticmethod
+    def _source_blocks(
+        raw_blocks: list[dict],
+        pages: list[DocumentPage],
+    ) -> list[SourceBlock]:
+        """Build the canonical text index used by the graph agent.
+
+        IDs depend only on page and reading-order position. Offsets refer to the
+        exact ``SourceBlock.text`` string written to ``paper_parsed_text.txt``.
+        Line spans are retained privately so an authored offset range can later
+        be materialized directly into a PDF highlight.
+        """
+        dimensions = {page.page: (page.width, page.height) for page in pages}
+        page_ordinals: Counter[int] = Counter()
+        blocks: list[SourceBlock] = []
+        for raw in raw_blocks:
+            text = raw["text"]
+            if not text:
+                continue
+            page = int(raw["page"])
+            width, height = dimensions[page]
+            page_ordinals[page] += 1
+            cursor = 0
+            spans: list[SourceBlockSpan] = []
+            for line in raw.get("lines", []):
+                line_text = line["text"]
+                start = text.find(line_text, cursor)
+                if start < 0:
+                    continue
+                end = start + len(line_text)
+                spans.append(
+                    SourceBlockSpan(
+                        start_offset=start,
+                        end_offset=end,
+                        bbox=PdfParser._normalize_pdf_bbox(line["bbox"], width, height),
+                    )
+                )
+                cursor = end
+            blocks.append(
+                SourceBlock(
+                    block_id=f"p{page:04d}-b{page_ordinals[page]:04d}",
+                    page=page,
+                    text=text,
+                    bbox=PdfParser._normalize_pdf_bbox(raw["bbox"], width, height),
+                    spans=spans,
+                )
+            )
+        return blocks
+
+    @staticmethod
+    def _normalize_pdf_bbox(
+        bbox: list[float] | tuple[float, float, float, float],
+        width: float,
+        height: float,
+    ) -> list[float]:
+        x0, y0, x1, y1 = (float(value) for value in bbox)
+        return [
+            round(max(0.0, min(1.0, y0 / height)), 6),
+            round(max(0.0, min(1.0, x0 / width)), 6),
+            round(max(0.0, min(1.0, y1 / height)), 6),
+            round(max(0.0, min(1.0, x1 / width)), 6),
+        ]
 
     @staticmethod
     def _sort_page_blocks(blocks: list[dict], page_width: float, page_height: float) -> list[dict]:
@@ -316,11 +391,28 @@ class PdfParser:
             body_paragraphs.append(paragraph)
 
         references = self._parse_reference_entries(reference_lines, prefix)
+        source_blocks = [
+            SourceBlock(
+                block_id=f"p0001-b{index:04d}",
+                page=1,
+                text=paragraph,
+                bbox=[0.0, 0.0, 1.0, 1.0],
+                spans=[
+                    SourceBlockSpan(
+                        start_offset=0,
+                        end_offset=len(paragraph),
+                        bbox=[0.0, 0.0, 1.0, 1.0],
+                    )
+                ],
+            )
+            for index, paragraph in enumerate(body_paragraphs, start=1)
+        ]
         return ParsedPaper(
             paper_id=paper_id,
             title=title,
             abstract=body_paragraphs[0][:1000] if body_paragraphs else "",
             pages=[DocumentPage(page=1, width=1, height=1)],
+            source_blocks=source_blocks,
             references=references,
             metadata={"plain_text": "\n\n".join(body_paragraphs)},
             source_bytes=text.encode(),
@@ -346,7 +438,28 @@ class PdfParser:
                 end = starts[i + 1].start() if i + 1 < len(starts) else len(text)
                 entries.append((match.group(1), text[match.end():end].strip()))
         else:
-            entries = [(None, line.strip()) for line in text.splitlines() if len(line.strip()) > 20]
+            numbered = list(re.finditer(r"(?m)^\s*(\d{1,3})\.\s+", text))
+            numbered_starts: list[re.Match[str]] = []
+            for match in numbered:
+                if (
+                    not numbered_starts
+                    or int(match.group(1)) == int(numbered_starts[-1].group(1)) + 1
+                ):
+                    numbered_starts.append(match)
+            if numbered_starts:
+                for i, match in enumerate(numbered_starts):
+                    end = (
+                        numbered_starts[i + 1].start()
+                        if i + 1 < len(numbered_starts)
+                        else len(text)
+                    )
+                    entries.append((match.group(1), text[match.end():end].strip()))
+            else:
+                entries = [
+                    (None, line.strip())
+                    for line in text.splitlines()
+                    if len(line.strip()) > 20
+                ]
         return [
             self._build_reference(index, marker, raw, prefix)
             for index, (marker, raw) in enumerate(entries, start=1)
@@ -355,13 +468,26 @@ class PdfParser:
     @staticmethod
     def _build_reference(index: int, marker: str | None, raw: str, prefix: str) -> PaperReference:
         raw = re.sub(r"\s+", " ", raw).strip()
-        year_match = _YEAR.search(raw)
+        parenthesized_years = list(re.finditer(r"\(((?:19|20)\d{2})[a-z]?\)", raw))
+        year_matches = list(_YEAR.finditer(raw))
+        year = (
+            int(parenthesized_years[-1].group(1))
+            if parenthesized_years
+            else (int(year_matches[-1].group(0)) if year_matches else None)
+        )
         doi_match = _DOI.search(raw)
         arxiv_match = _ARXIV.search(raw)
         title = None
         quoted = re.search(r"[“\"](.+?)[”\"]", raw)
         if quoted:
             title = quoted.group(1).strip(" .,")
+        elif ": " in raw:
+            candidate = raw.split(": ", 1)[1]
+            title = re.split(
+                r"\.\s+(?:In:|IEEE|ACM|Springer|Proceedings|arXiv|Int\.\s+J\.)",
+                candidate,
+                maxsplit=1,
+            )[0].strip(" .,")
         else:
             parts = [part.strip() for part in raw.split(". ") if len(part.strip()) > 12]
             title = next((part.strip(" .,") for part in parts if not _YEAR.search(part)), None)
@@ -376,7 +502,7 @@ class PdfParser:
             raw_text=raw,
             title=title,
             authors=authors,
-            year=int(year_match.group(0)) if year_match else None,
+            year=year,
             doi=doi_match.group(0).rstrip(".") if doi_match else None,
             arxiv_id=arxiv_match.group(1) if arxiv_match else None,
         )

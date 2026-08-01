@@ -3,7 +3,7 @@
     "nodejs@22",
     "uv@latest",
     "process-compose@1.110.0",
-    "path:.#postgresql-pgvector"
+    "postgresql@16"
   ],
   "env_from": ".env",
   "env": {

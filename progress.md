@@ -9,7 +9,7 @@
 - [x] Vite + React 前端可启动
 - [x] Docker Compose 已包含 db/server/web
 - [x] 主链路（PDF 解析 → 图谱构建 → 持久化 → 图谱视图）已打通
-- [x] LLM 链路已接入（配置 `OPENAI_API_KEY` 即启用，无 key 时回退规则版）
+- [x] 单 Agent 构图链路已接入（配置 `OPENAI_API_KEY` 后生成完整 graph；无 key 时明确失败）
 
 ## 前端
 
@@ -35,8 +35,7 @@
 - [x] `GET /api/papers/{paper_id}/blocks` 已实现（前端原文视图数据源）
 - [x] `GET /api/papers/{paper_id}/references` 已实现
 - [x] `GET /api/nodes/{node_id}/evidence` 已实现（返回 evidence 块全文/页码/bbox）
-- [x] `GET /api/content/{content_id}/assignments` 已实现
-- [x] `POST /api/graph/search` 已实现（lexical + 可选 pgvector hybrid）
+- [x] `POST /api/graph/search` 已实现（lexical + graph expansion）
 - [x] `GET /api/papers/{paper_id}/completeness` 已实现
 - [x] `POST /api/papers/{paper_id}/graph/patch` 已实现（增删改节点/边，记录到 graph_patches）
 - [x] `POST /api/references/{reference_id}/resolve` 已实现（Crossref 元数据补全，失败回退本地解析结果）
@@ -53,7 +52,7 @@
 - [x] 参考文献列表抽取已实现（`[n]` 编号切分 + 年份/DOI/arXiv/标题/作者解析）
 - [x] citation mention 抽取已实现（`[n]`/`[n,m]`/`[n-m]` → 所在句子 + 意图分类）
 - [x] 版面双栏阅读顺序重排已实现基础启发式
-- [x] LLM semantic unit 的 text anchor 定位已增强：同页匹配改为基于 column-aware word stream + dehyphenation，标题多 rect 会回映射到词级 span；跨页 semantic unit 支持以 `source_location.segments` 返回多段 page-local bbox
+- [x] Agent 唯一使用 `block_id + start_offset + end_offset` 定位原文；服务端从精确跨度派生 page-local bbox
 - [x] 跨页段落合并已实现（PDF body blocks 会按续写启发式合并，并写入 `metadata.plain_text` / `metadata.page_texts`）
 
 
@@ -61,30 +60,24 @@
 ## Graph
 
 - [x] PAG Pydantic schema 已实现
-- [x] 规则版 graph builder 已实现
-- [x] contribution 节点生成已实现（无显式贡献时从摘要推断兜底）
-- [x] 邻近 evidence 节点挂载已实现（按语义角色映射边类型：MOTIVATES/IMPLEMENTED_BY/VALIDATES/FORMALIZES/…）
-- [x] Reference 节点 + CITES 边 + mention 意图边（BUILDS_ON/EXTENDS/CONTRASTS_WITH/…）已实现
+- [x] `PaperGraphAgent` 一次负责完整 PAG 的创建、检查和修复，无后续 builder/linker 步骤
+- [x] Agent 工作区提供 PDF、页面图片、稳定文本块索引和 graph 编辑工具
+- [x] 每次 graph 编辑后返回结构/locator/孤立 evidence 等检查结果；早期编辑支持 `disable_checks`
+- [x] GPT 模型使用 Responses API custom `apply_patch`；其他模型使用 Chat Completions `search_replace`
+- [x] contribution、facet、evidence、引用节点和关系均由同一个 Agent 创建
 - [x] completeness validator 已实现基础版本
-- [x] LLM 版语义角色分类已实现（`analyzers/llm_analyzer.py`，无 key 回退规则）
-- [x] LLM 版贡献抽取已实现（同上，evidence 落到 content_id）
 - [x] 图修正 patch 机制已接入 API 和 UI
-- [x] LLM 版 evidence linking / 关系判断已接入（无 key 时使用角色、距离、关键词的 WHY/HOW/PROOF 规则 linking 兜底）
 
 ## 存储
 
-- [x] PostgreSQL + pgvector schema 已写好
-- [x] 后端 API 读写数据库已实现（papers/nodes/edges/content_blocks/paper_references/citation_mentions/graph_patches）
+- [x] PostgreSQL schema 已写好
+- [x] 后端 API 读写数据库已实现（papers/nodes/edges/semantic_units/paper_references/graph_patches）
 - [x] 服务重启后数据保留（已验证）
-- [x] graph store 已实现（`storage/graph_store.py`：Postgres 版 + 内存版，DB 不可达自动回退内存）
-- [x] 节点 embedding 写入 pgvector（配置 API key 后自动生成）
+- [x] graph store 已实现（`storage/graph_store.py`：PostgreSQL + SQLite + 内存版，DB 不可达自动回退内存）
 
 ## 检索
 
 - [x] 基础 lexical search 已实现
-- [x] embedding 生成已实现（`retrieval/embeddings.py`，需 API key）
-- [x] pgvector 相似度查询已实现（cosine）
-- [x] hybrid search 已实现（lexical + vector 分数合并）
 - [x] graph retrieval（沿边扩展的检索）已实现（`POST /api/graph/search` 支持 `expand_depth` 并返回 `expanded_subgraph`）
 
 ## 引用与递归
@@ -99,22 +92,19 @@
 
 ## LLM / 外部依赖
 
-- [x] OpenAI 兼容 API 已接入（chat + embeddings，`OPENAI_API_KEY` / `OPENAI_BASE_URL` 配置）
-- [x] embedding 模型配置已定义（`PAG_EMBEDDING_MODEL` / `PAG_EMBEDDING_DIMENSIONS`）
+- [x] OpenAI Responses / Chat Completions API 已接入（`OPENAI_API_KEY` / `OPENAI_BASE_URL` 配置）
 - [x] PDF 解析依赖 `pymupdf` 已接入
 - [x] Crossref 已接入（reference resolve）
 - [x] Semantic Scholar / arXiv 服务已接入（Semantic Scholar 元数据补全；arXiv PDF 递归扩展）
 
 ## 分析架构规划
 
-- [x] 确定分层方向：前置流程固定 workflow 化，保证上传、解析、建图、持久化、检索链路可重复、可测试、可回退
-- [x] 当前 LLM calls 定位为结构化局部识别器：贡献抽取、语义角色分类、后续 evidence linking / 关系判断
-- [ ] agent + skill 定位为后期微调层：基于已有 paper_id / node_id / block_id 读取上下文，产出候选 graph patch 或解释，不直接替代基础 pipeline
-- [ ] 未来可抽象 `AnalyzerBackend`：默认使用 OpenAI 兼容 API；复杂多步任务可切换到 Codex CLI + skill 执行
+- [x] 前置 PDF 解析固定化；整张图由 Agent 在受控工作区内迭代生成并通过确定性校验
+- [x] Graph 是 Agent 的最终产物，不再经过语义切分、归属分配或规则 builder 后处理
 
 ## 测试
 
-- [x] graph builder 基础测试已存在
+- [x] Agent graph workspace 的校验与物化测试已存在
 - [x] parser 测试已实现（markdown + 生成 PDF，含引用/mention/唯一 ID）
 - [x] API 集成测试已实现（上传、graph、blocks、evidence、search、completeness、analyze、patch 往返）
 - [x] 前端 `npm run build`（tsc + vite）已通过
@@ -125,8 +115,7 @@
 ## 建议下一步
 
 - [x] 前端接入真实 PDF 页面渲染并用 bbox 做原文高亮（当前采用后端渲染 PNG，不依赖 pdf.js）
-- [x] LLM evidence linking / 边关系判断，替换邻近窗口启发式
-- [ ] 将高级分析设计成候选 patch 流程：agent/skill 只提出新增、删除、改边、合并等修正建议，经用户确认或 API 记录后应用
+- [x] Agent 直接完成 evidence linking / 边关系判断
 - [x] 引用论文递归分析（arXiv 拉取 PDF → 复用同一管线；Semantic Scholar 做元数据补全）
 - [x] 手动添加节点/边的 UI
 

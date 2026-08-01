@@ -13,7 +13,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from understand_anypaper.config import settings
 from understand_anypaper.graph.schema import GraphEdge, GraphNode, PaperArgumentGraph
 from understand_anypaper.parser.models import PageSourceLocation, PaperReference, ParsedPaper, SemanticUnit
-from understand_anypaper.retrieval.embeddings import EmbeddingClient
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +22,17 @@ class SourceDocument:
     filename: str
     media_type: str
     data: bytes
+
+
+def _ensure_graph_scope(paper_id: str, graph: PaperArgumentGraph) -> None:
+    if graph.paper_id != paper_id:
+        raise ValueError(f"graph paper_id {graph.paper_id!r} does not match {paper_id!r}")
+    mismatched_nodes = [node.id for node in graph.nodes if node.paper_id != paper_id]
+    if mismatched_nodes:
+        raise ValueError(f"nodes belong to a different paper: {mismatched_nodes}")
+    mismatched_edges = [edge.id for edge in graph.edges if edge.source_paper_id != paper_id]
+    if mismatched_edges:
+        raise ValueError(f"edges belong to a different source paper: {mismatched_edges}")
 
 
 class GraphStore(ABC):
@@ -64,11 +74,6 @@ class GraphStore(ABC):
     @abstractmethod
     def record_patch(self, paper_id: str, operations: list[dict]) -> str: ...
 
-    @abstractmethod
-    def vector_search(self, paper_id: str, query: str, limit: int = 10) -> list[tuple[str, float]]:
-        """Returns (node_id, similarity) pairs; empty when embeddings are unavailable."""
-
-
 class InMemoryGraphStore(GraphStore):
     def __init__(self) -> None:
         self._papers: dict[str, ParsedPaper] = {}
@@ -77,6 +82,7 @@ class InMemoryGraphStore(GraphStore):
         self._documents: dict[str, SourceDocument] = {}
 
     def save_paper(self, parsed: ParsedPaper, graph: PaperArgumentGraph) -> None:
+        _ensure_graph_scope(parsed.paper_id, graph)
         self._papers[parsed.paper_id] = parsed
         self._graphs[parsed.paper_id] = graph
 
@@ -115,6 +121,7 @@ class InMemoryGraphStore(GraphStore):
         return self._graphs.get(paper_id)
 
     def replace_graph(self, paper_id: str, graph: PaperArgumentGraph) -> None:
+        _ensure_graph_scope(paper_id, graph)
         self._graphs[paper_id] = graph
 
     def get_semantic_units(self, paper_id: str) -> list[SemanticUnit]:
@@ -144,10 +151,6 @@ class InMemoryGraphStore(GraphStore):
         self._patches.setdefault(paper_id, []).append({"id": patch_id, "operations": operations})
         return patch_id
 
-    def vector_search(self, paper_id: str, query: str, limit: int = 10) -> list[tuple[str, float]]:
-        return []
-
-
 class SQLiteGraphStore(GraphStore):
     def __init__(self, database_url: str) -> None:
         self._path = self._database_path_from_url(database_url)
@@ -163,6 +166,7 @@ class SQLiteGraphStore(GraphStore):
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._path)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
     def _initialize_schema(self) -> None:
@@ -180,7 +184,7 @@ class SQLiteGraphStore(GraphStore):
                 );
 
                 CREATE TABLE IF NOT EXISTS semantic_units (
-                    id TEXT PRIMARY KEY,
+                    id TEXT NOT NULL,
                     paper_id TEXT NOT NULL,
                     role TEXT NOT NULL,
                     title TEXT NOT NULL DEFAULT '',
@@ -188,34 +192,45 @@ class SQLiteGraphStore(GraphStore):
                     source_location_json TEXT NOT NULL DEFAULT '{}',
                     confidence REAL NOT NULL DEFAULT 0,
                     created_by TEXT NOT NULL DEFAULT '',
-                    properties_json TEXT NOT NULL DEFAULT '{}'
+                    properties_json TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY (paper_id, id),
+                    FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS nodes (
-                    id TEXT PRIMARY KEY,
+                    id TEXT NOT NULL,
                     paper_id TEXT NOT NULL,
                     node_type TEXT NOT NULL,
                     title TEXT NOT NULL,
                     summary TEXT NOT NULL DEFAULT '',
                     properties_json TEXT NOT NULL DEFAULT '{}',
                     semantic_unit_ids_json TEXT NOT NULL DEFAULT '[]',
+                    reference_ids_json TEXT NOT NULL DEFAULT '[]',
                     page_ranges_json TEXT NOT NULL DEFAULT '[]',
                     confidence REAL NOT NULL DEFAULT 0,
                     source_type TEXT NOT NULL DEFAULT '',
                     created_by TEXT NOT NULL DEFAULT '',
-                    verified INTEGER NOT NULL DEFAULT 0
+                    verified INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (paper_id, id),
+                    FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS edges (
-                    id TEXT PRIMARY KEY,
-                    paper_id TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    source_paper_id TEXT NOT NULL,
                     source_node_id TEXT NOT NULL,
+                    target_paper_id TEXT NOT NULL,
                     target_node_id TEXT NOT NULL,
                     edge_type TEXT NOT NULL,
                     semantic_unit_ids_json TEXT NOT NULL DEFAULT '[]',
                     confidence REAL NOT NULL DEFAULT 0,
                     inference_type TEXT NOT NULL DEFAULT '',
-                    properties_json TEXT NOT NULL DEFAULT '{}'
+                    properties_json TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY (source_paper_id, id),
+                    FOREIGN KEY (source_paper_id, source_node_id)
+                        REFERENCES nodes(paper_id, id) ON DELETE CASCADE,
+                    FOREIGN KEY (target_paper_id, target_node_id)
+                        REFERENCES nodes(paper_id, id) ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS paper_references (
@@ -240,6 +255,7 @@ class SQLiteGraphStore(GraphStore):
             )
 
     def save_paper(self, parsed: ParsedPaper, graph: PaperArgumentGraph) -> None:
+        _ensure_graph_scope(parsed.paper_id, graph)
         with self._connect() as conn:
             conn.execute(
                 """
@@ -252,7 +268,8 @@ class SQLiteGraphStore(GraphStore):
                 """,
                 (parsed.paper_id, parsed.title, parsed.abstract, json.dumps(parsed.metadata, default=str)),
             )
-            for table in ("semantic_units", "nodes", "edges", "paper_references"):
+            conn.execute("DELETE FROM edges WHERE source_paper_id = ?", (parsed.paper_id,))
+            for table in ("nodes", "semantic_units", "paper_references"):
                 conn.execute(f"DELETE FROM {table} WHERE paper_id = ?", (parsed.paper_id,))
             for unit in parsed.semantic_units:
                 conn.execute(
@@ -277,9 +294,9 @@ class SQLiteGraphStore(GraphStore):
                 conn.execute(
                     """
                     INSERT INTO nodes
-                    (id, paper_id, node_type, title, summary, properties_json, semantic_unit_ids_json, page_ranges_json,
-                     confidence, source_type, created_by, verified)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, paper_id, node_type, title, summary, properties_json, semantic_unit_ids_json,
+                     reference_ids_json, page_ranges_json, confidence, source_type, created_by, verified)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         node.id,
@@ -289,6 +306,7 @@ class SQLiteGraphStore(GraphStore):
                         node.summary,
                         json.dumps(node.properties, default=str),
                         json.dumps(node.semantic_unit_ids),
+                        json.dumps(node.reference_ids),
                         json.dumps([list(pair) for pair in node.page_ranges]),
                         node.confidence,
                         node.source_type,
@@ -300,14 +318,15 @@ class SQLiteGraphStore(GraphStore):
                 conn.execute(
                     """
                     INSERT INTO edges
-                    (id, paper_id, source_node_id, target_node_id, edge_type, semantic_unit_ids_json, confidence,
-                     inference_type, properties_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, source_paper_id, source_node_id, target_paper_id, target_node_id, edge_type,
+                     semantic_unit_ids_json, confidence, inference_type, properties_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         edge.id,
-                        edge.paper_id,
+                        edge.source_paper_id,
                         edge.source_node_id,
+                        edge.target_paper_id,
                         edge.target_node_id,
                         str(edge.edge_type),
                         json.dumps(edge.semantic_unit_ids),
@@ -399,8 +418,11 @@ class SQLiteGraphStore(GraphStore):
             if row is None:
                 return False
             source = (_loads_json(row["metadata_json"], {}) or {}).get("source_document") or {}
+            conn.execute(
+                "DELETE FROM edges WHERE source_paper_id = ? OR target_paper_id = ?",
+                (paper_id, paper_id),
+            )
             conn.execute("DELETE FROM semantic_units WHERE paper_id = ?", (paper_id,))
-            conn.execute("DELETE FROM edges WHERE paper_id = ?", (paper_id,))
             conn.execute("DELETE FROM nodes WHERE paper_id = ?", (paper_id,))
             conn.execute("DELETE FROM paper_references WHERE paper_id = ?", (paper_id,))
             conn.execute("DELETE FROM graph_patches WHERE paper_id = ?", (paper_id,))
@@ -423,17 +445,17 @@ class SQLiteGraphStore(GraphStore):
                 return None
             node_rows = conn.execute(
                 """
-                SELECT id, node_type, title, summary, properties_json, semantic_unit_ids_json, page_ranges_json,
-                       confidence, source_type, created_by, verified
+                SELECT id, node_type, title, summary, properties_json, semantic_unit_ids_json,
+                       reference_ids_json, page_ranges_json, confidence, source_type, created_by, verified
                 FROM nodes WHERE paper_id = ?
                 """,
                 (paper_id,),
             ).fetchall()
             edge_rows = conn.execute(
                 """
-                SELECT id, source_node_id, target_node_id, edge_type, semantic_unit_ids_json, confidence,
-                       inference_type, properties_json
-                FROM edges WHERE paper_id = ?
+                SELECT id, source_paper_id, source_node_id, target_paper_id, target_node_id, edge_type,
+                       semantic_unit_ids_json, confidence, inference_type, properties_json
+                FROM edges WHERE source_paper_id = ?
                 """,
                 (paper_id,),
             ).fetchall()
@@ -448,6 +470,7 @@ class SQLiteGraphStore(GraphStore):
                 confidence=row["confidence"],
                 source_type=row["source_type"],
                 semantic_unit_ids=_loads_json(row["semantic_unit_ids_json"], []),
+                reference_ids=_loads_json(row["reference_ids_json"], []),
                 page_ranges=[tuple(pair) for pair in _loads_json(row["page_ranges_json"], [])],
                 properties=_loads_json(row["properties_json"], {}),
                 created_by=row["created_by"],
@@ -458,8 +481,9 @@ class SQLiteGraphStore(GraphStore):
         edges = [
             GraphEdge(
                 id=row["id"],
-                paper_id=paper_id,
+                source_paper_id=row["source_paper_id"],
                 source_node_id=row["source_node_id"],
+                target_paper_id=row["target_paper_id"],
                 target_node_id=row["target_node_id"],
                 edge_type=row["edge_type"],
                 confidence=row["confidence"],
@@ -472,16 +496,17 @@ class SQLiteGraphStore(GraphStore):
         return PaperArgumentGraph(paper_id=paper_id, nodes=nodes, edges=edges)
 
     def replace_graph(self, paper_id: str, graph: PaperArgumentGraph) -> None:
+        _ensure_graph_scope(paper_id, graph)
         with self._connect() as conn:
-            conn.execute("DELETE FROM edges WHERE paper_id = ?", (paper_id,))
+            conn.execute("DELETE FROM edges WHERE source_paper_id = ?", (paper_id,))
             conn.execute("DELETE FROM nodes WHERE paper_id = ?", (paper_id,))
             for node in graph.nodes:
                 conn.execute(
                     """
                     INSERT INTO nodes
-                    (id, paper_id, node_type, title, summary, properties_json, semantic_unit_ids_json, page_ranges_json,
-                     confidence, source_type, created_by, verified)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, paper_id, node_type, title, summary, properties_json, semantic_unit_ids_json,
+                     reference_ids_json, page_ranges_json, confidence, source_type, created_by, verified)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         node.id,
@@ -491,6 +516,7 @@ class SQLiteGraphStore(GraphStore):
                         node.summary,
                         json.dumps(node.properties, default=str),
                         json.dumps(node.semantic_unit_ids),
+                        json.dumps(node.reference_ids),
                         json.dumps([list(pair) for pair in node.page_ranges]),
                         node.confidence,
                         node.source_type,
@@ -502,14 +528,15 @@ class SQLiteGraphStore(GraphStore):
                 conn.execute(
                     """
                     INSERT INTO edges
-                    (id, paper_id, source_node_id, target_node_id, edge_type, semantic_unit_ids_json, confidence,
-                     inference_type, properties_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, source_paper_id, source_node_id, target_paper_id, target_node_id, edge_type,
+                     semantic_unit_ids_json, confidence, inference_type, properties_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         edge.id,
-                        edge.paper_id,
+                        edge.source_paper_id,
                         edge.source_node_id,
+                        edge.target_paper_id,
                         edge.target_node_id,
                         str(edge.edge_type),
                         json.dumps(edge.semantic_unit_ids),
@@ -606,17 +633,12 @@ class SQLiteGraphStore(GraphStore):
             )
         return patch_id
 
-    def vector_search(self, paper_id: str, query: str, limit: int = 10) -> list[tuple[str, float]]:
-        return []
-
-
 class PostgresGraphStore(GraphStore):
-    def __init__(self, engine: Engine, embeddings: EmbeddingClient | None = None) -> None:
+    def __init__(self, engine: Engine) -> None:
         self._engine = engine
-        self._embeddings = embeddings or EmbeddingClient()
 
     def save_paper(self, parsed: ParsedPaper, graph: PaperArgumentGraph) -> None:
-        node_embeddings = self._embed_nodes(graph.nodes)
+        _ensure_graph_scope(parsed.paper_id, graph)
         with self._engine.begin() as conn:
             conn.execute(
                 text(
@@ -632,7 +654,11 @@ class PostgresGraphStore(GraphStore):
                     "metadata": json.dumps(parsed.metadata, default=str),
                 },
             )
-            for table in ("edges", "nodes", "semantic_units", "paper_references"):
+            conn.execute(
+                text("DELETE FROM edges WHERE source_paper_id = :pid"),
+                {"pid": parsed.paper_id},
+            )
+            for table in ("nodes", "semantic_units", "paper_references"):
                 conn.execute(text(f"DELETE FROM {table} WHERE paper_id = :pid"), {"pid": parsed.paper_id})  # noqa: S608
             for unit in parsed.semantic_units:
                 conn.execute(
@@ -653,7 +679,7 @@ class PostgresGraphStore(GraphStore):
                         "properties": json.dumps(unit.properties, default=str),
                     },
                 )
-            self._insert_nodes(conn, graph.nodes, node_embeddings)
+            self._insert_nodes(conn, graph.nodes)
             self._insert_edges(conn, graph.edges)
             for reference in parsed.references:
                 conn.execute(
@@ -762,8 +788,8 @@ class PostgresGraphStore(GraphStore):
                 return None
             node_rows = conn.execute(
                 text(
-                    "SELECT id, node_type, title, summary, properties_json, semantic_unit_ids, page_ranges, "
-                    "confidence, source_type, created_by, verified FROM nodes WHERE paper_id = :pid"
+                    "SELECT id, node_type, title, summary, properties_json, semantic_unit_ids, reference_ids, "
+                    "page_ranges, confidence, source_type, created_by, verified FROM nodes WHERE paper_id = :pid"
                 ),
                 {"pid": paper_id},
             ).mappings()
@@ -777,6 +803,7 @@ class PostgresGraphStore(GraphStore):
                     confidence=row["confidence"],
                     source_type=row["source_type"],
                     semantic_unit_ids=list(row["semantic_unit_ids"] or []),
+                    reference_ids=list(row["reference_ids"] or []),
                     page_ranges=[tuple(pair) for pair in row["page_ranges"]],
                     properties=row["properties_json"],
                     created_by=row["created_by"],
@@ -786,16 +813,18 @@ class PostgresGraphStore(GraphStore):
             ]
             edge_rows = conn.execute(
                 text(
-                    "SELECT id, source_node_id, target_node_id, edge_type, semantic_unit_ids, confidence, "
-                    "inference_type, properties_json FROM edges WHERE paper_id = :pid"
+                    "SELECT id, source_paper_id, source_node_id, target_paper_id, target_node_id, edge_type, "
+                    "semantic_unit_ids, confidence, inference_type, properties_json "
+                    "FROM edges WHERE source_paper_id = :pid"
                 ),
                 {"pid": paper_id},
             ).mappings()
             edges = [
                 GraphEdge(
                     id=row["id"],
-                    paper_id=paper_id,
+                    source_paper_id=str(row["source_paper_id"]),
                     source_node_id=row["source_node_id"],
+                    target_paper_id=str(row["target_paper_id"]),
                     target_node_id=row["target_node_id"],
                     edge_type=row["edge_type"],
                     confidence=row["confidence"],
@@ -808,11 +837,11 @@ class PostgresGraphStore(GraphStore):
         return PaperArgumentGraph(paper_id=paper_id, nodes=nodes, edges=edges)
 
     def replace_graph(self, paper_id: str, graph: PaperArgumentGraph) -> None:
-        node_embeddings = self._embed_nodes(graph.nodes)
+        _ensure_graph_scope(paper_id, graph)
         with self._engine.begin() as conn:
-            conn.execute(text("DELETE FROM edges WHERE paper_id = :pid"), {"pid": paper_id})
+            conn.execute(text("DELETE FROM edges WHERE source_paper_id = :pid"), {"pid": paper_id})
             conn.execute(text("DELETE FROM nodes WHERE paper_id = :pid"), {"pid": paper_id})
-            self._insert_nodes(conn, graph.nodes, node_embeddings)
+            self._insert_nodes(conn, graph.nodes)
             self._insert_edges(conn, graph.edges)
 
     def get_semantic_units(self, paper_id: str) -> list[SemanticUnit]:
@@ -900,44 +929,15 @@ class PostgresGraphStore(GraphStore):
             )
         return patch_id
 
-    def vector_search(self, paper_id: str, query: str, limit: int = 10) -> list[tuple[str, float]]:
-        if not self._embeddings.available:
-            return []
-        vectors = self._embeddings.embed([query])
-        if not vectors:
-            return []
-        query_vector = "[" + ",".join(f"{value:.6f}" for value in vectors[0]) + "]"
-        with self._engine.connect() as conn:
-            rows = conn.execute(
-                text(
-                    "SELECT id, 1 - (embedding <=> CAST(:qvec AS vector)) AS similarity FROM nodes "
-                    "WHERE paper_id = :pid AND embedding IS NOT NULL "
-                    "ORDER BY embedding <=> CAST(:qvec AS vector) LIMIT :limit"
-                ),
-                {"qvec": query_vector, "pid": paper_id, "limit": limit},
-            )
-            return [(row[0], float(row[1])) for row in rows]
-
-    def _embed_nodes(self, nodes: list[GraphNode]) -> dict[str, str]:
-        if not self._embeddings.available or not nodes:
-            return {}
-        vectors = self._embeddings.embed([f"{node.title}\n{node.summary}" for node in nodes])
-        if not vectors:
-            return {}
-        return {
-            node.id: "[" + ",".join(f"{value:.6f}" for value in vector) + "]"
-            for node, vector in zip(nodes, vectors)
-        }
-
     @staticmethod
-    def _insert_nodes(conn, nodes: list[GraphNode], embeddings: dict[str, str]) -> None:
+    def _insert_nodes(conn, nodes: list[GraphNode]) -> None:
         for node in nodes:
             conn.execute(
                 text(
                     "INSERT INTO nodes (id, paper_id, node_type, title, summary, properties_json, semantic_unit_ids, "
-                    "page_ranges, confidence, source_type, created_by, verified, embedding) "
-                    "VALUES (:id, :pid, :node_type, :title, :summary, :properties, :semantic_unit_ids, :page_ranges, "
-                    ":confidence, :source_type, :created_by, :verified, CAST(:embedding AS vector))"
+                    "reference_ids, page_ranges, confidence, source_type, created_by, verified) "
+                    "VALUES (:id, :pid, :node_type, :title, :summary, :properties, :semantic_unit_ids, "
+                    ":reference_ids, :page_ranges, :confidence, :source_type, :created_by, :verified)"
                 ),
                 {
                     "id": node.id,
@@ -947,12 +947,12 @@ class PostgresGraphStore(GraphStore):
                     "summary": node.summary,
                     "properties": json.dumps(node.properties, default=str),
                     "semantic_unit_ids": node.semantic_unit_ids,
+                    "reference_ids": node.reference_ids,
                     "page_ranges": json.dumps([list(pair) for pair in node.page_ranges]),
                     "confidence": node.confidence,
                     "source_type": node.source_type,
                     "created_by": node.created_by,
                     "verified": node.verified,
-                    "embedding": embeddings.get(node.id),
                 },
             )
 
@@ -961,14 +961,16 @@ class PostgresGraphStore(GraphStore):
         for edge in edges:
             conn.execute(
                 text(
-                    "INSERT INTO edges (id, paper_id, source_node_id, target_node_id, edge_type, semantic_unit_ids, "
-                    "confidence, inference_type, properties_json) VALUES (:id, :pid, :source, :target, :edge_type, "
-                    ":semantic_unit_ids, :confidence, :inference_type, :properties)"
+                    "INSERT INTO edges (id, source_paper_id, source_node_id, target_paper_id, target_node_id, "
+                    "edge_type, semantic_unit_ids, confidence, inference_type, properties_json) "
+                    "VALUES (:id, :source_pid, :source, :target_pid, :target, :edge_type, :semantic_unit_ids, "
+                    ":confidence, :inference_type, :properties)"
                 ),
                 {
                     "id": edge.id,
-                    "pid": edge.paper_id,
+                    "source_pid": edge.source_paper_id,
                     "source": edge.source_node_id,
+                    "target_pid": edge.target_paper_id,
                     "target": edge.target_node_id,
                     "edge_type": str(edge.edge_type),
                     "semantic_unit_ids": edge.semantic_unit_ids,
