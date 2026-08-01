@@ -68,6 +68,11 @@ body {
   color: var(--text);
 }
 
+html.desktop-app,
+html.desktop-app body {
+  background: transparent;
+}
+
 button,
 input {
   font: inherit;
@@ -84,6 +89,21 @@ button:disabled {
 
 .shell {
   min-height: 100vh;
+}
+
+@media (min-width: 981px) {
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .shell {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
 }
 
 .toolbar {
@@ -174,11 +194,52 @@ button:disabled {
 }
 
 .workspace {
-  height: calc(100vh - 64px);
+  min-width: 0;
+  min-height: 0;
   display: grid;
-  grid-template-columns: minmax(260px, 0.9fr) minmax(360px, 1.45fr) minmax(280px, 1fr);
-  gap: 12px;
-  padding: 12px;
+  grid-template-columns:
+    minmax(360px, 1fr)
+    10px
+    minmax(280px, var(--inspector-pane-width, 340px));
+  gap: 0;
+}
+
+.web-layout {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(260px, var(--source-pane-width, 320px)) 10px minmax(0, 1fr);
+  grid-template-rows: 64px minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.web-layout > .pdf-pane {
+  min-height: 0;
+  grid-column: 1;
+  grid-row: 2;
+  margin: 12px 0 12px 12px;
+}
+
+.web-layout > .pane-splitter {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+.web-layout > .main-column {
+  display: contents;
+}
+
+.web-layout .toolbar {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+
+.web-layout .workspace {
+  min-height: 0;
+  grid-column: 3;
+  grid-row: 2;
+  margin: 12px 12px 12px 0;
+  overflow: hidden;
 }
 
 .pdf-pane,
@@ -186,6 +247,7 @@ button:disabled {
 .inspector {
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel);
@@ -194,6 +256,153 @@ button:disabled {
 .pdf-pane,
 .inspector {
   padding: 18px;
+}
+
+.pane-splitter {
+  position: relative;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.pane-splitter::after {
+  position: absolute;
+  inset: 0 3px;
+  border-radius: 999px;
+  background: transparent;
+  content: '';
+  transition: background 0.15s ease;
+}
+
+.pane-splitter:hover::after,
+.pane-splitter:focus-visible::after,
+body.pane-resizing .pane-splitter::after {
+  background: color-mix(in srgb, var(--accent) 48%, transparent);
+}
+
+body.pane-resizing,
+body.pane-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+.desktop-shell {
+  height: 100vh;
+  min-height: 0;
+  background: transparent;
+}
+
+.desktop-layout {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(260px, var(--source-pane-width, 320px)) 10px minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.desktop-layout > .pdf-pane {
+  min-width: 0;
+  height: 100%;
+}
+
+.desktop-layout > .pane-splitter {
+  min-height: 0;
+}
+
+.desktop-shell .main-column {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 74px minmax(0, 1fr);
+}
+
+.desktop-shell .toolbar {
+  min-height: 74px;
+  padding: 0 18px;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  background: color-mix(in srgb, var(--toolbar) 92%, transparent);
+  -webkit-app-region: drag;
+}
+
+.desktop-shell .toolbar .brand {
+  display: none;
+}
+
+.desktop-titlebar-title {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.desktop-titlebar-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-shell .toolbar-actions {
+  flex-shrink: 0;
+  padding: 0;
+  -webkit-app-region: no-drag;
+}
+
+.desktop-shell .toolbar button,
+.desktop-shell .toolbar input,
+.desktop-shell .toolbar select,
+.desktop-shell .toolbar label {
+  -webkit-app-region: no-drag;
+}
+
+.desktop-shell .pdf-pane {
+  border: 0;
+  border-right: 1px solid color-mix(in srgb, var(--border) 62%, transparent);
+  border-radius: 0;
+  padding: 100px 18px 18px;
+  background: color-mix(in srgb, var(--panel) 30%, transparent);
+  box-shadow: inset -1px 0 rgba(255, 255, 255, 0.25), 16px 0 34px rgba(15, 23, 42, 0.06);
+  backdrop-filter: blur(40px) saturate(1.3);
+  -webkit-backdrop-filter: blur(40px) saturate(1.3);
+}
+
+.desktop-shell .workspace {
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+}
+
+.desktop-shell .graph-pane {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--panel);
+}
+
+.desktop-shell .inspector {
+  margin: 0;
+  border: 0;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  background: color-mix(in srgb, var(--panel) 94%, var(--panel-soft));
+}
+
+.desktop-shell .pane-splitter {
+  z-index: 1;
+  background: var(--panel);
+}
+
+.desktop-platform-darwin .toolbar {
+  padding-left: 0;
+}
+
+.desktop-platform-win32 .toolbar-actions,
+.desktop-platform-linux .toolbar-actions {
+  margin-right: 142px;
 }
 
 .pane-heading {
@@ -1255,7 +1464,32 @@ button:disabled {
 
   .workspace {
     height: auto;
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr !important;
+  }
+
+  .web-layout {
+    height: auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: visible;
+  }
+
+  .web-layout .toolbar {
+    order: -2;
+  }
+
+  .web-layout > .pdf-pane {
+    order: -1;
+    margin: 12px;
+  }
+
+  .web-layout .workspace {
+    margin: 0 12px 12px;
+  }
+
+  .pane-splitter {
+    display: none;
   }
 
   .pdf-pane,
