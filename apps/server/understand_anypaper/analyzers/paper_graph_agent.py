@@ -23,7 +23,7 @@ from agent_framework import (
     chat_middleware,
     tool,
 )
-from agent_framework.openai import OpenAIChatClient, OpenAIChatCompletionClient
+from agent_framework.openai import OpenAIChatClient, OpenAIChatCompletionClient, OpenAIChatOptions, OpenAIChatCompletionOptions
 
 from understand_anypaper.analyzers.llm import create_chat_client, create_responses_client
 from understand_anypaper.config import Settings, apply_desktop_api_overrides, settings
@@ -329,6 +329,15 @@ Contribution with HAS_CONTRIBUTION. Every Contribution has Why, How, and Proof s
 nodes via CONTAINS. Put motivation/gap evidence under Why, methods/equations/modules under How,
 and experiments/results/tables under Proof. Additional meaningful relationships are encouraged.
 
+Also write graph.summary as a self-contained Markdown overview of the entire paper. Synthesize its
+motivation and research gap, core approach, main contributions, most important quantitative or
+qualitative results, and conclusion. Use short paragraphs and Markdown structure where it improves
+readability; do not merely copy the abstract or add source locators to this graph-level field.
+Whenever the summary names an important Contribution, Method, Module, Equation, Experiment, Result,
+Figure, or Table represented in the graph, link the useful phrase to that exact node using
+`[descriptive text](graph://node-id)`. Every graph:// target must exactly match an existing node ID.
+Normal https:// links are allowed only when they materially help the reader.
+
 ## Extraction density and boundaries
 
 Build a dense learning graph, not a paper summary. Almost every argument-bearing sentence in the
@@ -473,6 +482,10 @@ class PaperGraphAgent:
                 # Compatible gateways do not consistently persist Responses
                 # conversations, so keep function history local.
                 "store": False,
+                "reasoning": {
+                    "effort": "medium",
+                    "summary": "auto"
+                }
             }
             api_name = "Responses"
         else:

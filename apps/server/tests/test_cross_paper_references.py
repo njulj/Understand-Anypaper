@@ -192,7 +192,12 @@ def _graph_for(parsed: ParsedPaper) -> PaperArgumentGraph:
                 semantic_unit_ids=[unit.semantic_unit_id],
             )
         )
-    return PaperArgumentGraph(paper_id=parsed.paper_id, nodes=nodes, edges=edges)
+    return PaperArgumentGraph(
+        paper_id=parsed.paper_id,
+        summary=f"Summary of {parsed.title}.",
+        nodes=nodes,
+        edges=edges,
+    )
 
 
 def test_node_reference_expansion_links_directly_to_external_contribution(monkeypatch):
@@ -736,6 +741,7 @@ def test_cross_paper_materialization_distinguishes_reused_node_ids():
     shared_node_id = "c1"
     source_graph = PaperArgumentGraph(
         paper_id=source_paper_id,
+        summary="Source paper summary.",
         nodes=[
             GraphNode(
                 id=shared_node_id,
@@ -758,6 +764,7 @@ def test_cross_paper_materialization_distinguishes_reused_node_ids():
     )
     target_graph = PaperArgumentGraph(
         paper_id=target_paper_id,
+        summary="Target paper summary.",
         nodes=[
             GraphNode(
                 id=shared_node_id,
@@ -788,7 +795,7 @@ def test_cross_paper_materialization_distinguishes_reused_node_ids():
 def test_node_reference_expansion_streams_agent_activity_and_result(monkeypatch):
     paper_id = "paper-stream"
     node_id = "node-stream"
-    graph = PaperArgumentGraph(paper_id=paper_id)
+    graph = PaperArgumentGraph(paper_id=paper_id, summary="Streaming paper summary.")
 
     async def fake_expand(source_paper_id, source_node_id, request, *, on_progress=None):
         assert source_paper_id == paper_id

@@ -179,6 +179,7 @@ class SQLiteGraphStore(GraphStore):
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
                     abstract TEXT NOT NULL DEFAULT '',
+                    graph_summary TEXT NOT NULL DEFAULT '',
                     metadata_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
@@ -259,14 +260,21 @@ class SQLiteGraphStore(GraphStore):
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO papers (id, title, abstract, metadata_json)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO papers (id, title, abstract, graph_summary, metadata_json)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     title = excluded.title,
                     abstract = excluded.abstract,
+                    graph_summary = excluded.graph_summary,
                     metadata_json = excluded.metadata_json
                 """,
-                (parsed.paper_id, parsed.title, parsed.abstract, json.dumps(parsed.metadata, default=str)),
+                (
+                    parsed.paper_id,
+                    parsed.title,
+                    parsed.abstract,
+                    graph.summary,
+                    json.dumps(parsed.metadata, default=str),
+                ),
             )
             conn.execute("DELETE FROM edges WHERE source_paper_id = ?", (parsed.paper_id,))
             for table in ("nodes", "semantic_units", "paper_references"):
@@ -440,8 +448,10 @@ class SQLiteGraphStore(GraphStore):
 
     def get_graph(self, paper_id: str) -> PaperArgumentGraph | None:
         with self._connect() as conn:
-            exists = conn.execute("SELECT 1 FROM papers WHERE id = ?", (paper_id,)).fetchone()
-            if exists is None:
+            paper_row = conn.execute(
+                "SELECT graph_summary FROM papers WHERE id = ?", (paper_id,)
+            ).fetchone()
+            if paper_row is None:
                 return None
             node_rows = conn.execute(
                 """
@@ -493,11 +503,20 @@ class SQLiteGraphStore(GraphStore):
             )
             for row in edge_rows
         ]
-        return PaperArgumentGraph(paper_id=paper_id, nodes=nodes, edges=edges)
+        return PaperArgumentGraph(
+            paper_id=paper_id,
+            summary=paper_row["graph_summary"],
+            nodes=nodes,
+            edges=edges,
+        )
 
     def replace_graph(self, paper_id: str, graph: PaperArgumentGraph) -> None:
         _ensure_graph_scope(paper_id, graph)
         with self._connect() as conn:
+            conn.execute(
+                "UPDATE papers SET graph_summary = ? WHERE id = ?",
+                (graph.summary, paper_id),
+            )
             conn.execute("DELETE FROM edges WHERE source_paper_id = ?", (paper_id,))
             conn.execute("DELETE FROM nodes WHERE paper_id = ?", (paper_id,))
             for node in graph.nodes:
@@ -642,15 +661,17 @@ class PostgresGraphStore(GraphStore):
         with self._engine.begin() as conn:
             conn.execute(
                 text(
-                    "INSERT INTO papers (id, title, abstract, metadata_json) "
-                    "VALUES (:id, :title, :abstract, CAST(:metadata AS jsonb)) "
+                    "INSERT INTO papers (id, title, abstract, graph_summary, metadata_json) "
+                    "VALUES (:id, :title, :abstract, :graph_summary, CAST(:metadata AS jsonb)) "
                     "ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, "
-                    "abstract = EXCLUDED.abstract, metadata_json = EXCLUDED.metadata_json"
+                    "abstract = EXCLUDED.abstract, graph_summary = EXCLUDED.graph_summary, "
+                    "metadata_json = EXCLUDED.metadata_json"
                 ),
                 {
                     "id": parsed.paper_id,
                     "title": parsed.title,
                     "abstract": parsed.abstract,
+                    "graph_summary": graph.summary,
                     "metadata": json.dumps(parsed.metadata, default=str),
                 },
             )
@@ -783,8 +804,11 @@ class PostgresGraphStore(GraphStore):
 
     def get_graph(self, paper_id: str) -> PaperArgumentGraph | None:
         with self._engine.connect() as conn:
-            exists = conn.execute(text("SELECT 1 FROM papers WHERE id = :pid"), {"pid": paper_id}).first()
-            if not exists:
+            paper_row = conn.execute(
+                text("SELECT graph_summary FROM papers WHERE id = :pid"),
+                {"pid": paper_id},
+            ).mappings().first()
+            if not paper_row:
                 return None
             node_rows = conn.execute(
                 text(
@@ -834,11 +858,20 @@ class PostgresGraphStore(GraphStore):
                 )
                 for row in edge_rows
             ]
-        return PaperArgumentGraph(paper_id=paper_id, nodes=nodes, edges=edges)
+        return PaperArgumentGraph(
+            paper_id=paper_id,
+            summary=paper_row["graph_summary"],
+            nodes=nodes,
+            edges=edges,
+        )
 
     def replace_graph(self, paper_id: str, graph: PaperArgumentGraph) -> None:
         _ensure_graph_scope(paper_id, graph)
         with self._engine.begin() as conn:
+            conn.execute(
+                text("UPDATE papers SET graph_summary = :summary WHERE id = :pid"),
+                {"summary": graph.summary, "pid": paper_id},
+            )
             conn.execute(text("DELETE FROM edges WHERE source_paper_id = :pid"), {"pid": paper_id})
             conn.execute(text("DELETE FROM nodes WHERE paper_id = :pid"), {"pid": paper_id})
             self._insert_nodes(conn, graph.nodes)

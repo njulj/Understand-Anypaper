@@ -29,6 +29,7 @@ export type GraphEdge = {
 
 export type PaperArgumentGraph = {
   paper_id: string;
+  summary: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
 };

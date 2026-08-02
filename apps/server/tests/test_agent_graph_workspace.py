@@ -99,7 +99,16 @@ def _valid_graph() -> dict:
             for facet in ("why", "how", "proof")
         ],
     ]
-    return {"paper_id": paper_id, "nodes": nodes, "edges": edges}
+    return {
+        "paper_id": paper_id,
+        "summary": (
+            "ExactGraph turns paper claims into a [traceable argument graph](graph://contribution) "
+            "grounded in precise source spans, making each contribution and its evidence directly "
+            "inspectable."
+        ),
+        "nodes": nodes,
+        "edges": edges,
+    }
 
 
 def test_workspace_validates_exact_block_offsets_and_materializes_bbox(tmp_path):
@@ -130,11 +139,35 @@ def test_workspace_exposes_described_graph_schema(tmp_path):
     node_schema = schema["$defs"]["GraphNode"]
 
     assert schema["description"] == "The complete, traceable argument graph for one paper."
+    assert schema["properties"]["summary"]["description"].startswith(
+        "A self-contained Markdown summary"
+    )
     assert node_schema["description"] == "A typed argument or evidence node extracted from one paper."
     assert node_schema["properties"]["reference_ids"]["description"].startswith(
         "PaperReference identifiers"
     )
     assert references[0]["reference_id"] == "ref-paper-test-1"
+
+
+def test_workspace_requires_graph_level_summary(tmp_path):
+    workspace = AgentGraphWorkspace(tmp_path, _parsed())
+    workspace.initialize()
+
+    codes = {issue.code for issue in workspace.validate().errors}
+
+    assert "missing_summary" in codes
+
+
+def test_workspace_rejects_summary_link_to_unknown_graph_node(tmp_path):
+    workspace = AgentGraphWorkspace(tmp_path, _parsed())
+    workspace.initialize()
+    graph = _valid_graph()
+    graph["summary"] += " See [missing evidence](graph://not-a-node)."
+    workspace.graph_path.write_text(json.dumps(graph), encoding="utf-8")
+
+    codes = {issue.code for issue in workspace.validate().errors}
+
+    assert "unknown_summary_graph_link" in codes
 
 
 def test_workspace_rejects_unknown_reference_ids(tmp_path):

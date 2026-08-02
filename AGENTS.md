@@ -14,7 +14,7 @@
 
 ## 项目架构
 
-这是一个 MVP 形态的 client/server 项目：
+这是一个 client/server 项目：
 
 ```text
 docker-compose.yml
