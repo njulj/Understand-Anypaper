@@ -2,11 +2,13 @@ import asyncio
 import json
 from types import SimpleNamespace
 
-from agent_framework import FunctionInvocationContext
+from agent_framework import AgentResponseUpdate, Content, FunctionInvocationContext
 
 from understand_anypaper.analyzers.paper_graph_agent import (
     PaperGraphAgent,
     _ToolRuntime,
+    _streaming_edit_counts,
+    _track_tool_lifecycle,
     apply_patch as apply_patch_tool,
     read_file,
     search_replace,
@@ -21,6 +23,14 @@ from understand_anypaper.parser.models import (
     SourceBlock,
     SourceBlockSpan,
 )
+
+
+async def _invoke_with_tool_lifecycle(tool, arguments, context):
+    async def call_next():
+        context.result = await tool.invoke(arguments=arguments, context=context)
+
+    await _track_tool_lifecycle(context, call_next)
+    return context.result
 
 
 def _parsed() -> ParsedPaper:
@@ -142,7 +152,9 @@ def test_workspace_exposes_described_graph_schema(tmp_path):
     assert schema["properties"]["summary"]["description"].startswith(
         "A self-contained Markdown summary"
     )
-    assert node_schema["description"] == "A typed argument or evidence node extracted from one paper."
+    assert (
+        node_schema["description"] == "A typed argument or evidence node extracted from one paper."
+    )
     assert node_schema["properties"]["reference_ids"]["description"].startswith(
         "PaperReference identifiers"
     )
@@ -253,6 +265,34 @@ def test_model_family_routing():
     assert not PaperGraphAgent.is_gpt_model("google/gemini-3-flash-preview")
 
 
+def test_streaming_apply_patch_counts_patch_lines():
+    arguments = json.dumps(
+        {
+            "patch": "\n".join(
+                [
+                    "*** Begin Patch",
+                    "*** Update File: graph.json",
+                    "@@",
+                    "-old line",
+                    "+new line",
+                    "+another line",
+                    "*** End Patch",
+                ]
+            )
+        }
+    )
+
+    assert _streaming_edit_counts("apply_patch", arguments) == (2, 1)
+
+
+def test_streaming_search_replace_treats_old_text_as_deleted_until_new_text_arrives():
+    old_only = r'{"path":"graph.json","old_text":"first\nsecond'
+    with_new_text = old_only + r'","new_text":"first\nreplacement'
+
+    assert _streaming_edit_counts("search_replace", old_only) == (0, 2)
+    assert _streaming_edit_counts("search_replace", with_new_text) == (1, 1)
+
+
 def test_top_level_tool_schemas_hide_runtime_context():
     assert set(read_file.parameters()["properties"]) == {"path", "offset", "limit"}
     assert set(search_replace.parameters()["properties"]) == {
@@ -287,6 +327,8 @@ def test_responses_agent_uses_framework_function_loop_for_apply_patch(tmp_path, 
             self.function_invocation_configuration = {}
 
     runs = []
+    activities = []
+    agent_middlewares = []
 
     class FakeAgent:
         @classmethod
@@ -296,19 +338,51 @@ def test_responses_agent_uses_framework_function_loop_for_apply_patch(tmp_path, 
         def __init__(self, *, client, name, instructions, tools, middleware):
             self.client = client
             self.tools = tools
+            self.middleware = middleware
+            agent_middlewares.extend(middleware)
 
-        async def run(self, prompt, options, function_invocation_kwargs):
+        def run(self, prompt, *, stream, options, function_invocation_kwargs):
             runs.append((prompt, options, function_invocation_kwargs))
             apply_patch = next(tool for tool in self.tools if tool.name == "apply_patch")
-            await apply_patch.invoke(
-                arguments={"patch": patch, "disable_checks": False},
-                context=FunctionInvocationContext(
-                    function=apply_patch,
-                    arguments={},
-                    kwargs=dict(function_invocation_kwargs),
-                ),
-            )
-            return SimpleNamespace()
+            arguments_json = json.dumps({"patch": patch, "disable_checks": False})
+
+            class FakeResponseStream:
+                def __init__(self):
+                    self.consumed = False
+
+                def __aiter__(self):
+                    async def updates():
+                        for index in range(0, len(arguments_json), 37):
+                            yield AgentResponseUpdate(
+                                contents=[
+                                    Content.from_function_call(
+                                        call_id="edit-call",
+                                        name="apply_patch",
+                                        arguments=arguments_json[index : index + 37],
+                                    )
+                                ]
+                            )
+                        context = FunctionInvocationContext(
+                            function=apply_patch,
+                            arguments={},
+                            kwargs=dict(function_invocation_kwargs),
+                        )
+                        context.metadata["call_id"] = "edit-call"
+                        await _invoke_with_tool_lifecycle(
+                            apply_patch,
+                            {"patch": patch, "disable_checks": False},
+                            context,
+                        )
+                        self.consumed = True
+
+                    return updates()
+
+                async def get_final_response(self):
+                    assert self.consumed
+                    return SimpleNamespace()
+
+            assert stream is True
+            return FakeResponseStream()
 
     monkeypatch.setattr(
         "understand_anypaper.analyzers.paper_graph_agent.Agent",
@@ -325,7 +399,10 @@ def test_responses_agent_uses_framework_function_loop_for_apply_patch(tmp_path, 
         responses_client=fake_client,
     )
 
-    asyncio.run(agent._run_agent(workspace))
+    async def capture(activity):
+        activities.append(activity)
+
+    asyncio.run(agent._run_agent(workspace, on_progress=capture))
 
     assert workspace.validate().valid
     assert fake_client.function_invocation_configuration == {
@@ -335,6 +412,16 @@ def test_responses_agent_uses_framework_function_loop_for_apply_patch(tmp_path, 
     assert runs[0][1]["allow_multiple_tool_calls"] is False
     assert runs[0][1]["store"] is False
     assert isinstance(runs[0][2]["runtime"], _ToolRuntime)
+    assert _track_tool_lifecycle in agent_middlewares
+    edits = [activity for activity in activities if activity["kind"] == "edit"]
+    assert len(edits) > 1
+    assert {activity["id"] for activity in edits} == {edits[0]["id"]}
+    assert edits[0]["status"] == "streaming"
+    assert "problem_count" not in edits[0]
+    assert "node_count" not in edits[0]
+    assert edits[-1]["status"] == "complete"
+    assert edits[-1]["additions"] > 0
+    assert edits[-1]["node_count"] == 5
 
 
 def test_chat_completions_read_defers_image_for_middleware(tmp_path):
@@ -395,9 +482,10 @@ def test_shell_passes_plain_environment_dict_and_resumes_thinking(tmp_path, monk
     )
 
     result = asyncio.run(
-        shell.invoke(
-            arguments={"command": "printf ok"},
-            context=context,
+        _invoke_with_tool_lifecycle(
+            shell,
+            {"command": "printf ok"},
+            context,
         )
     )
 
@@ -429,7 +517,11 @@ def test_tool_progress_reports_thinking_read_and_edit_metadata(tmp_path):
             arguments={},
             kwargs={"runtime": runtime},
         )
-        await read_file.invoke(arguments={"path": "graph.json"}, context=read_context)
+        await _invoke_with_tool_lifecycle(
+            read_file,
+            {"path": "graph.json"},
+            read_context,
+        )
 
         workspace.graph_path.write_text(json.dumps(_valid_graph(), indent=2), encoding="utf-8")
         await runtime.record_edit('{"nodes": []}')

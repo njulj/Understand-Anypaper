@@ -1307,8 +1307,12 @@ function App() {
                           <span>+{activity.additions ?? 0}</span>{' '}
                           <span>−{activity.deletions ?? 0}</span>
                         </small>
-                        <small>{activity.problem_count ?? 0} Problems</small>
-                        <small>{activity.node_count ?? 0} Nodes</small>
+                        {activity.status !== 'streaming' && activity.status !== 'failed' ? (
+                          <>
+                            <small>{activity.problem_count ?? 0} Problems</small>
+                            <small>{activity.node_count ?? 0} Nodes</small>
+                          </>
+                        ) : null}
                       </span>
                     ) : null}
                     {activity.kind === 'read' && activity.start_line != null ? (
