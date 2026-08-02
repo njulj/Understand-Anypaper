@@ -41,6 +41,8 @@ This makes it easier to answer questions like:
 - Search and filter the graph while studying.
 - Correct the graph manually when the model gets something wrong.
 - Save analyzed papers and come back to them later.
+- Import a LaTeX ZIP, or open a local source folder in the desktop app, and edit it in an embedded OpenVSCode workspace.
+- Recompile the paper and update its graph from the source changes with one button.
 
 ## Quick start
 
@@ -53,9 +55,14 @@ devbox services up
 
 Open the web app:
 
+<http://localhost:5173>
+
 ```bash
 devbox services up --background
 ```
+
+The LaTeX workspace is available at <http://localhost:5173/write>. Devbox also
+starts OpenVSCode Server on port `3001` and provides Tectonic for compilation.
 
 ## Desktop packaging
 
@@ -107,7 +114,8 @@ The main webpage is only shown after that initialization succeeds.
 ### Production desktop builds
 
 Desktop builds package the FastAPI backend into a standalone executable and also
-bundle the Go launcher. Electron starts the launcher locally on
+bundle the Go launcher. Linux builds additionally download and bundle the pinned
+OpenVSCode Server and Tectonic releases. Electron starts the launcher locally on
 `127.0.0.1:8765`, and the launcher starts the packaged backend. The packaged
 backend defaults to a workspace-local SQLite database, so it does not require
 PostgreSQL on end-user machines.
@@ -117,6 +125,10 @@ setup. On macOS, the local script also defaults to `zip` output and skips `dmg`
 unless you explicitly enable it.
 
 Build on the target platform:
+
+```bash
+./scripts/package-desktop-linux.sh
+```
 
 ```bash
 ./scripts/package-desktop-macos.sh
@@ -149,18 +161,23 @@ Outputs:
 - Intermediate launcher executable: `release/staging/launcher/uap` or `uap.exe`
 - Electron installers and archives: `release/`
 
+OpenVSCode publishes ready-to-run Linux archives. For experimental macOS or
+Windows packaging, provide an already built platform distribution through
+`PAG_OPENVSCODE_DIR` and a Tectonic binary through
+`PAG_TECTONIC_EXECUTABLE`; without those, the existing reader remains available
+but LaTeX editing reports that its local editor/compiler is missing.
+
 ## GitHub Releases
 
-The repo now includes a desktop packaging workflow at
+The repo includes a desktop packaging workflow at
 `.github/workflows/desktop-releases.yml`.
 
-- pushing a `v*` tag builds macOS and Windows desktop artifacts
+- pushing a `v*` tag builds macOS, Windows, and Linux desktop artifacts
 - those artifacts are then attached to the matching GitHub Release
 - `workflow_dispatch` can still be used to validate the packaging pipeline
   without publishing a Release
 
 The desktop app inherits `OPENAI_API_KEY` / `PAG_OPENAI_API_KEY` from the launch
 environment, so keep those configured when testing packaged builds.
-<http://localhost:5173>
 
 Graph generation requires an LLM API key in `.env`.

@@ -1,6 +1,9 @@
 {
   "packages": [
     "nodejs@22",
+    "go@latest",
+    "openvscode-server",
+    "tectonic",
     "uv@latest",
     "process-compose@1.110.0",
     "postgresql@16"
@@ -11,6 +14,7 @@
     "API_PORT": "8000",
     "WEB_PORT": "5173",
     "PHOENIX_PORT": "6006",
+    "OPENVSCODE_PORT": "3001",
     "PAG_DOCUMENT_STORE_DIR": "$PWD/data/documents"
   }
 }

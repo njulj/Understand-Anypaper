@@ -33,6 +33,8 @@ docker-compose.yml
 6. Agent 根据 `paper_references.json` 把引用节点绑定到稳定的 `reference_ids`；最终图通过校验后，服务端把 `block_id + offset` 精确物化成 `SemanticUnit`、page 和归一化 bbox，供 PDF 高亮、前作查询及现有 API 使用；模型不生成 quote/bbox。
 7. 图通过 `GraphStore` 保存；服务端使用 PostgreSQL，桌面端使用 SQLite，数据库不可用时回退到进程内内存 store。
 
+LaTeX 写作流程位于 `/write`：ZIP 项目复制到应用工作区，桌面端也可登记外部本地目录；Electron 按需启动 OpenVSCode Server，并把源码目录作为 folder 打开。后端用 Tectonic（回退到 latexmk）编译 PDF。每个项目的应用状态、构图原始 `graph.json` 和 sidecar Git 仓库都放在源码目录之外；“更新图”把上次成功更新后的 Git diff、上一版 graph 和当前编译 PDF 交给 `PaperGraphAgent`，成功后保存物化图并提交新的基线。OpenVSCode 自带的写作 Agent 与后端构图 Agent 不共享对话上下文。
+
 ## 目录和文件职责
 
 ### 根目录
@@ -55,7 +57,8 @@ docker-compose.yml
 - `main.py`：FastAPI 应用入口，配置 CORS、挂载 API router，并提供 `/health`。
 - `config.py`：`pydantic-settings` 配置入口。默认值包括数据库 URL、递归深度/数量限制和图生成模型配置。
 - `observability.py`：LLM 可观测性入口。当环境里配置了 `OTEL_EXPORTER_OTLP_*` endpoint 时，安装 OTel providers 把 agent-framework 自带的 LLM span 导出到 Arize Phoenix（或任意 OTLP 后端）；未配置时完全不生效。
-- `api/routes.py`：当前所有 REST API。上传接口以 NDJSON 流返回处理进度，图数据通过 `GraphStore` 持久化。
+- `api/routes.py`：论文阅读相关 REST API。上传接口以 NDJSON 流返回处理进度，图数据通过 `GraphStore` 持久化。
+- `api/latex_routes.py`：LaTeX 项目导入/登记、主文件选择、编译和流式构图更新 API。
 - `parser/models.py`：解析和溯源数据模型。`SourceBlock` 是 agent 使用的唯一 authoring locator 基础；`PageSourceLocation` 是服务端物化后的读取模型。
 - `parser/pdf_parser.py`：parser facade。对 PDF 用 PyMuPDF 渲染页面图片，提取 title/abstract/reference，并建立稳定文本块、offset 和内部行 bbox 索引。`.txt`/`.md` 仍作为文本 fallback。
 - `graph/schema.py`：Paper Argument Graph 的 Pydantic 模型和枚举，包括 `NodeType`、`EdgeType`、`GraphNode`、`GraphEdge`、`PaperArgumentGraph`。节点和边通过 `semantic_unit_ids` 溯源。
@@ -65,6 +68,8 @@ docker-compose.yml
 - `analyzers/paper_graph_agent.py`：当前主构图流程。提供 Read、GPT function `apply_patch` / 非 GPT `search_replace`、shell 工具，并由 Agent Framework 驱动工具调用与校验—修复循环。
 - `storage/graph_store.py`：`GraphStore` 抽象及 PostgreSQL/SQLite/内存实现，负责论文、图、semantic units、references 和源 PDF 的持久化。
 - `recursive/traversal_policy.py`：参考文献递归分析的边界策略，限制最大深度、最大论文数和重复访问。
+- `latex/project_store.py`：LaTeX 项目元数据、托管/外部源码目录、原始 graph revision 和独立 sidecar Git 基线。
+- `latex/compiler.py`：Tectonic/latexmk 编译封装，产出当前 PDF 和编译日志。
 
 ### 前端：`apps/web`
 
@@ -72,7 +77,9 @@ docker-compose.yml
 - `package.json` / `package-lock.json`：前端依赖和脚本。`npm run dev` 使用 `vite --host 0.0.0.0`，方便容器端口映射到宿主机。
 - `index.html`：Vite HTML 入口，挂载 `src/main.tsx`。
 - `tsconfig.json`：TypeScript 配置。
-- `src/main.tsx`：当前 React 单页壳。展示顶部工具栏、PDF Reader、Graph Pane、Node Inspector 三个主要区域。
+- `src/main.tsx`：按 `/` 与 `/write` 分发阅读和写作页面的小入口。
+- `src/ReaderApp.tsx`：原有 PDF Reader、Graph Pane、Node Inspector 三栏阅读工作区。
+- `src/WritingApp.tsx`：LaTeX 项目入口，以及 PDF/图切换、OpenVSCode 和更新图按钮组成的写作工作区。
 - `src/api.ts`：后端 REST API 的类型定义和 fetch 封装，含带进度流的上传实现。
 - `src/GraphView.tsx`：基于 jsMind 的思维导图式图谱渲染组件。
 - `src/styles.css`：前端页面样式。

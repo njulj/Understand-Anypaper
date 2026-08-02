@@ -40,6 +40,8 @@ Understand Anypaper 帮助你阅读研究论文。它会把论文转换成一个
 - 学习时搜索和过滤图谱。
 - 当模型理解错误时，手动修正图谱。
 - 保存已分析的论文，之后继续查看。
+- 导入 LaTeX ZIP，或在桌面端直接打开本地源码目录，并在内嵌 OpenVSCode 中编辑。
+- 一键重新编译论文，并根据上次建图以来的源码差异更新论证图谱。
 
 ## 快速开始
 
@@ -53,5 +55,8 @@ devbox services up
 打开网页应用：
 
 <http://localhost:5173>
+
+LaTeX 写作入口位于 <http://localhost:5173/write>。Devbox 会同时在 3001
+端口启动 OpenVSCode Server，并提供 Tectonic 编译器。
 
 生成图谱需要在 `.env` 中配置 LLM API key。

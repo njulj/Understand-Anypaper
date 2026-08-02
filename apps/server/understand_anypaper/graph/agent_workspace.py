@@ -59,7 +59,12 @@ class AgentGraphWorkspace:
         self.graph_path = self.root / "graph.json"
         self.blocks_by_id = {block.block_id: block for block in parsed.source_blocks}
 
-    def initialize(self) -> None:
+    def initialize(
+        self,
+        *,
+        initial_graph: PaperArgumentGraph | dict[str, Any] | None = None,
+        source_diff: str | None = None,
+    ) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         rendered = self.root / "rendered"
         rendered.mkdir(exist_ok=True)
@@ -85,6 +90,16 @@ class AgentGraphWorkspace:
             ),
             encoding="utf-8",
         )
+        if source_diff is not None:
+            (self.root / "source_changes.diff").write_text(source_diff, encoding="utf-8")
+        if initial_graph is not None:
+            payload = (
+                initial_graph.model_dump(mode="json")
+                if isinstance(initial_graph, PaperArgumentGraph)
+                else initial_graph
+            )
+            self._write_graph(payload)
+            return
         initial = PaperArgumentGraph(
             paper_id=self.parsed.paper_id,
             summary="",
@@ -103,6 +118,9 @@ class AgentGraphWorkspace:
             edges=[],
         )
         self._write_graph(initial.model_dump(mode="json"))
+
+    def authoring_graph(self) -> PaperArgumentGraph:
+        return PaperArgumentGraph.model_validate_json(self.graph_path.read_text(encoding="utf-8"))
 
     def _parsed_text_document(self) -> str:
         lines = [

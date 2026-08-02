@@ -74,8 +74,404 @@ html.desktop-app body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
+}
+
+.writing-home {
+  min-height: 100vh;
+  padding: 28px;
+  background:
+    radial-gradient(circle at 15% 5%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 32%),
+    var(--bg);
+}
+
+.writing-home-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+.writing-link-button {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.writing-home-card {
+  width: min(720px, 100%);
+  margin: 12vh auto 0;
+  padding: 42px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  box-shadow: 0 30px 80px color-mix(in srgb, var(--text) 10%, transparent);
+  text-align: center;
+}
+
+.writing-home-card > svg {
+  color: var(--accent);
+}
+
+.writing-home-card h1 {
+  margin: 16px 0 8px;
+  font-size: clamp(28px, 5vw, 48px);
+  letter-spacing: -0.045em;
+}
+
+.writing-home-card > p {
+  color: var(--muted);
+}
+
+.writing-home-actions,
+.writing-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.writing-home-actions {
+  margin-top: 28px;
+}
+
+.writing-status {
+  min-height: 26px;
+  margin-top: 18px;
+}
+
+.writing-project-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 26px;
+  text-align: left;
+}
+
+.writing-project-list a {
+  display: grid;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-soft);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.writing-project-list a:hover {
+  border-color: var(--accent);
+}
+
+.writing-project-list span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.writing-shell {
+  height: 100vh;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 64px minmax(0, 1fr);
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.writing-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--toolbar);
+  -webkit-app-region: drag;
+}
+
+.writing-toolbar button,
+.writing-toolbar a,
+.writing-toolbar select {
+  -webkit-app-region: no-drag;
+}
+
+.writing-back {
+  width: 34px;
+  height: 34px;
+  text-decoration: none;
+}
+
+.writing-project-title {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.writing-project-title span {
+  max-width: min(46vw, 640px);
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.writing-toolbar select {
+  min-width: 190px;
+  height: 36px;
+  margin-left: auto;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.writing-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.writing-workspace {
+  min-height: 0;
+  display: grid;
+  grid-template-columns:
+    minmax(320px, var(--writing-preview-width, 38%))
+    10px
+    minmax(480px, 1fr);
+}
+
+.writing-preview,
+.writing-editor {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--panel);
+}
+
+.writing-preview {
+  position: relative;
+  border-right: 1px solid var(--border);
+}
+
+.writing-pane-splitter {
+  background: var(--panel-soft);
+}
+
+.writing-editor {
+  position: relative;
+}
+
+body.pane-resizing .writing-editor::after {
+  position: absolute;
+  z-index: 10;
+  inset: 0;
+  content: '';
+}
+
+.writing-preview-controls {
+  position: absolute;
+  z-index: 4;
+  top: 12px;
+  right: 12px;
+  left: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.writing-preview-controls > * {
+  pointer-events: auto;
+}
+
+.writing-agent-progress {
+  width: min(680px, 100%);
+  max-height: min(300px, 44vh);
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  box-shadow: 0 8px 30px color-mix(in srgb, var(--text) 14%, transparent);
+  backdrop-filter: blur(14px);
+}
+
+.writing-agent-progress-heading {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.writing-agent-progress-heading svg {
+  color: var(--accent);
+}
+
+.writing-agent-progress-heading span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.writing-agent-progress-heading strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.writing-agent-progress > progress {
+  width: 100%;
+  height: 7px;
+  margin-top: 9px;
+  accent-color: var(--accent);
+}
+
+.writing-update-error {
+  width: min(680px, 100%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--panel) 92%, var(--danger) 8%);
+  color: var(--danger-text);
+  box-shadow: 0 6px 24px color-mix(in srgb, var(--text) 12%, transparent);
+  text-align: left;
+}
+
+.writing-update-error svg {
+  flex: 0 0 auto;
+}
+
+.writing-update-error span {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.writing-preview-tabs {
+  display: flex;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  box-shadow: 0 4px 18px color-mix(in srgb, var(--text) 10%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+.writing-preview-tabs button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.writing-preview-tabs button.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.writing-graph-back {
+  max-width: min(680px, 100%);
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  color: var(--text);
+  box-shadow: 0 4px 18px color-mix(in srgb, var(--text) 10%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+.writing-graph-back svg {
+  flex: 0 0 auto;
+}
+
+.writing-graph-back span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.writing-pdf-pages {
+  height: 100%;
+  display: grid;
+  gap: 18px;
+  padding: 62px 20px 24px;
+  overflow: auto;
+  background: var(--panel-soft);
+}
+
+.writing-pdf-pages img {
+  width: 100%;
+  display: block;
+  background: #fff;
+  box-shadow: 0 8px 28px var(--pdf-page-shadow);
+}
+
+.writing-preview .graph-canvas {
+  height: 100%;
+}
+
+.writing-empty-preview,
+.writing-editor-loading {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.writing-editor iframe,
+.writing-editor webview {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border: 0;
+  background: #1e1e1e;
+}
+
+.writing-editor-loading {
+  align-content: center;
+  gap: 12px;
+}
+
+@media (max-width: 980px) {
+  .writing-workspace {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(300px, 44vh) minmax(460px, 1fr);
+    overflow: auto;
+  }
+
+  .writing-preview {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
 }
 
 button {

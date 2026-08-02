@@ -33,6 +33,44 @@
         }
       }
     },
+    "go@latest": {
+      "last_modified": "2026-07-23T05:10:05Z",
+      "resolved": "github:NixOS/nixpkgs/7525d999cd850b9a488817abc89c75dc733acf17#go",
+      "source": "devbox-search",
+      "version": "1.26.5",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/naw4mj4s58ymzlc10a76y79m40w3wfpp-go-1.26.5",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/naw4mj4s58ymzlc10a76y79m40w3wfpp-go-1.26.5"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/fhg6v8k9hbqpr4b2zcmd099afxh7qxw0-go-1.26.5",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/fhg6v8k9hbqpr4b2zcmd099afxh7qxw0-go-1.26.5"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/rcz9i4msbg3178grqll9h98b07dwk7zg-go-1.26.5",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/rcz9i4msbg3178grqll9h98b07dwk7zg-go-1.26.5"
+        }
+      }
+    },
     "nodejs@22": {
       "last_modified": "2026-06-27T07:37:20Z",
       "plugin_version": "0.0.4",
@@ -81,6 +119,10 @@
           "store_path": "/nix/store/znxrv89969njb8fxyyn8rz4ygmmcjpw9-nodejs-22.23.1"
         }
       }
+    },
+    "openvscode-server": {
+      "resolved": "github:NixOS/nixpkgs/19a8a1e6d8b7315b6fd84e5a51977ce6f69d5a5b#openvscode-server",
+      "source": "nixpkg"
     },
     "postgresql@16": {
       "last_modified": "2024-12-22T08:27:48Z",
@@ -254,6 +296,10 @@
           "store_path": "/nix/store/s0qhp6yri5zd2jq8infpll23lkvbgylc-process-compose-1.110.0"
         }
       }
+    },
+    "tectonic": {
+      "resolved": "github:NixOS/nixpkgs/19a8a1e6d8b7315b6fd84e5a51977ce6f69d5a5b#tectonic",
+      "source": "nixpkg"
     },
     "uv@latest": {
       "last_modified": "2026-06-28T17:12:19Z",

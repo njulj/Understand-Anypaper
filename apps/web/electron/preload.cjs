@@ -8,4 +8,7 @@ contextBridge.exposeInMainWorld('pagDesktop', {
   getApiConfig: () => ipcRenderer.invoke('desktop-api-config:get'),
   saveApiConfig: (config) => ipcRenderer.invoke('desktop-api-config:save', config),
   getSetupInfo: () => ipcRenderer.invoke('desktop-setup:get'),
+  chooseLatexFolder: () => ipcRenderer.invoke('latex-folder:choose'),
+  openVSCodeUrlForFolder: (folderPath) =>
+    ipcRenderer.invoke('openvscode:url-for-folder', folderPath),
 });

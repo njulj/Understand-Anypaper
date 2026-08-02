@@ -18,7 +18,7 @@ LAUNCHER_EXECUTABLE="$LAUNCHER_DIR/uap"
 BACKEND_STAMP_FILE="$BACKEND_DIR/.packaging-version"
 RELEASE_BACKEND_EXECUTABLE="$RELEASE_DIR/linux-unpacked/resources/backend/server"
 RELEASE_BACKEND_STAMP_FILE="$RELEASE_DIR/linux-unpacked/resources/backend/.packaging-version"
-REQUIRED_BACKEND_PACKAGING_VERSION="desktop-backend-v3"
+REQUIRED_BACKEND_PACKAGING_VERSION="desktop-backend-v4"
 
 mkdir -p "$BACKEND_DIR" "$LAUNCHER_DIR" "$PYINSTALLER_TMP" "$UV_CACHE_DIR" "$GO_CACHE_DIR" "$RELEASE_DIR"
 
@@ -27,6 +27,7 @@ if [[ ! -d "$WEB_DIR/node_modules" ]]; then
 fi
 
 npm --prefix "$WEB_DIR" run doctor:bindings
+"$ROOT_DIR/scripts/stage-editor-tools-linux.sh"
 
 backend_rebuild_required() {
   if [[ "$REBUILD_BACKEND" == "1" ]]; then

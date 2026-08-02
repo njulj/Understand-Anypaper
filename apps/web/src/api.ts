@@ -132,6 +132,30 @@ export type AgentActivity = {
   node_count?: number;
 };
 
+export type LatexProject = {
+  project_id: string;
+  paper_id: string;
+  name: string;
+  root_path: string;
+  source_kind: 'managed' | 'external';
+  main_tex: string | null;
+  tex_files: string[];
+  baseline_commit: string | null;
+  current_graph_revision: string | null;
+  created_at: string;
+  updated_at: string;
+  graph_ready: boolean;
+};
+
+export type LatexGraphUpdateProgress = {
+  event: string;
+  progress: number;
+  message: string;
+  activity?: AgentActivity;
+  project?: LatexProject;
+  graph?: PaperArgumentGraph;
+};
+
 export type UploadPaperOptions = {
   onUploadProgress?: (progress: UploadProgress) => void;
   onStageProgress?: (progress: UploadStageProgress) => void;
@@ -405,5 +429,97 @@ export function patchGraph(paperId: string, operations: PatchOperation[]): Promi
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ operations }),
+  });
+}
+
+export function listLatexProjects(): Promise<LatexProject[]> {
+  return request<LatexProject[]>('/api/latex-projects');
+}
+
+export function importLatexProject(file: File): Promise<LatexProject> {
+  const body = new FormData();
+  body.append('file', file);
+  return request<LatexProject>('/api/latex-projects/import', { method: 'POST', body });
+}
+
+export function openLatexFolder(path: string): Promise<LatexProject> {
+  return request<LatexProject>('/api/latex-projects/open', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+}
+
+export function fetchLatexProject(projectId: string): Promise<LatexProject> {
+  return request<LatexProject>(`/api/latex-projects/${encodeURIComponent(projectId)}`);
+}
+
+export function setLatexMainTex(projectId: string, mainTex: string): Promise<LatexProject> {
+  return request<LatexProject>(`/api/latex-projects/${encodeURIComponent(projectId)}/main-tex`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ main_tex: mainTex }),
+  });
+}
+
+export function forgetLatexProject(projectId: string): Promise<{ forgotten: string }> {
+  return request<{ forgotten: string }>(`/api/latex-projects/${encodeURIComponent(projectId)}`, {
+    method: 'DELETE',
+  });
+}
+
+export function streamLatexGraphUpdate(
+  projectId: string,
+  onProgress?: (progress: LatexGraphUpdateProgress) => void,
+): Promise<{ project: LatexProject; graph: PaperArgumentGraph }> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let processedLength = 0;
+    let settled = false;
+
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    const processLine = (line: string) => {
+      if (!line.trim()) return;
+      let progress: LatexGraphUpdateProgress;
+      try {
+        progress = JSON.parse(line) as LatexGraphUpdateProgress;
+      } catch {
+        fail(new Error(`Invalid graph update event: ${line}`));
+        return;
+      }
+      onProgress?.(progress);
+      if (progress.event === 'error') {
+        fail(new Error(progress.message || 'Graph update failed.'));
+        xhr.abort();
+      } else if (progress.event === 'complete' && progress.project && progress.graph) {
+        settled = true;
+        resolve({ project: progress.project, graph: progress.graph });
+      }
+    };
+    const processLines = (final = false) => {
+      const text = xhr.responseText.slice(processedLength);
+      const lines = text.split('\n');
+      const complete = final ? lines : lines.slice(0, -1);
+      processedLength = final
+        ? xhr.responseText.length
+        : xhr.responseText.length - lines[lines.length - 1].length;
+      complete.forEach(processLine);
+    };
+
+    xhr.open('POST', `${API_BASE_URL}/api/latex-projects/${encodeURIComponent(projectId)}/graph/update`);
+    xhr.onprogress = () => processLines();
+    xhr.onload = () => {
+      processLines(true);
+      if (!settled) fail(new Error(xhr.responseText || 'Graph update finished without a result.'));
+    };
+    xhr.onerror = () => fail(new Error('Graph update request failed.'));
+    xhr.onabort = () => {
+      if (!settled) fail(new Error('Graph update canceled.'));
+    };
+    xhr.send();
   });
 }
