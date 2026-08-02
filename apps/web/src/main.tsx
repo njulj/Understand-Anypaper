@@ -4,7 +4,6 @@ import { ReaderApp } from './ReaderApp';
 import { WritingApp } from './WritingApp';
 import './styles.css';
 
-
 function writingProjectId(): string | null | undefined {
   const route = window.location.protocol === 'file:' ? window.location.hash.slice(1) : window.location.pathname;
   const match = route.match(/^\/write(?:\/([^/]+))?\/?$/);
