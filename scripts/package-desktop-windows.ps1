@@ -8,6 +8,8 @@ $ReleaseDir = Join-Path $RootDir "release"
 $StagingDir = Join-Path $ReleaseDir "staging"
 $BackendDir = Join-Path $StagingDir "backend"
 $LauncherDir = Join-Path $StagingDir "launcher"
+$OpenVSCodeDir = Join-Path $StagingDir "openvscode-server"
+$LatexBinDir = Join-Path $StagingDir "latex/bin"
 $PyInstallerTmp = Join-Path $RootDir ".tmp/pyinstaller/windows"
 $UvCacheDir = Join-Path $RootDir ".tmp/uv-cache"
 $GoCacheDir = Join-Path $RootDir ".tmp/go-build-cache/windows"
@@ -18,14 +20,23 @@ $LauncherExecutable = Join-Path $LauncherDir "uap.exe"
 $BackendStampFile = Join-Path $BackendDir ".packaging-version"
 $ReleaseBackendExecutable = Join-Path $ReleaseDir "win-unpacked/resources/backend/server.exe"
 $ReleaseBackendStampFile = Join-Path $ReleaseDir "win-unpacked/resources/backend/.packaging-version"
-$RequiredBackendPackagingVersion = "desktop-backend-v3"
+$RequiredBackendPackagingVersion = "desktop-backend-v4"
 
 New-Item -ItemType Directory -Force -Path $BackendDir | Out-Null
 New-Item -ItemType Directory -Force -Path $LauncherDir | Out-Null
+New-Item -ItemType Directory -Force -Path $OpenVSCodeDir | Out-Null
+New-Item -ItemType Directory -Force -Path $LatexBinDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
 New-Item -ItemType Directory -Force -Path $PyInstallerTmp | Out-Null
 New-Item -ItemType Directory -Force -Path $UvCacheDir | Out-Null
 New-Item -ItemType Directory -Force -Path $GoCacheDir | Out-Null
+
+if ($env:PAG_OPENVSCODE_DIR) {
+  Copy-Item (Join-Path $env:PAG_OPENVSCODE_DIR "*") $OpenVSCodeDir -Recurse -Force
+}
+if ($env:PAG_TECTONIC_EXECUTABLE) {
+  Copy-Item $env:PAG_TECTONIC_EXECUTABLE (Join-Path $LatexBinDir "tectonic.exe") -Force
+}
 
 if (!(Test-Path (Join-Path $WebDir "node_modules"))) {
   npm --prefix $WebDir install

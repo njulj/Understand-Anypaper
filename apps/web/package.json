@@ -57,6 +57,20 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "../../release/staging/openvscode-server",
+        "to": "openvscode-server",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../../release/staging/latex",
+        "to": "latex",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "asar": true,

@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from understand_anypaper.api.routes import router
+from understand_anypaper.api.latex_routes import router as latex_router
 from understand_anypaper.observability import configure_observability
 
 
@@ -35,6 +36,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(router)
+app.include_router(latex_router)
 
 
 @app.get("/health")

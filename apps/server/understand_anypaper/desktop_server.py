@@ -32,6 +32,7 @@ def configure_runtime_environment(args: argparse.Namespace) -> None:
     default_database_url = f"sqlite:///{(workspace_root / 'uap.sqlite').as_posix()}"
     os.environ.setdefault("DATABASE_URL", default_database_url)
     os.environ["PAG_DOCUMENT_STORE_DIR"] = str(document_store_dir)
+    os.environ.setdefault("PAG_LATEX_PROJECT_STORE_DIR", str(workspace_root / "latex-projects"))
 
 
 def main(argv: Sequence[str] | None = None) -> None:

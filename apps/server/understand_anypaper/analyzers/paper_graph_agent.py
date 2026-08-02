@@ -43,6 +43,12 @@ class PaperGraphAgentError(RuntimeError):
     """Raised when the graph-authoring agent cannot leave a valid graph.json."""
 
 
+@dataclass(frozen=True, slots=True)
+class PaperGraphBuildResult:
+    graph: PaperArgumentGraph
+    authoring_graph: PaperArgumentGraph
+
+
 _EDIT_TOOL_NAMES = frozenset({"apply_patch", "search_replace"})
 _SIMPLE_JSON_ESCAPES = {
     '"': '"',
@@ -636,19 +642,34 @@ class PaperGraphAgent:
         *,
         on_progress: AgentProgressCallback | None = None,
     ) -> PaperArgumentGraph:
+        result = await self.build_with_authoring(parsed, on_progress=on_progress)
+        return result.graph
+
+    async def build_with_authoring(
+        self,
+        parsed: ParsedPaper,
+        *,
+        initial_graph: PaperArgumentGraph | dict[str, Any] | None = None,
+        source_diff: str | None = None,
+        on_progress: AgentProgressCallback | None = None,
+    ) -> PaperGraphBuildResult:
         apply_desktop_api_overrides(self._config)
         if not parsed.source_blocks:
             raise PaperGraphAgentError("parser produced no source blocks for graph grounding")
         with TemporaryDirectory(prefix=f"anypaper-{parsed.paper_id[:8]}-") as directory:
             workspace = AgentGraphWorkspace(Path(directory), parsed)
-            workspace.initialize()
+            workspace.initialize(initial_graph=initial_graph, source_diff=source_diff)
             await self._run_agent(workspace, on_progress=on_progress)
             report = workspace.validate()
             if not report.valid:
                 raise PaperGraphAgentError(
                     f"graph agent stopped with an invalid graph: {report.model_dump_json()}"
                 )
-            return workspace.materialize()
+            authoring_graph = workspace.authoring_graph()
+            return PaperGraphBuildResult(
+                graph=workspace.materialize(),
+                authoring_graph=authoring_graph,
+            )
 
     @staticmethod
     def is_gpt_model(model: str) -> bool:
@@ -713,8 +734,9 @@ class PaperGraphAgent:
             on_progress=on_progress,
         )
         prompt = (
-            "Build graph.json now. Read the workspace sources, edit incrementally, and do not stop "
-            "until the editing-tool validation says valid=true."
+            "Build or update graph.json now. Read the workspace sources and source_changes.diff "
+            "when present, preserve stable node IDs for unchanged concepts, edit incrementally, "
+            "and do not stop until the editing-tool validation says valid=true."
         )
         for _ in range(3):
             try:

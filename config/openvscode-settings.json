@@ -1,0 +1,6 @@
+{
+  "files.autoSave": "afterDelay",
+  "files.autoSaveDelay": 500,
+  "window.autoDetectColorScheme": true,
+  "workbench.secondarySideBar.defaultVisibility": "visible"
+}

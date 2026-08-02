@@ -27,15 +27,15 @@ class PdfParser:
     to materialize those spans into PDF highlights.
     """
 
-    def parse(self, path: Path) -> ParsedPaper:
+    def parse(self, path: Path, *, paper_id: str | None = None) -> ParsedPaper:
         if path.suffix.lower() == ".pdf":
-            return self._parse_pdf(path)
-        return self._parse_text(path)
+            return self._parse_pdf(path, paper_id=paper_id)
+        return self._parse_text(path, paper_id=paper_id)
 
     # ------------------------------------------------------------------ PDF
 
-    def _parse_pdf(self, path: Path) -> ParsedPaper:
-        paper_id = str(uuid4())
+    def _parse_pdf(self, path: Path, *, paper_id: str | None = None) -> ParsedPaper:
+        paper_id = paper_id or str(uuid4())
         prefix = paper_id[:8]
         source_bytes = path.read_bytes()
         doc = fitz.open(path)
@@ -363,8 +363,8 @@ class PdfParser:
 
     # ----------------------------------------------------------- text / md
 
-    def _parse_text(self, path: Path) -> ParsedPaper:
-        paper_id = str(uuid4())
+    def _parse_text(self, path: Path, *, paper_id: str | None = None) -> ParsedPaper:
+        paper_id = paper_id or str(uuid4())
         prefix = paper_id[:8]
         text = path.read_text(errors="ignore")
         paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()] or [path.name]

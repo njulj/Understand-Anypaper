@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage } = require
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const DESKTOP_BACKEND_HOST = process.env.PAG_ELECTRON_API_HOST || '127.0.0.1';
 const DESKTOP_BACKEND_PORT = Number(process.env.PAG_ELECTRON_API_PORT || '8765');
@@ -10,10 +11,14 @@ const DEV_API_BASE_URL = process.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000
 const LOADING_BACKGROUND = '#f5efe5';
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_OPENAI_MODEL = 'gpt-4o-mini';
+const OPENVSCODE_HOST = '127.0.0.1';
+const OPENVSCODE_PORT = Number(process.env.PAG_OPENVSCODE_PORT || '8766');
 
 let mainWindow = null;
 let tray = null;
 let quitting = false;
+let openVSCodeProcess = null;
+let openVSCodeToken = null;
 
 function desktopApiConfigPath() {
   return path.join(app.getPath('userData'), 'desktop-api-config.json');
@@ -113,6 +118,136 @@ function backendBaseUrl() {
   return `http://${DESKTOP_BACKEND_HOST}:${DESKTOP_BACKEND_PORT}`;
 }
 
+function resolveOpenVSCodeExecutable() {
+  if (process.env.PAG_OPENVSCODE_EXECUTABLE) {
+    return process.env.PAG_OPENVSCODE_EXECUTABLE;
+  }
+  if (app.isPackaged) {
+    const executable = process.platform === 'win32' ? 'openvscode-server.cmd' : 'openvscode-server';
+    return path.join(process.resourcesPath, 'openvscode-server', 'bin', executable);
+  }
+  return 'openvscode-server';
+}
+
+function openVSCodeBaseUrl() {
+  return `http://${OPENVSCODE_HOST}:${OPENVSCODE_PORT}`;
+}
+
+function ensureOpenVSCodeSettings(userDataDir) {
+  const settingsPath = path.join(userDataDir, 'User', 'settings.json');
+  let current = {};
+  try {
+    current = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+  } catch {
+    current = {};
+  }
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  fs.writeFileSync(
+    settingsPath,
+    `${JSON.stringify({
+      ...current,
+      'files.autoSave': 'afterDelay',
+      'files.autoSaveDelay': 500,
+      'window.autoDetectColorScheme': true,
+      'workbench.secondarySideBar.defaultVisibility': 'visible',
+    }, null, 2)}\n`,
+    'utf8',
+  );
+}
+
+function desktopProcessEnv() {
+  if (!app.isPackaged) return process.env;
+  const latexBin = path.join(process.resourcesPath, 'latex', 'bin');
+  const currentPath = process.env.PATH || '';
+  return {
+    ...process.env,
+    PATH: currentPath ? `${latexBin}${path.delimiter}${currentPath}` : latexBin,
+  };
+}
+
+async function waitForOpenVSCode(token, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${openVSCodeBaseUrl()}/?tkn=${encodeURIComponent(token)}`, {
+        redirect: 'manual',
+      });
+      if (response.status >= 200 && response.status < 400) return;
+      lastError = new Error(`OpenVSCode responded with HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  }
+  throw lastError || new Error('Timed out waiting for OpenVSCode Server');
+}
+
+async function ensureOpenVSCode() {
+  if (openVSCodeProcess && openVSCodeProcess.exitCode == null && openVSCodeToken) {
+    return openVSCodeToken;
+  }
+  const executable = resolveOpenVSCodeExecutable();
+  if (app.isPackaged && !fs.existsSync(executable)) {
+    throw new Error(`OpenVSCode Server executable not found: ${executable}`);
+  }
+  const dataRoot = path.join(app.getPath('userData'), 'openvscode');
+  const userDataDir = path.join(dataRoot, 'user-data');
+  const serverDataDir = path.join(dataRoot, 'server-data');
+  fs.mkdirSync(userDataDir, { recursive: true });
+  fs.mkdirSync(serverDataDir, { recursive: true });
+  ensureOpenVSCodeSettings(userDataDir);
+  openVSCodeToken = crypto.randomBytes(24).toString('hex');
+  openVSCodeProcess = spawn(
+    executable,
+    [
+      '--host', OPENVSCODE_HOST,
+      '--port', String(OPENVSCODE_PORT),
+      '--connection-token', openVSCodeToken,
+      '--disable-telemetry',
+      '--user-data-dir', userDataDir,
+      '--server-data-dir', serverDataDir,
+    ],
+    {
+      env: desktopProcessEnv(),
+      shell: process.platform === 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  openVSCodeProcess.stdout?.on('data', (chunk) => process.stdout.write(`[openvscode] ${chunk}`));
+  openVSCodeProcess.stderr?.on('data', (chunk) => process.stderr.write(`[openvscode] ${chunk}`));
+  const startedProcess = openVSCodeProcess;
+  openVSCodeProcess.once('exit', () => {
+    openVSCodeProcess = null;
+    openVSCodeToken = null;
+  });
+  try {
+    await Promise.race([
+      waitForOpenVSCode(openVSCodeToken),
+      new Promise((_, reject) => {
+        startedProcess.once('error', reject);
+        startedProcess.once('exit', (code) => {
+          reject(new Error(`OpenVSCode Server stopped during startup (exit code ${code})`));
+        });
+      }),
+    ]);
+  } catch (error) {
+    if (startedProcess.exitCode == null) startedProcess.kill();
+    throw error;
+  }
+  return openVSCodeToken;
+}
+
+async function openVSCodeUrlForFolder(folderPath) {
+  const resolved = path.resolve(String(folderPath || ''));
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+    throw new Error(`LaTeX project folder does not exist: ${resolved}`);
+  }
+  const token = await ensureOpenVSCode();
+  const query = new URLSearchParams({ tkn: token, folder: resolved });
+  return `${openVSCodeBaseUrl()}/?${query.toString()}`;
+}
+
 function shouldSpawnPackagedBackend() {
   return app.isPackaged || process.env.PAG_ELECTRON_SPAWN_BACKEND === '1';
 }
@@ -157,7 +292,7 @@ function runCLICommand(args) {
     const child = spawn(invocation.command, invocation.args, {
       cwd: invocation.cwd,
       env: {
-        ...process.env,
+        ...desktopProcessEnv(),
         PAG_DESKTOP_SETTINGS_PATH: desktopApiConfigPath(),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -711,6 +846,7 @@ async function createMainWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      webviewTag: true,
     },
   });
 
@@ -791,6 +927,17 @@ if (!gotSingleInstanceLock) {
 ipcMain.handle('desktop-api-config:get', () => loadDesktopApiConfig());
 ipcMain.handle('desktop-api-config:save', (_event, config) => saveDesktopApiConfig(config));
 ipcMain.handle('desktop-setup:get', () => loadDesktopSetup());
+ipcMain.handle('latex-folder:choose', async () => {
+  const selection = await dialog.showOpenDialog({
+    title: 'Open LaTeX Folder',
+    buttonLabel: 'Open Project',
+    properties: ['openDirectory'],
+  });
+  return selection.canceled ? null : selection.filePaths[0] || null;
+});
+ipcMain.handle('openvscode:url-for-folder', (_event, folderPath) =>
+  openVSCodeUrlForFolder(folderPath),
+);
 
 app.on('activate', () => {
   if (mainWindow) {
@@ -802,6 +949,9 @@ app.on('activate', () => {
 
 app.on('before-quit', () => {
   quitting = true;
+  if (openVSCodeProcess && openVSCodeProcess.exitCode == null) {
+    openVSCodeProcess.kill();
+  }
 });
 
 app.on('window-all-closed', () => {

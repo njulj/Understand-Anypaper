@@ -9,6 +9,8 @@ RELEASE_DIR="$ROOT_DIR/release"
 STAGING_DIR="$RELEASE_DIR/staging"
 BACKEND_DIR="$STAGING_DIR/backend"
 LAUNCHER_DIR="$STAGING_DIR/launcher"
+OPENVSCODE_DIR="$STAGING_DIR/openvscode-server"
+LATEX_BIN_DIR="$STAGING_DIR/latex/bin"
 PYINSTALLER_TMP="$ROOT_DIR/.tmp/pyinstaller/macos"
 UV_CACHE_DIR="$ROOT_DIR/.tmp/uv-cache"
 GO_CACHE_DIR="$ROOT_DIR/.tmp/go-build-cache/macos"
@@ -20,9 +22,17 @@ LAUNCHER_EXECUTABLE="$LAUNCHER_DIR/uap"
 BACKEND_STAMP_FILE="$BACKEND_DIR/.packaging-version"
 RELEASE_BACKEND_EXECUTABLE="$RELEASE_DIR/mac-arm64/Understand Anypaper.app/Contents/Resources/backend/server"
 RELEASE_BACKEND_STAMP_FILE="$RELEASE_DIR/mac-arm64/Understand Anypaper.app/Contents/Resources/backend/.packaging-version"
-REQUIRED_BACKEND_PACKAGING_VERSION="desktop-backend-v3"
+REQUIRED_BACKEND_PACKAGING_VERSION="desktop-backend-v4"
 
-mkdir -p "$BACKEND_DIR" "$LAUNCHER_DIR" "$PYINSTALLER_TMP" "$UV_CACHE_DIR" "$GO_CACHE_DIR" "$RELEASE_DIR"
+mkdir -p "$BACKEND_DIR" "$LAUNCHER_DIR" "$OPENVSCODE_DIR" "$LATEX_BIN_DIR" "$PYINSTALLER_TMP" "$UV_CACHE_DIR" "$GO_CACHE_DIR" "$RELEASE_DIR"
+
+if [[ -n "${PAG_OPENVSCODE_DIR:-}" ]]; then
+  cp -R "$PAG_OPENVSCODE_DIR"/. "$OPENVSCODE_DIR"/
+fi
+if [[ -n "${PAG_TECTONIC_EXECUTABLE:-}" ]]; then
+  cp "$PAG_TECTONIC_EXECUTABLE" "$LATEX_BIN_DIR/tectonic"
+  chmod +x "$LATEX_BIN_DIR/tectonic"
+fi
 
 if [[ ! -d "$WEB_DIR/node_modules" ]]; then
   npm --prefix "$WEB_DIR" install

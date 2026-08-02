@@ -59,3 +59,17 @@ processes:
         condition: process_healthy
     availability:
       restart: "always"
+
+  openvscode:
+    command: |
+      mkdir -p data/openvscode-user/User data/openvscode-server
+      cp config/openvscode-settings.json data/openvscode-user/User/settings.json
+      exec openvscode-server --host 127.0.0.1 --port $OPENVSCODE_PORT --without-connection-token --disable-telemetry --user-data-dir data/openvscode-user --server-data-dir data/openvscode-server
+    readiness_probe:
+      exec:
+        command: curl -fsS http://127.0.0.1:$OPENVSCODE_PORT >/dev/null
+      initial_delay_seconds: 2
+      period_seconds: 2
+      failure_threshold: 30
+    availability:
+      restart: "always"

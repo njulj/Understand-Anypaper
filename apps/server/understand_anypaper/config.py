@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     recursion_max_depth: int = 1
     recursion_max_papers: int = 5
     document_store_dir: str = "data/documents"
+    latex_project_store_dir: str = ""
+    latex_compile_timeout_seconds: float = 120
+    latex_compiler: str = "auto"
     openalex_api_key: str = ""
 
     # LLM configuration. Graph building requires the graph-authoring agent.
