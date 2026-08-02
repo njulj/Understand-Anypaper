@@ -25,6 +25,7 @@ from understand_anypaper.parser.models import (
 
 _STRUCTURAL_NODE_TYPES = {NodeType.PAPER, NodeType.WHY, NodeType.HOW, NodeType.PROOF}
 _FACET_NODE_TYPES = {NodeType.WHY, NodeType.HOW, NodeType.PROOF}
+_GRAPH_LINK_PATTERN = re.compile(r"\]\(graph://([^\s)]+)\)")
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 
@@ -86,6 +87,7 @@ class AgentGraphWorkspace:
         )
         initial = PaperArgumentGraph(
             paper_id=self.parsed.paper_id,
+            summary="",
             nodes=[
                 {
                     "id": f"paper-{self.parsed.paper_id}",
@@ -190,6 +192,23 @@ class AgentGraphWorkspace:
         self._check_unique_ids(edge_ids, "edge", errors)
         nodes_by_id = {node.id: node for node in graph.nodes}
         roots = [node for node in graph.nodes if node.node_type == NodeType.PAPER]
+        if not graph.summary.strip():
+            errors.append(
+                self._issue(
+                    "missing_summary",
+                    "summary must contain a self-contained Markdown summary of the paper",
+                    path="graph.json.summary",
+                )
+            )
+        for linked_node_id in _GRAPH_LINK_PATTERN.findall(graph.summary):
+            if linked_node_id not in nodes_by_id:
+                errors.append(
+                    self._issue(
+                        "unknown_summary_graph_link",
+                        f"summary links to unknown graph node {linked_node_id!r}",
+                        path="graph.json.summary",
+                    )
+                )
         if len(roots) != 1:
             errors.append(self._issue("paper_root_count", "graph must contain exactly one Paper node"))
         contributions = [node for node in graph.nodes if node.node_type == NodeType.CONTRIBUTION]
@@ -615,6 +634,7 @@ class AgentGraphWorkspace:
         self.parsed.semantic_units = units
         result = PaperArgumentGraph(
             paper_id=graph.paper_id,
+            summary=graph.summary,
             nodes=materialized_nodes,
             edges=materialized_edges,
         )

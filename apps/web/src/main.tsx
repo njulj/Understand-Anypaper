@@ -1,5 +1,6 @@
 import React, { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import {
   AlertCircle,
   ArrowLeft,
@@ -93,6 +94,16 @@ const DEFAULT_DESKTOP_SETUP: DesktopSetupInfo = {
 const CITATION_ANALYSIS_MODE = 'citation-analysis';
 const CITATION_PROGRESS_MODE = 'citation-progress';
 const CITATION_ANALYSIS_CHANNEL = 'understand-anypaper-citation-analysis';
+const GRAPH_NODE_URL_PREFIX = 'graph://';
+
+function graphNodeIdFromHref(href?: string): string | null {
+  if (!href?.startsWith(GRAPH_NODE_URL_PREFIX)) return null;
+  return href.slice(GRAPH_NODE_URL_PREFIX.length);
+}
+
+function summaryUrlTransform(url: string): string {
+  return url.startsWith(GRAPH_NODE_URL_PREFIX) ? url : defaultUrlTransform(url);
+}
 
 type AppLocation = {
   paperId: string | null;
@@ -1296,8 +1307,12 @@ function App() {
                           <span>+{activity.additions ?? 0}</span>{' '}
                           <span>−{activity.deletions ?? 0}</span>
                         </small>
-                        <small>{activity.problem_count ?? 0} Problems</small>
-                        <small>{activity.node_count ?? 0} Nodes</small>
+                        {activity.status !== 'streaming' && activity.status !== 'failed' ? (
+                          <>
+                            <small>{activity.problem_count ?? 0} Problems</small>
+                            <small>{activity.node_count ?? 0} Nodes</small>
+                          </>
+                        ) : null}
                       </span>
                     ) : null}
                     {activity.kind === 'read' && activity.start_line != null ? (
@@ -1526,14 +1541,69 @@ function App() {
                   <span>{viewGraph.edges.length} edges</span>
                 </div>
               </div>
-              <GraphView
-                graph={viewGraph}
-                selectedNodeId={selectedNodeId}
-                focusRevision={graphFocusRevision}
-                query={query}
-                onSelectNode={handleGraphNodeSelect}
-                subtitles={graphSubtitles}
-              />
+              <div className="graph-stage">
+                <GraphView
+                  graph={viewGraph}
+                  selectedNodeId={selectedNodeId}
+                  focusRevision={graphFocusRevision}
+                  query={query}
+                  onSelectNode={handleGraphNodeSelect}
+                  subtitles={graphSubtitles}
+                />
+                {!focusedContribution ? (
+                  <article className="paper-summary-card" aria-labelledby="paper-summary-heading">
+                    <div className="paper-summary-heading">
+                      <FileText size={17} aria-hidden="true" />
+                      <h2 id="paper-summary-heading">Summary</h2>
+                    </div>
+                    <div className="paper-summary-markdown">
+                      <ReactMarkdown
+                        urlTransform={summaryUrlTransform}
+                        components={{
+                          a: ({ href, children, node: _node, ...props }) => {
+                            const nodeId = graphNodeIdFromHref(href);
+                            if (nodeId !== null) {
+                              const targetExists = graph.nodes.some((node) => node.id === nodeId);
+                              return (
+                                <a
+                                  {...props}
+                                  href={href}
+                                  className={targetExists ? 'graph-node-link' : 'graph-node-link broken'}
+                                  aria-disabled={!targetExists}
+                                  onClick={(event) => {
+                                    event.preventDefault();
+                                    if (targetExists) {
+                                      revealNode(nodeId);
+                                    } else {
+                                      setStatus('error');
+                                      setMessage(`Summary links to an unknown graph node: ${nodeId}`);
+                                    }
+                                  }}
+                                >
+                                  {children}
+                                </a>
+                              );
+                            }
+                            const opensExternally = /^https?:\/\//i.test(href ?? '');
+                            return (
+                              <a
+                                {...props}
+                                href={href}
+                                target={opensExternally ? '_blank' : undefined}
+                                rel={opensExternally ? 'noreferrer' : undefined}
+                              >
+                                {children}
+                              </a>
+                            );
+                          },
+                        }}
+                      >
+                        {graph.summary || 'No paper summary is available.'}
+                      </ReactMarkdown>
+                    </div>
+                  </article>
+                ) : null}
+              </div>
               <div className="graph-legend">
                 {legendTypes.map((nodeType) => (
                   <span key={nodeType}>

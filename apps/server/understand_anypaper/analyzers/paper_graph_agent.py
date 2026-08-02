@@ -7,8 +7,9 @@ import difflib
 import json
 import logging
 import os
+import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -16,11 +17,13 @@ from typing import Any
 
 from agent_framework import (
     Agent,
+    AgentResponseUpdate,
     ChatContext,
     Content,
     FunctionInvocationContext,
     Message,
     chat_middleware,
+    function_middleware,
     tool,
 )
 from agent_framework.openai import OpenAIChatClient, OpenAIChatCompletionClient
@@ -40,6 +43,105 @@ class PaperGraphAgentError(RuntimeError):
     """Raised when the graph-authoring agent cannot leave a valid graph.json."""
 
 
+_EDIT_TOOL_NAMES = frozenset({"apply_patch", "search_replace"})
+_SIMPLE_JSON_ESCAPES = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
+
+
+def _partial_json_string(arguments: str, field: str) -> str | None:
+    """Decode the available part of a JSON string field from partial tool arguments."""
+    match = re.search(rf'"{re.escape(field)}"\s*:\s*"', arguments)
+    if match is None:
+        return None
+
+    decoded: list[str] = []
+    index = match.end()
+    while index < len(arguments):
+        character = arguments[index]
+        if character == '"':
+            break
+        if character != "\\":
+            decoded.append(character)
+            index += 1
+            continue
+
+        if index + 1 >= len(arguments):
+            break
+        escape = arguments[index + 1]
+        if escape in _SIMPLE_JSON_ESCAPES:
+            decoded.append(_SIMPLE_JSON_ESCAPES[escape])
+            index += 2
+            continue
+        if escape != "u" or index + 6 > len(arguments):
+            break
+
+        digits = arguments[index + 2 : index + 6]
+        if any(digit not in "0123456789abcdefABCDEF" for digit in digits):
+            break
+        codepoint = int(digits, 16)
+        index += 6
+        if 0xD800 <= codepoint <= 0xDBFF and arguments[index : index + 2] == "\\u":
+            if index + 6 > len(arguments):
+                break
+            low_digits = arguments[index + 2 : index + 6]
+            if all(digit in "0123456789abcdefABCDEF" for digit in low_digits):
+                low = int(low_digits, 16)
+                if 0xDC00 <= low <= 0xDFFF:
+                    codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00)
+                    index += 6
+        decoded.append(chr(codepoint))
+    return "".join(decoded)
+
+
+def _diff_line_counts(before: str, after: str) -> tuple[int, int]:
+    diff = difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="")
+    additions = 0
+    deletions = 0
+    for line in diff:
+        additions += line.startswith("+") and not line.startswith("+++")
+        deletions += line.startswith("-") and not line.startswith("---")
+    return additions, deletions
+
+
+def _streaming_edit_counts(tool_name: str, arguments: str) -> tuple[int, int] | None:
+    if tool_name == "apply_patch":
+        patch = _partial_json_string(arguments, "patch")
+        if patch is None:
+            return None
+        additions = sum(
+            line.startswith("+") and not line.startswith("+++") for line in patch.splitlines()
+        )
+        deletions = sum(
+            line.startswith("-") and not line.startswith("---") for line in patch.splitlines()
+        )
+        return additions, deletions
+
+    old_text = _partial_json_string(arguments, "old_text")
+    if old_text is None:
+        return None
+    new_text = _partial_json_string(arguments, "new_text")
+    if new_text is None:
+        return 0, len(old_text.splitlines())
+    return _diff_line_counts(old_text, new_text)
+
+
+@dataclass(slots=True)
+class _StreamingEditState:
+    activity_id: str
+    tool_name: str
+    call_id: str | None
+    arguments: str = ""
+    last_counts: tuple[int, int] | None = None
+
+
 @dataclass(slots=True)
 class _ToolRuntime:
     workspace: AgentGraphWorkspace
@@ -49,6 +151,7 @@ class _ToolRuntime:
     activity_sequence: int = 0
     thinking_id: str | None = None
     thinking_started_at: float | None = None
+    streaming_edit: _StreamingEditState | None = None
     clock: Callable[[], float] = time.monotonic
 
     async def _emit(self, activity: dict[str, Any]) -> None:
@@ -68,9 +171,7 @@ class _ToolRuntime:
             return
         self.thinking_id = self._next_id("thinking")
         self.thinking_started_at = self.clock()
-        await self._emit(
-            {"id": self.thinking_id, "kind": "thinking", "label": "Thinking…"}
-        )
+        await self._emit({"id": self.thinking_id, "kind": "thinking", "label": "Thinking…"})
 
     async def finish_thinking(self) -> None:
         if self.thinking_started_at is None or self.thinking_id is None:
@@ -123,13 +224,101 @@ class _ToolRuntime:
             }
         )
 
-    async def record_edit(self, before: str) -> None:
-        after = self.workspace.graph_path.read_text(encoding="utf-8")
-        diff = list(
-            difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="")
+    async def observe_stream_update(self, update: AgentResponseUpdate) -> None:
+        for content in update.contents:
+            if content.type != "function_call":
+                continue
+            explicit_name = content.name or None
+            if explicit_name not in _EDIT_TOOL_NAMES and self.streaming_edit is None:
+                continue
+            if explicit_name and explicit_name not in _EDIT_TOOL_NAMES:
+                continue
+
+            call_id = content.call_id or None
+            state = self.streaming_edit
+            if state is None or (call_id and state.call_id and call_id != state.call_id):
+                assert explicit_name in _EDIT_TOOL_NAMES
+                await self.finish_thinking()
+                state = _StreamingEditState(
+                    activity_id=self._next_id("edit"),
+                    tool_name=explicit_name,
+                    call_id=call_id,
+                )
+                self.streaming_edit = state
+            elif call_id and state.call_id is None:
+                state.call_id = call_id
+
+            arguments = content.arguments
+            if isinstance(arguments, str):
+                state.arguments += arguments
+            elif isinstance(arguments, Mapping):
+                state.arguments += json.dumps(arguments, ensure_ascii=False)
+            else:
+                continue
+
+            counts = _streaming_edit_counts(state.tool_name, state.arguments)
+            if counts is None or counts == state.last_counts:
+                continue
+            state.last_counts = counts
+            additions, deletions = counts
+            await self._emit(
+                {
+                    "id": state.activity_id,
+                    "kind": "edit",
+                    "status": "streaming",
+                    "label": "Editing graph.json…",
+                    "path": "graph.json",
+                    "additions": additions,
+                    "deletions": deletions,
+                }
+            )
+
+    def _matches_streaming_edit(self, context: FunctionInvocationContext | None) -> bool:
+        state = self.streaming_edit
+        if state is None:
+            return False
+        if context is None:
+            return True
+        call_id = context.metadata.get("call_id")
+        return not call_id or not state.call_id or call_id == state.call_id
+
+    def has_streaming_edit(self, context: FunctionInvocationContext | None = None) -> bool:
+        return self._matches_streaming_edit(context)
+
+    def _take_streaming_edit(
+        self, context: FunctionInvocationContext | None
+    ) -> _StreamingEditState | None:
+        if not self._matches_streaming_edit(context):
+            return None
+        state = self.streaming_edit
+        self.streaming_edit = None
+        return state
+
+    async def fail_streaming_edit(self, context: FunctionInvocationContext | None = None) -> None:
+        state = self._take_streaming_edit(context)
+        if state is None:
+            return
+        additions, deletions = state.last_counts or (0, 0)
+        await self._emit(
+            {
+                "id": state.activity_id,
+                "kind": "edit",
+                "status": "failed",
+                "label": "Edit failed",
+                "path": "graph.json",
+                "additions": additions,
+                "deletions": deletions,
+            }
         )
-        additions = sum(line.startswith("+") and not line.startswith("+++") for line in diff)
-        deletions = sum(line.startswith("-") and not line.startswith("---") for line in diff)
+
+    async def record_edit(
+        self,
+        before: str,
+        *,
+        context: FunctionInvocationContext | None = None,
+    ) -> None:
+        after = self.workspace.graph_path.read_text(encoding="utf-8")
+        additions, deletions = _diff_line_counts(before, after)
         report = self.workspace.validate()
         try:
             payload = json.loads(after)
@@ -137,10 +326,12 @@ class _ToolRuntime:
             node_count = len(nodes) if isinstance(nodes, list) else 0
         except json.JSONDecodeError:
             node_count = 0
+        state = self._take_streaming_edit(context)
         await self._emit(
             {
-                "id": self._next_id("edit"),
+                "id": state.activity_id if state is not None else self._next_id("edit"),
                 "kind": "edit",
+                "status": "complete",
                 "label": "Edited graph.json",
                 "path": "graph.json",
                 "additions": additions,
@@ -158,6 +349,20 @@ def _runtime(context: FunctionInvocationContext) -> _ToolRuntime:
     return runtime
 
 
+@function_middleware
+async def _track_tool_lifecycle(
+    context: FunctionInvocationContext,
+    call_next: Callable[[], Awaitable[None]],
+) -> None:
+    """Keep the shared thinking activity in sync around every tool invocation."""
+    runtime = _runtime(context)
+    await runtime.finish_thinking()
+    try:
+        await call_next()
+    finally:
+        await runtime.begin_thinking()
+
+
 @tool(name="Read")
 async def read_file(
     path: str,
@@ -167,18 +372,12 @@ async def read_file(
 ) -> str | list[Content]:
     """Read text or a image from the paper workspace."""
     runtime = _runtime(context)
-    await runtime.finish_thinking()
-    try:
-        result = runtime.workspace.read(path, offset, limit)
-    except Exception:
-        await runtime.begin_thinking()
-        raise
+    result = runtime.workspace.read(path, offset, limit)
     await runtime.record_read(
         path,
         start_line=result.start_line,
         end_line=result.end_line,
     )
-    await runtime.begin_thinking()
     if result.kind != "image":
         return str(result.content)
 
@@ -201,7 +400,6 @@ async def search_replace(
 ) -> str:
     """Edit graph.json by exact string replacement and return validation results."""
     runtime = _runtime(context)
-    await runtime.finish_thinking()
     before = runtime.workspace.graph_path.read_text(encoding="utf-8")
     try:
         result = runtime.workspace.search_replace(
@@ -212,10 +410,9 @@ async def search_replace(
             disable_checks=disable_checks,
         )
     except Exception:
-        await runtime.begin_thinking()
+        await runtime.fail_streaming_edit(context)
         raise
-    await runtime.record_edit(before)
-    await runtime.begin_thinking()
+    await runtime.record_edit(before, context=context)
     return result
 
 
@@ -223,48 +420,41 @@ async def search_replace(
 async def shell(command: str, context: FunctionInvocationContext) -> str:
     """Run a shell command; never edit graph.json using this tool."""
     runtime = _runtime(context)
-    await runtime.finish_thinking()
+    process = await asyncio.create_subprocess_shell(
+        command,
+        cwd=str(runtime.workspace.root),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        env=dict(os.environ),
+    )
     try:
-        process = await asyncio.create_subprocess_shell(
-            command,
-            cwd=str(runtime.workspace.root),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env=dict(os.environ),
+        stdout, _ = await asyncio.wait_for(
+            process.communicate(),
+            timeout=runtime.config.graph_agent_shell_timeout_seconds,
         )
-        try:
-            stdout, _ = await asyncio.wait_for(
-                process.communicate(),
-                timeout=runtime.config.graph_agent_shell_timeout_seconds,
-            )
-        except TimeoutError:
-            process.kill()
-            await process.communicate()
-            result = json.dumps(
-                {
-                    "exit_code": None,
-                    "timed_out": True,
-                    "output": (
-                        "command exceeded "
-                        f"{runtime.config.graph_agent_shell_timeout_seconds:g} seconds"
-                    ),
-                }
-            )
-        else:
-            output = stdout.decode(errors="replace")
-            limit = runtime.config.graph_agent_shell_max_output_chars
-            if len(output) > limit:
-                output = output[:limit] + "\n[output truncated]"
-            result = json.dumps(
-                {"exit_code": process.returncode, "timed_out": False, "output": output},
-                ensure_ascii=False,
-            )
-        await runtime.record_shell(command)
-        return result
-    finally:
-        # The framework starts another model turn even when the tool raises. Keep the
-        # progress state in sync on both successful and exceptional shell paths.
-        await runtime.begin_thinking()
+    except TimeoutError:
+        process.kill()
+        await process.communicate()
+        result = json.dumps(
+            {
+                "exit_code": None,
+                "timed_out": True,
+                "output": (
+                    f"command exceeded {runtime.config.graph_agent_shell_timeout_seconds:g} seconds"
+                ),
+            }
+        )
+    else:
+        output = stdout.decode(errors="replace")
+        limit = runtime.config.graph_agent_shell_max_output_chars
+        if len(output) > limit:
+            output = output[:limit] + "\n[output truncated]"
+        result = json.dumps(
+            {"exit_code": process.returncode, "timed_out": False, "output": output},
+            ensure_ascii=False,
+        )
+    await runtime.record_shell(command)
+    return result
 
 
 @tool
@@ -275,16 +465,20 @@ async def apply_patch(
 ) -> str:
     """Apply a Codex-style patch to graph.json and return validation results."""
     runtime = _runtime(context)
-    await runtime.finish_thinking()
     before = runtime.workspace.graph_path.read_text(encoding="utf-8")
     header = f"disable_checks={'true' if disable_checks else 'false'}"
+    failed = False
     try:
         result = runtime.workspace.apply_patch(f"{header}\n{patch}")
     except Exception as exc:  # noqa: BLE001 - patch errors are model-correctable
+        failed = True
         result = json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
     if runtime.workspace.graph_path.read_text(encoding="utf-8") != before:
-        await runtime.record_edit(before)
-    await runtime.begin_thinking()
+        await runtime.record_edit(before, context=context)
+    elif failed:
+        await runtime.fail_streaming_edit(context)
+    elif runtime.has_streaming_edit(context):
+        await runtime.record_edit(before, context=context)
     return result
 
 
@@ -328,6 +522,15 @@ Build a traceable argument graph centered on Contribution nodes. The Paper root 
 Contribution with HAS_CONTRIBUTION. Every Contribution has Why, How, and Proof structural child
 nodes via CONTAINS. Put motivation/gap evidence under Why, methods/equations/modules under How,
 and experiments/results/tables under Proof. Additional meaningful relationships are encouraged.
+
+Also write graph.summary as a self-contained Markdown overview of the entire paper. Synthesize its
+motivation and research gap, core approach, main contributions, most important quantitative or
+qualitative results, and conclusion. Use short paragraphs and Markdown structure where it improves
+readability; do not merely copy the abstract or add source locators to this graph-level field.
+Whenever the summary names an important Contribution, Method, Module, Equation, Experiment, Result,
+Figure, or Table represented in the graph, link the useful phrase to that exact node using
+`[descriptive text](graph://node-id)`. Every graph:// target must exactly match an existing node ID.
+Normal https:// links are allowed only when they materially help the reader.
 
 ## Extraction density and boundaries
 
@@ -467,19 +670,20 @@ class PaperGraphAgent:
                 self._config, session_id=session_id
             )
             tools = [read_file, apply_patch, shell]
-            middleware = []
+            middleware = [_track_tool_lifecycle]
             options: dict[str, Any] = {
                 "allow_multiple_tool_calls": False,
                 # Compatible gateways do not consistently persist Responses
                 # conversations, so keep function history local.
                 "store": False,
+                "reasoning": {"effort": "medium", "summary": "auto"},
             }
             api_name = "Responses"
         else:
             deferred_images = []
             client = self._chat_client or create_chat_client(self._config, session_id=session_id)
             tools = [read_file, search_replace, shell]
-            middleware = [_attach_read_images(deferred_images)]
+            middleware = [_track_tool_lifecycle, _attach_read_images(deferred_images)]
             options: dict[str, Any] = {"allow_multiple_tool_calls": False}
             if "openrouter.ai" in self._config.openai_base_url.casefold():
                 options["extra_body"] = {"provider": {"require_parameters": True}}
@@ -515,13 +719,18 @@ class PaperGraphAgent:
         for _ in range(3):
             try:
                 await runtime.begin_thinking()
-                await agent.run(
+                response_stream = agent.run(
                     prompt,
+                    stream=True,
                     options=options,
                     function_invocation_kwargs={"runtime": runtime},
                 )
+                async for update in response_stream:
+                    await runtime.observe_stream_update(update)
+                await response_stream.get_final_response()
                 await runtime.finish_thinking()
             except Exception as exc:
+                await runtime.fail_streaming_edit()
                 await runtime.finish_thinking()
                 raise PaperGraphAgentError(f"{api_name} graph agent failed: {exc}") from exc
             report = workspace.validate()

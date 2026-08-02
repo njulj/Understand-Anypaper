@@ -295,6 +295,7 @@ def get_subgraph(paper_id: str, node_id: str, depth: int = 2) -> PaperArgumentGr
                 selected.update([edge.source_node_id, edge.target_node_id])
     return PaperArgumentGraph(
         paper_id=paper_id,
+        summary=graph.summary,
         nodes=[node for node in graph.nodes if node.id in selected],
         edges=[edge for edge in graph.edges if edge.source_node_id in selected and edge.target_node_id in selected],
     )
@@ -900,7 +901,12 @@ def get_external_contribution_subgraph(
         for edge in target_graph.edges
         if edge.source_node_id in selected and edge.target_node_id in selected
     ]
-    return PaperArgumentGraph(paper_id=target_paper_id, nodes=nodes, edges=edges)
+    return PaperArgumentGraph(
+        paper_id=target_paper_id,
+        summary=target_graph.summary,
+        nodes=nodes,
+        edges=edges,
+    )
 
 
 @router.post("/graph/search")

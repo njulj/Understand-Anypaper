@@ -151,6 +151,13 @@ class PaperArgumentGraph(BaseModel):
     """The complete, traceable argument graph for one paper."""
 
     paper_id: str = Field(description="Identifier of the paper represented by this graph.")
+    summary: str = Field(
+        description=(
+            "A self-contained Markdown summary of the paper's motivation, approach, main results, "
+            "and conclusions. Links to graph nodes use graph://<node-id>. This summarizes the "
+            "paper as a whole rather than any single node."
+        )
+    )
     nodes: list[GraphNode] = Field(
         default_factory=list,
         description="All argument, structure, and evidence nodes in the graph.",

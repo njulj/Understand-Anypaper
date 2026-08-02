@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS papers (
   id UUID PRIMARY KEY,
   title TEXT NOT NULL,
   abstract TEXT DEFAULT '',
+  graph_summary TEXT NOT NULL DEFAULT '',
   metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

@@ -57,6 +57,7 @@ def test_upload_paper_streams_progress_and_saves_graph(monkeypatch):
         ]
         return PaperArgumentGraph(
             paper_id=parsed.paper_id,
+            summary="A concise generated summary for the uploaded paper.",
             nodes=[
                 GraphNode(
                     id=f"paper-{parsed.paper_id}",
@@ -89,6 +90,7 @@ def test_upload_paper_streams_progress_and_saves_graph(monkeypatch):
     ]
     graph = events[-1]["graph"]
     assert events[3]["activity"]["label"] == "Read graph.json"
+    assert graph["summary"] == "A concise generated summary for the uploaded paper."
     assert graph["nodes"]
     assert routes.get_store().get_graph(graph["paper_id"]) is not None
 

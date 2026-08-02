@@ -29,6 +29,7 @@ export type GraphEdge = {
 
 export type PaperArgumentGraph = {
   paper_id: string;
+  summary: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
 };
@@ -118,6 +119,7 @@ export type UploadStageProgress = {
 export type AgentActivity = {
   id: string;
   kind: 'thinking' | 'thinking_done' | 'thought' | 'read' | 'edit' | 'shell';
+  status?: 'streaming' | 'complete' | 'failed';
   label?: string;
   path?: string;
   start_line?: number;

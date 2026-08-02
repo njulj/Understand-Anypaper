@@ -8,6 +8,7 @@ def test_sqlite_round_trips_node_reference_ids(tmp_path):
     parsed = ParsedPaper(paper_id=paper_id, title="Storage Test")
     graph = PaperArgumentGraph(
         paper_id=paper_id,
+        summary="The stored graph summary survives a database round trip.",
         nodes=[
             GraphNode(
                 id="prior-work",
@@ -24,6 +25,7 @@ def test_sqlite_round_trips_node_reference_ids(tmp_path):
     stored = store.get_graph(paper_id)
 
     assert stored is not None
+    assert stored.summary == graph.summary
     assert stored.nodes[0].reference_ids == ["ref-storage-12"]
 
 
@@ -43,6 +45,7 @@ def _paper_with_reused_graph_ids(paper_id: str) -> tuple[ParsedPaper, PaperArgum
     parsed = ParsedPaper(paper_id=paper_id, title=paper_id, semantic_units=[unit])
     graph = PaperArgumentGraph(
         paper_id=paper_id,
+        summary=f"Summary for {paper_id}.",
         nodes=[
             GraphNode(
                 id="c1",
@@ -85,6 +88,7 @@ def test_sqlite_scopes_graph_ids_by_paper(tmp_path):
 
     first_graph = first[1].model_copy(
         update={
+            "summary": "Updated summary for paper-a.",
             "edges": [
                 first[1].edges[0].model_copy(update={"target_paper_id": "paper-b"})
             ]
@@ -93,6 +97,7 @@ def test_sqlite_scopes_graph_ids_by_paper(tmp_path):
     store.replace_graph("paper-a", first_graph)
 
     cross_paper_edge = store.get_graph("paper-a").edges[0]  # type: ignore[union-attr]
+    assert store.get_graph("paper-a").summary == "Updated summary for paper-a."  # type: ignore[union-attr]
     assert (cross_paper_edge.source_paper_id, cross_paper_edge.source_node_id) == (
         "paper-a",
         "c1",
