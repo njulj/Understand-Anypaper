@@ -1,6 +1,24 @@
-import { GraphEdge, GraphNode, PaperArgumentGraph, PaperSummary, SemanticUnit } from './api';
+import {
+  GraphEdge,
+  GraphNode,
+  PaperArgumentGraph,
+  PaperDocumentInfo,
+  PaperSummary,
+  SemanticUnit,
+} from './api';
 
 export const MOCK_PAPER_ID = 'mock-paper-argument-graph';
+
+const MOCK_UNIT_PAGES: Record<string, number> = {
+  'mock-u-motivation': 1,
+  'mock-u-gap': 1,
+  'mock-u-method': 2,
+  'mock-u-equation': 2,
+  'mock-u-figure': 2,
+  'mock-u-experiment': 3,
+  'mock-u-result': 3,
+  'mock-u-conclusion': 3,
+};
 
 function node(
   id: string,
@@ -9,6 +27,7 @@ function node(
   summary: string,
   unitIds: string[] = [],
 ): GraphNode {
+  const pages = [...new Set(unitIds.map((unitId) => MOCK_UNIT_PAGES[unitId]).filter(Boolean))];
   return {
     id,
     paper_id: MOCK_PAPER_ID,
@@ -19,7 +38,7 @@ function node(
     source_type: 'mock',
     semantic_unit_ids: unitIds,
     reference_ids: [],
-    page_ranges: [[1, 1]],
+    page_ranges: pages.map((page) => [page, page]),
     properties: { mock: true },
     created_by: 'mock',
     verified: false,
@@ -41,7 +60,14 @@ function edge(id: string, source: string, target: string, edge_type: string, uni
   };
 }
 
-function unit(id: string, role: string, title: string, text: string): SemanticUnit {
+function unit(
+  id: string,
+  role: string,
+  title: string,
+  text: string,
+  page: number,
+  bbox: [number, number, number, number],
+): SemanticUnit {
   return {
     semantic_unit_id: id,
     paper_id: MOCK_PAPER_ID,
@@ -49,8 +75,8 @@ function unit(id: string, role: string, title: string, text: string): SemanticUn
     title,
     text,
     source_location: {
-      page: 1,
-      bbox: [],
+      page,
+      bbox,
       extracted_text: text,
       block_id: `mock-block-${id}`,
       start_offset: 0,
@@ -66,20 +92,31 @@ function unit(id: string, role: string, title: string, text: string): SemanticUn
 
 export const mockPaper: PaperSummary = {
   paper_id: MOCK_PAPER_ID,
-  title: 'Mock Paper: Evidence-Grounded Learning Systems',
-  abstract: 'A representative Paper Argument Graph used to develop and review the reading experience.',
-  metadata: { mock: true },
+  title: 'Argument Graphs for Evidence-Grounded Scholarly Reading',
+  abstract: 'We introduce a contribution-centered representation that connects a paper’s claims to their motivation, implementation, formalization, experiments, and prior work.',
+  metadata: {
+    mock: true,
+    authors: ['Mira Chen', 'Alex Rivera', 'Noah Williams'],
+    venue: 'UIST 2026',
+    year: 2026,
+  },
+};
+
+export const mockDocumentInfo: PaperDocumentInfo = {
+  filename: 'argument-graphs-scholarly-reading.pdf',
+  media_type: 'application/pdf',
+  pages: [1, 2, 3].map((page) => ({ page, width: 612, height: 792 })),
 };
 
 export const mockSemanticUnits: SemanticUnit[] = [
-  unit('mock-u-motivation', 'motivation', 'Reader burden', 'Readers must repeatedly connect a paper’s claims, evidence, and prior work across distant sections.'),
-  unit('mock-u-gap', 'research_gap', 'Missing structure', 'Existing PDF readers expose text and annotations but do not make an author’s argument structure inspectable.'),
-  unit('mock-u-method', 'method', 'Argument graph', 'We represent a paper as a contribution-centered graph linking motivation, method, formalization, and validation.'),
-  unit('mock-u-equation', 'equation', 'Coverage score', 'Coverage is the fraction of contribution facets that have at least one grounded evidence node.'),
-  unit('mock-u-experiment', 'experiment', 'User study', 'Twenty-four readers completed comprehension tasks with either a PDF reader or the graph workspace.'),
-  unit('mock-u-result', 'result', 'Comprehension result', 'Graph workspace users identified supporting evidence more accurately and with less navigation.'),
-  unit('mock-u-figure', 'figure', 'Graph overview', 'The overview places contributions at the center and recursively expands their evidence subgraphs.'),
-  unit('mock-u-conclusion', 'conclusion', 'Takeaway', 'Argument graphs can turn a linear paper into a traceable structure for learning and review.'),
+  unit('mock-u-motivation', 'motivation', 'Reader burden', 'Readers must repeatedly connect a paper’s claims, evidence, and prior work across distant sections.', 1, [0.43, 0.075, 0.505, 0.485]),
+  unit('mock-u-gap', 'research_gap', 'Missing structure', 'Existing PDF readers expose text and annotations but do not make an author’s argument structure inspectable.', 1, [0.535, 0.075, 0.62, 0.485]),
+  unit('mock-u-method', 'method', 'Argument graph', 'We represent a paper as a contribution-centered graph linking motivation, method, formalization, and validation.', 2, [0.13, 0.075, 0.245, 0.925]),
+  unit('mock-u-equation', 'equation', 'Coverage score', 'Coverage is the fraction of contribution facets that have at least one grounded evidence node.', 2, [0.285, 0.14, 0.37, 0.86]),
+  unit('mock-u-figure', 'figure', 'Graph overview', 'The overview places contributions at the center and recursively expands their evidence subgraphs.', 2, [0.435, 0.14, 0.73, 0.86]),
+  unit('mock-u-experiment', 'experiment', 'User study', 'Twenty-four readers completed comprehension tasks with either a PDF reader or the graph workspace.', 3, [0.14, 0.075, 0.24, 0.925]),
+  unit('mock-u-result', 'result', 'Comprehension result', 'Graph workspace users identified supporting evidence more accurately and with less navigation.', 3, [0.46, 0.075, 0.59, 0.925]),
+  unit('mock-u-conclusion', 'conclusion', 'Takeaway', 'Argument graphs can turn a linear paper into a traceable structure for learning and review.', 3, [0.71, 0.075, 0.82, 0.925]),
 ];
 
 export const mockGraph: PaperArgumentGraph = {
@@ -120,3 +157,132 @@ export const mockGraph: PaperArgumentGraph = {
     edge('mock-e-paper-conclusion', 'mock-paper', 'mock-conclusion-1', 'SUMMARIZES', ['mock-u-conclusion']),
   ],
 };
+
+type MockPaperData = {
+  paper: PaperSummary;
+  documentInfo: PaperDocumentInfo;
+  semanticUnits: SemanticUnit[];
+  graph: PaperArgumentGraph;
+};
+
+function relatedMockData(
+  paperId: string,
+  title: string,
+  abstract: string,
+  venue: string,
+  year: number,
+): MockPaperData {
+  const methodUnitId = `${paperId}-u-method`;
+  const resultUnitId = `${paperId}-u-result`;
+  const semanticUnits: SemanticUnit[] = [
+    {
+      ...unit(methodUnitId, 'method', 'Interface approach', abstract, 1, [0.34, 0.09, 0.48, 0.91]),
+      paper_id: paperId,
+      source_location: {
+        ...unit(methodUnitId, 'method', 'Interface approach', abstract, 1, [0.34, 0.09, 0.48, 0.91]).source_location,
+        block_id: `${paperId}-block-method`,
+      },
+    },
+    {
+      ...unit(resultUnitId, 'result', 'Evaluation result', 'The interface reduced navigation effort while preserving readers’ access to the original scholarly source.', 2, [0.42, 0.09, 0.57, 0.91]),
+      paper_id: paperId,
+      source_location: {
+        ...unit(resultUnitId, 'result', 'Evaluation result', 'The interface reduced navigation effort while preserving readers’ access to the original scholarly source.', 2, [0.42, 0.09, 0.57, 0.91]).source_location,
+        block_id: `${paperId}-block-result`,
+      },
+    },
+  ];
+  const paper: PaperSummary = {
+    paper_id: paperId,
+    title,
+    abstract,
+    metadata: { mock: true, venue, year },
+  };
+  const paperNodeId = `${paperId}-paper`;
+  const contributionNodeId = `${paperId}-contribution`;
+  const methodNodeId = `${paperId}-method`;
+  const resultNodeId = `${paperId}-result`;
+  const graph: PaperArgumentGraph = {
+    paper_id: paperId,
+    summary: `${title} contributes an interactive approach to scholarly reading with grounded evaluation evidence.`,
+    nodes: [
+      {
+        ...node(paperNodeId, 'Paper', title, abstract),
+        paper_id: paperId,
+        page_ranges: [[1, 2]],
+      },
+      {
+        ...node(contributionNodeId, 'Contribution', 'Interactive scholarly reading support', abstract, [methodUnitId]),
+        paper_id: paperId,
+        page_ranges: [[1, 1]],
+      },
+      {
+        ...node(methodNodeId, 'Method', 'Contextual reading interface', 'The system places structured assistance next to the source document.', [methodUnitId]),
+        paper_id: paperId,
+        page_ranges: [[1, 1]],
+      },
+      {
+        ...node(resultNodeId, 'Result', 'Lower navigation effort', 'Readers reached relevant evidence with fewer context switches.', [resultUnitId]),
+        paper_id: paperId,
+        page_ranges: [[2, 2]],
+      },
+    ],
+    edges: [
+      {
+        ...edge(`${paperId}-e-paper-contribution`, paperNodeId, contributionNodeId, 'CONTAINS'),
+        source_paper_id: paperId,
+        target_paper_id: paperId,
+      },
+      {
+        ...edge(`${paperId}-e-method`, contributionNodeId, methodNodeId, 'IMPLEMENTED_BY', [methodUnitId]),
+        source_paper_id: paperId,
+        target_paper_id: paperId,
+      },
+      {
+        ...edge(`${paperId}-e-result`, contributionNodeId, resultNodeId, 'VALIDATES', [resultUnitId]),
+        source_paper_id: paperId,
+        target_paper_id: paperId,
+      },
+    ],
+  };
+  return {
+    paper,
+    graph,
+    semanticUnits,
+    documentInfo: {
+      filename: `${paperId.replace('mock-paper-', '')}.pdf`,
+      media_type: 'application/pdf',
+      pages: [1, 2].map((page) => ({ page, width: 612, height: 792 })),
+    },
+  };
+}
+
+const relatedMockPapers = [
+  relatedMockData(
+    'mock-paper-threddy',
+    'Threddy: Thread-Based Exploration of Scientific Literature',
+    'A reading interface that helps scholars collect, connect, and revisit related passages across scientific papers.',
+    'CHI',
+    2022,
+  ),
+  relatedMockData(
+    'mock-paper-scholarphi',
+    'ScholarPhi: Augmenting Scientific Papers with Definitions',
+    'A contextual interface that surfaces definitions and symbol explanations directly alongside scientific documents.',
+    'CHI',
+    2021,
+  ),
+];
+
+const primaryMockData: MockPaperData = {
+  paper: mockPaper,
+  graph: mockGraph,
+  semanticUnits: mockSemanticUnits,
+  documentInfo: mockDocumentInfo,
+};
+
+export const mockPapers = [mockPaper, ...relatedMockPapers.map(({ paper }) => paper)];
+
+export function mockPaperData(paperId: string): MockPaperData {
+  return relatedMockPapers.find(({ paper }) => paper.paper_id === paperId) ?? primaryMockData;
+}

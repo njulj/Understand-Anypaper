@@ -25,11 +25,37 @@ declare global {
       getApiConfig: () => Promise<DesktopApiConfig>;
       saveApiConfig: (config: DesktopApiConfig) => Promise<DesktopApiConfig>;
       getSetupInfo: () => Promise<DesktopSetupInfo>;
+      getGraphWindowState: () => Promise<{ open: boolean }>;
       openGraphWindow: (options: {
         paperId: string;
         nodeId?: string | null;
+        focusRevision?: number;
         mock?: boolean;
       }) => Promise<number>;
+      updateGraphWindow: (options: {
+        paperId: string;
+        nodeId?: string | null;
+        focusRevision?: number;
+        mock?: boolean;
+      }) => Promise<boolean>;
+      publishGraphSelection: (selection: {
+        paperId: string;
+        nodeId?: string | null;
+      }) => void;
+      onGraphWindowStateChange: (
+        callback: (state: { open: boolean }) => void,
+      ) => () => void;
+      onGraphWindowNavigate: (
+        callback: (options: {
+          paperId: string;
+          nodeId?: string | null;
+          focusRevision?: number;
+          mock?: boolean;
+        }) => void,
+      ) => () => void;
+      onGraphSelection: (
+        callback: (selection: { paperId: string; nodeId?: string | null }) => void,
+      ) => () => void;
       chooseLatexFolder: () => Promise<string | null>;
       openVSCodeUrlForFolder: (folderPath: string) => Promise<string>;
     };

@@ -12,6 +12,7 @@ import {
   GitBranch,
   Link2,
   Loader2,
+  Maximize2,
   Network,
   Plus,
   PenLine,
@@ -21,6 +22,8 @@ import {
   Trash2,
   UploadCloud,
   X,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import {
   AgentActivity,
@@ -45,7 +48,13 @@ import {
 } from './api';
 import { AgentActivityList, appendAgentActivity } from './AgentActivityList';
 import { GraphView, NODE_COLORS } from './GraphView';
-import { MOCK_PAPER_ID, mockGraph, mockPaper, mockSemanticUnits } from './mockPaper';
+import { MockPaperPage } from './MockPaperPage';
+import {
+  MOCK_PAPER_ID,
+  mockPaper,
+  mockPaperData,
+  mockPapers,
+} from './mockPaper';
 import {
   contributionEvidenceSubtitles,
   contributionGraph,
@@ -104,6 +113,7 @@ const DEFAULT_DESKTOP_SETUP: DesktopSetupInfo = {
 const CITATION_ANALYSIS_MODE = 'citation-analysis';
 const CITATION_PROGRESS_MODE = 'citation-progress';
 const CITATION_ANALYSIS_CHANNEL = 'understand-anypaper-citation-analysis';
+const GRAPH_WORKSPACE_CHANNEL = 'understand-anypaper-graph-workspace';
 const GRAPH_NODE_URL_PREFIX = 'graph://';
 
 function graphNodeIdFromHref(href?: string): string | null {
@@ -283,8 +293,8 @@ function sourcePageLabel(location: PageSourceLocation): string {
 
 function unitOwnerPriority(node: GraphNode, unitId: string): number {
   if (node.id === unitId) return 0;
-  if (node.node_type === 'Contribution') return 1;
-  if (!['Paper', 'Why', 'How', 'Proof'].includes(node.node_type)) return 2;
+  if (!['Paper', 'Contribution', 'Why', 'How', 'Proof'].includes(node.node_type)) return 1;
+  if (node.node_type === 'Contribution') return 2;
   return 3;
 }
 
@@ -299,11 +309,15 @@ export function ReaderApp() {
   const citationAnalysisStarted = useRef(false);
   const citationProgressLoaded = useRef(false);
   const layoutRef = useRef<HTMLElement | null>(null);
+  const graphWindowPollRef = useRef<number | null>(null);
   const [papers, setPapers] = useState<PaperSummary[]>([]);
   const [graph, setGraph] = useState<PaperArgumentGraph | null>(null);
   const [semanticUnits, setSemanticUnits] = useState<SemanticUnit[]>([]);
   const [documentInfo, setDocumentInfo] = useState<PaperDocumentInfo | null>(null);
   const [sourceMode, setSourceMode] = useState<'pages' | 'units'>('pages');
+  const [sidebarLevel, setSidebarLevel] = useState<'papers' | 'source'>('papers');
+  const [graphDetached, setGraphDetached] = useState(false);
+  const [previewZoom, setPreviewZoom] = useState(0.85);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [graphFocusRevision, setGraphFocusRevision] = useState(0);
   const [focusedContributionId, setFocusedContributionId] = useState<string | null>(null);
@@ -342,6 +356,131 @@ export function ReaderApp() {
     document.documentElement.classList.toggle('desktop-app', isDesktopApp);
     return () => document.documentElement.classList.remove('desktop-app');
   }, [isDesktopApp]);
+
+  useEffect(() => {
+    if (isGraphWindow || !desktopBridge?.onGraphWindowStateChange) return;
+    const applyState = ({ open }: { open: boolean }) => {
+      setGraphDetached(open);
+      setSidebarLevel(open ? 'papers' : graph?.paper_id ? 'source' : 'papers');
+    };
+    void desktopBridge.getGraphWindowState?.().then(applyState).catch(() => undefined);
+    return desktopBridge.onGraphWindowStateChange(applyState);
+  }, [desktopBridge, graph?.paper_id, isGraphWindow]);
+
+  useEffect(() => {
+    const navigate = (options: {
+      paperId: string;
+      nodeId?: string | null;
+      focusRevision?: number;
+    }) => {
+      if (!options.paperId) return;
+      if (options.paperId !== graph?.paper_id) {
+        initialLocation.current = { paperId: options.paperId, nodeId: options.nodeId ?? null, mode: null, view: 'graph' };
+        replaceAppLocation(options.paperId, options.nodeId);
+        void loadPaper(options.paperId, undefined, options.nodeId);
+        return;
+      }
+      if (options.nodeId && graph.nodes.some((node) => node.id === options.nodeId)) {
+        revealNode(options.nodeId);
+        setGraphFocusRevision((current) => current + 1);
+        replaceAppLocation(options.paperId, options.nodeId);
+      }
+    };
+    const receiveSelection = (selection: { paperId: string; nodeId?: string | null }) => {
+      if (!graphDetached) return;
+      if (selection.paperId !== graph?.paper_id) {
+        initialLocation.current = {
+          paperId: selection.paperId,
+          nodeId: selection.nodeId ?? null,
+          mode: null,
+        };
+        replaceAppLocation(selection.paperId, selection.nodeId);
+        void loadPaper(selection.paperId, undefined, selection.nodeId);
+        return;
+      }
+      if (!selection.nodeId) return;
+      if (graph.nodes.some((node) => node.id === selection.nodeId)) {
+        setSelectedNodeId(selection.nodeId);
+      }
+    };
+
+    if (isGraphWindow && desktopBridge?.onGraphWindowNavigate) {
+      return desktopBridge.onGraphWindowNavigate(navigate);
+    }
+    if (!isGraphWindow && desktopBridge?.onGraphSelection) {
+      return desktopBridge.onGraphSelection(receiveSelection);
+    }
+    if (typeof BroadcastChannel === 'undefined') return;
+    const channel = new BroadcastChannel(GRAPH_WORKSPACE_CHANNEL);
+    channel.onmessage = (event) => {
+      const payload = event.data as {
+        type?: string;
+        paperId?: string;
+        nodeId?: string | null;
+        focusRevision?: number;
+      };
+      if (isGraphWindow && payload.type === 'navigate' && payload.paperId) {
+        navigate({
+          paperId: payload.paperId,
+          nodeId: payload.nodeId,
+          focusRevision: payload.focusRevision,
+        });
+      } else if (!isGraphWindow && payload.type === 'selection' && payload.paperId) {
+        receiveSelection({ paperId: payload.paperId, nodeId: payload.nodeId });
+      }
+    };
+    return () => channel.close();
+  }, [desktopBridge, graph?.paper_id, graphDetached, isGraphWindow]);
+
+  useEffect(() => {
+    if (!graph?.paper_id) return;
+    const payload = {
+      paperId: graph.paper_id,
+      nodeId: selectedNodeId,
+      focusRevision: graphFocusRevision,
+      mock: isMockMode,
+    };
+    if (isGraphWindow) {
+      if (desktopBridge?.publishGraphSelection) {
+        desktopBridge.publishGraphSelection(payload);
+        return;
+      }
+      if (typeof BroadcastChannel !== 'undefined') {
+        const channel = new BroadcastChannel(GRAPH_WORKSPACE_CHANNEL);
+        channel.postMessage({ type: 'selection', ...payload });
+        channel.close();
+      }
+      return;
+    }
+    if (!graphDetached) return;
+    if (desktopBridge?.updateGraphWindow) {
+      void desktopBridge.updateGraphWindow(payload);
+      return;
+    }
+    if (typeof BroadcastChannel !== 'undefined') {
+      const channel = new BroadcastChannel(GRAPH_WORKSPACE_CHANNEL);
+      channel.postMessage({ type: 'navigate', ...payload });
+      channel.close();
+    }
+  }, [
+    desktopBridge,
+    graph?.paper_id,
+    graphDetached,
+    graphFocusRevision,
+    isGraphWindow,
+    isMockMode,
+    selectedNodeId,
+  ]);
+
+  useEffect(() => {
+    if (graphDetached) setPreviewZoom(0.85);
+  }, [graph?.paper_id, graphDetached]);
+
+  useEffect(() => () => {
+    if (graphWindowPollRef.current !== null) {
+      window.clearInterval(graphWindowPollRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     window.localStorage.setItem(PANE_WIDTHS_STORAGE_KEY, JSON.stringify(paneWidths));
@@ -451,8 +590,11 @@ export function ReaderApp() {
 
   useEffect(() => {
     if (isMockMode) {
-      setPapers([mockPaper]);
-      loadMockPaper(initialLocation.current.nodeId);
+      setPapers(mockPapers);
+      loadMockPaper(
+        initialLocation.current.paperId ?? MOCK_PAPER_ID,
+        initialLocation.current.nodeId,
+      );
       return;
     }
     listPapers()
@@ -660,7 +802,7 @@ export function ReaderApp() {
     requestedNodeId?: string | null,
   ) {
     if (isMockMode || paperId === MOCK_PAPER_ID) {
-      loadMockPaper(requestedNodeId);
+      loadMockPaper(paperId, requestedNodeId);
       return;
     }
     const [nextGraph, nextSemanticUnits, nextDocumentInfo] = await Promise.all([
@@ -682,14 +824,16 @@ export function ReaderApp() {
     setStatus('ready');
     setUploadProgress(null);
     setMessage(readyMessage ?? `Graph ready: ${nextGraph.nodes.length} nodes, ${nextGraph.edges.length} edges.`);
+    if (!graphDetached) setSidebarLevel('source');
   }
 
-  function loadMockPaper(requestedNodeId?: string | null) {
-    const nextGraph = JSON.parse(JSON.stringify(mockGraph)) as PaperArgumentGraph;
+  function loadMockPaper(paperId: string, requestedNodeId?: string | null) {
+    const data = mockPaperData(paperId);
+    const nextGraph = JSON.parse(JSON.stringify(data.graph)) as PaperArgumentGraph;
     setGraph(nextGraph);
-    setSemanticUnits(JSON.parse(JSON.stringify(mockSemanticUnits)) as SemanticUnit[]);
-    setDocumentInfo(null);
-    setSourceMode('units');
+    setSemanticUnits(JSON.parse(JSON.stringify(data.semanticUnits)) as SemanticUnit[]);
+    setDocumentInfo(JSON.parse(JSON.stringify(data.documentInfo)) as PaperDocumentInfo);
+    setSourceMode('pages');
     setSelectedNodeId(
       requestedNodeId && nextGraph.nodes.some((node) => node.id === requestedNodeId)
         ? requestedNodeId
@@ -698,7 +842,8 @@ export function ReaderApp() {
     setFocusedContributionId(null);
     setStatus('ready');
     setUploadProgress(null);
-    setMessage('Mock mode — local sample data; no paper or backend is required.');
+    setMessage(`Graph ready: ${nextGraph.nodes.length} nodes, ${nextGraph.edges.length} edges.`);
+    if (!graphDetached) setSidebarLevel('source');
   }
 
   function clearPaperState(nextMessage = 'Upload a .txt, .md, or PDF to build a Paper Argument Graph.') {
@@ -707,6 +852,7 @@ export function ReaderApp() {
     setDocumentInfo(null);
     setSelectedNodeId(null);
     setFocusedContributionId(null);
+    setSidebarLevel('papers');
     referenceExpansionKeys.current.clear();
     externalExpansionKeys.current.clear();
     setQuery('');
@@ -1185,6 +1331,19 @@ export function ReaderApp() {
     window.location.assign(url);
   }
 
+  function selectPaper(paperId: string) {
+    const paper = papers.find((item) => item.paper_id === paperId);
+    initialLocation.current = { paperId, nodeId: null, mode: null };
+    replaceAppLocation(paperId);
+    void loadPaper(
+      paperId,
+      paper ? `Loaded “${paper.title}”.` : undefined,
+    ).catch((error) => {
+      setStatus('error');
+      setMessage(error instanceof Error ? error.message : 'Failed to load paper.');
+    });
+  }
+
   function openGraphWindow() {
     if (!graph) return;
     const options = {
@@ -1193,18 +1352,33 @@ export function ReaderApp() {
       mock: isMockMode,
     };
     if (desktopBridge?.openGraphWindow) {
+      setGraphDetached(true);
+      setSidebarLevel('papers');
       void desktopBridge.openGraphWindow(options).catch((error) => {
+        setGraphDetached(false);
+        setSidebarLevel('source');
         setStatus('error');
         setMessage(error instanceof Error ? error.message : 'Failed to open the graph window.');
       });
       return;
     }
     const url = appUrl(options.paperId, options.nodeId, null, { mock: options.mock, view: 'graph' });
-    const graphWindow = window.open(url, '_blank', 'popup,width=1240,height=860');
+    const graphWindow = window.open(url, 'understand-anypaper-graph', 'popup,width=1240,height=860');
     if (!graphWindow) {
       setStatus('error');
       setMessage('The browser blocked the graph window. Allow pop-ups and try again.');
+      return;
     }
+    setGraphDetached(true);
+    setSidebarLevel('papers');
+    if (graphWindowPollRef.current !== null) window.clearInterval(graphWindowPollRef.current);
+    graphWindowPollRef.current = window.setInterval(() => {
+      if (!graphWindow.closed) return;
+      if (graphWindowPollRef.current !== null) window.clearInterval(graphWindowPollRef.current);
+      graphWindowPollRef.current = null;
+      setGraphDetached(false);
+      setSidebarLevel('source');
+    }, 500);
   }
 
   function startPaneResize(
@@ -1279,43 +1453,150 @@ export function ReaderApp() {
     '--source-pane-width': `${paneWidths.source}px`,
     '--inspector-pane-width': `${paneWidths.inspector}px`,
   } as React.CSSProperties;
+  const showPaperLibrary = !isGraphWindow && (graphDetached || sidebarLevel === 'papers');
+  const showDetachedSourceWorkspace = !isGraphWindow && graphDetached;
+  const activePaper = papers.find((paper) => paper.paper_id === graph?.paper_id) ?? mockPaper;
 
   return (
     <main className={shellClassName}>
       <section
         ref={layoutRef}
-        className={`${isDesktopApp ? 'desktop-layout' : 'web-layout'}${isGraphWindow ? ' graph-window-layout' : ''}`}
+        className={[
+          isDesktopApp ? 'desktop-layout' : 'web-layout',
+          isGraphWindow ? 'graph-window-layout' : '',
+          showPaperLibrary ? 'paper-library-visible' : '',
+          showDetachedSourceWorkspace ? 'source-workspace-layout' : '',
+        ].filter(Boolean).join(' ')}
         style={workspaceStyle}
       >
-        <aside className="pdf-pane">
-          <div className="pane-heading source-heading">
+        <nav className="paper-library-pane" aria-label="Papers">
+          <div className="pane-heading paper-library-heading">
             <div>
               <FileText size={20} />
-              <h2>Source</h2>
+              <h2>Papers</h2>
             </div>
-            {documentInfo ? (
-              <div className="segmented-controls" aria-label="Source view">
+            <button
+              className="icon-action"
+              type="button"
+              title="Add paper"
+              aria-label="Add paper"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isBusy}
+            >
+              {status === 'uploading' ? <Loader2 className="spin" size={16} /> : <Plus size={16} />}
+            </button>
+          </div>
+          <div className="paper-library-list">
+            {papers.map((paper) => {
+              const metadata = [paper.metadata?.venue, paper.metadata?.year]
+                .filter(Boolean)
+                .map(String)
+                .join(' · ');
+              return (
                 <button
+                  key={paper.paper_id}
+                  className={`paper-library-item ${graph?.paper_id === paper.paper_id ? 'active' : ''}`}
                   type="button"
-                  className={sourceMode === 'pages' ? 'active' : ''}
-                  title="PDF pages"
-                  onClick={() => setSourceMode('pages')}
+                  onClick={() => selectPaper(paper.paper_id)}
+                  disabled={isBusy}
                 >
-                  <FileImage size={15} />
+                  <FileText size={17} />
+                  <span>
+                    <strong>{paper.title}</strong>
+                    <small>{metadata || 'Paper Argument Graph'}</small>
+                  </span>
                 </button>
-                <button
-                  type="button"
-                  className={sourceMode === 'units' ? 'active' : ''}
-                  title="Semantic units"
-                  onClick={() => setSourceMode('units')}
-                >
-                  <FileText size={15} />
-                </button>
-              </div>
+              );
+            })}
+            {!papers.length ? (
+              <button className="paper-library-empty" type="button" onClick={() => fileInputRef.current?.click()}>
+                <UploadCloud size={28} />
+                <strong>Add your first paper</strong>
+                <span>PDF, Markdown, or plain text</span>
+              </button>
             ) : null}
           </div>
-          <div className="source-content">
-          <div className={`status-line ${status}`}>
+        </nav>
+
+        <aside className={`pdf-pane${graphDetached ? ' document-preview-pane' : ''}`}>
+          {graphDetached ? (
+            <div className="document-preview-toolbar">
+              <div className="document-preview-identity">
+                <FileText size={18} />
+                <span>
+                  <strong>{activePaper.title}</strong>
+                  <small>{documentInfo ? `${documentInfo.pages.length} pages` : 'No preview available'}</small>
+                </span>
+              </div>
+              <div className="document-preview-zoom" aria-label="Document zoom controls">
+                <button
+                  type="button"
+                  title="Zoom out"
+                  aria-label="Zoom out"
+                  onClick={() => setPreviewZoom((current) => Math.max(0.6, current - 0.1))}
+                  disabled={previewZoom <= 0.6}
+                >
+                  <ZoomOut size={16} />
+                </button>
+                <span>{`${Math.round(previewZoom * 100)}%`}</span>
+                <button
+                  type="button"
+                  title="Zoom in"
+                  aria-label="Zoom in"
+                  onClick={() => setPreviewZoom((current) => Math.min(1, current + 0.1))}
+                  disabled={previewZoom >= 1}
+                >
+                  <ZoomIn size={16} />
+                </button>
+                <button
+                  type="button"
+                  title="Fit document to window"
+                  aria-label="Fit document to window"
+                  onClick={() => setPreviewZoom(1)}
+                >
+                  <Maximize2 size={15} />
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="pane-heading source-heading">
+              <div>
+                <button
+                  className="source-back-action"
+                  type="button"
+                  title="Back to papers"
+                  aria-label="Back to papers"
+                  onClick={() => setSidebarLevel('papers')}
+                >
+                  <ArrowLeft size={16} />
+                </button>
+                <FileText size={20} />
+                <h2>Source</h2>
+              </div>
+              {documentInfo ? (
+                <div className="segmented-controls" aria-label="Source view">
+                  <button
+                    type="button"
+                    className={sourceMode === 'pages' ? 'active' : ''}
+                    title="PDF pages"
+                    onClick={() => setSourceMode('pages')}
+                  >
+                    <FileImage size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    className={sourceMode === 'units' ? 'active' : ''}
+                    title="Semantic units"
+                    onClick={() => setSourceMode('units')}
+                  >
+                    <FileText size={15} />
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          )}
+          <div className={graphDetached ? 'document-preview-content' : 'source-content'}>
+          {!graphDetached ? <div className={`status-line ${status}`}>
             <div className="status-message">
               {isBusy ? (
                 <Loader2 className="spin" size={18} />
@@ -1341,20 +1622,29 @@ export function ReaderApp() {
             {isBusy && agentActivities.length ? (
               <AgentActivityList activities={agentActivities} />
             ) : null}
-          </div>
-          {documentInfo && sourceMode === 'pages' ? (
-            <div className="pdf-pages">
+          </div> : null}
+          {documentInfo && (graphDetached || sourceMode === 'pages') ? (
+            <div
+              className={graphDetached ? 'document-preview-pages' : 'pdf-pages'}
+              style={graphDetached ? {
+                '--document-preview-width': `min(${Math.round(previewZoom * 100)}%, 1120px)`,
+              } as React.CSSProperties : undefined}
+            >
               {documentInfo.pages.map((page) => (
                 <article
                   className="pdf-page"
                   key={page.page}
                   style={{ aspectRatio: `${page.width} / ${page.height}` }}
                 >
-                  <img
-                    src={documentPageImageUrl(graph?.paper_id ?? '', page.page)}
-                    alt={`${documentInfo.filename} page ${page.page}`}
-                    loading="lazy"
-                  />
+                  {isMockMode ? (
+                    <MockPaperPage paper={activePaper} page={page.page} />
+                  ) : (
+                    <img
+                      src={documentPageImageUrl(graph?.paper_id ?? '', page.page)}
+                      alt={`${documentInfo.filename} page ${page.page}`}
+                      loading="lazy"
+                    />
+                  )}
                   <div className="bbox-layer">
                     {(unitsByPage.get(page.page) ?? []).map(({ unit, segment, segmentIndex }) => {
                       const unitId = unit.semantic_unit_id;
@@ -1387,7 +1677,7 @@ export function ReaderApp() {
                 </article>
               ))}
             </div>
-          ) : semanticUnits.length ? (
+          ) : !graphDetached && semanticUnits.length ? (
             <div className="block-list">
               {semanticUnits.map((unit) => {
                 const unitId = unit.semantic_unit_id;
@@ -1431,7 +1721,7 @@ export function ReaderApp() {
         />
 
         <section className="main-column">
-          <header className="toolbar">
+          {!isGraphWindow ? <header className="toolbar">
             <div className="brand"><GitBranch size={22} /> Understand Anypaper</div>
             {isDesktopApp ? (
               <div className="desktop-titlebar-title" title={paperTitle || 'Understand Anypaper'}>
@@ -1440,27 +1730,12 @@ export function ReaderApp() {
               </div>
             ) : null}
             <div className="toolbar-actions">
-              {papers.length && !isCitationAnalysisTask ? (
+              {isGraphWindow && papers.length && !isCitationAnalysisTask ? (
                 <select
                   className="paper-select"
                   value={graph?.paper_id ?? ''}
                   disabled={isBusy}
-                  onChange={(event) => {
-                    const paper = papers.find((item) => item.paper_id === event.target.value);
-                    initialLocation.current = {
-                      paperId: event.target.value,
-                      nodeId: null,
-                      mode: null,
-                    };
-                    replaceAppLocation(event.target.value);
-                    loadPaper(
-                      event.target.value,
-                      paper ? `Loaded “${paper.title}”.` : undefined,
-                    ).catch((error) => {
-                      setStatus('error');
-                      setMessage(error instanceof Error ? error.message : 'Failed to load paper.');
-                    });
-                  }}
+                  onChange={(event) => selectPaper(event.target.value)}
                   aria-label="Switch paper"
                 >
                   {papers.map((paper) => (
@@ -1551,9 +1826,9 @@ export function ReaderApp() {
                 onChange={handleUpload}
               />
             </div>
-          </header>
+          </header> : null}
 
-          <section className="workspace">
+          <section className={`workspace${showDetachedSourceWorkspace ? ' source-preview-workspace' : ''}`}>
         <section className="graph-pane" aria-label="Paper argument graph">
           {graph && viewGraph ? (
             <>
@@ -1585,7 +1860,7 @@ export function ReaderApp() {
                   <span>{viewGraph.edges.length} edges</span>
                   {!isGraphWindow ? (
                     <button
-                      className="graph-window-action"
+                      className="inline-flex min-h-8 items-center gap-1.5 whitespace-nowrap rounded-control border border-app-border bg-app-panel px-2.5 text-xs font-semibold text-app-text transition-colors hover:border-app-accent hover:text-app-accent"
                       type="button"
                       onClick={openGraphWindow}
                       title="Open the graph and Inspector in a dedicated window"
@@ -1669,10 +1944,12 @@ export function ReaderApp() {
               </div>
             </>
           ) : (
-            <div className="empty-state">
+            <div className="grid min-h-full place-content-center justify-items-center gap-2.5 p-6 text-center text-app-muted">
               <GitBranch size={38} />
-              <h2>No graph yet</h2>
-              <p>Upload a paper to see contribution, evidence, and support nodes here.</p>
+              <h2 className="m-0 text-lg text-app-text">No graph yet</h2>
+              <p className="m-0 max-w-md leading-6 text-app-muted">
+                Upload a paper to see contribution, evidence, and support nodes here.
+              </p>
             </div>
           )}
         </section>

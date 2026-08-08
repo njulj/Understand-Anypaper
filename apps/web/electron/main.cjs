@@ -19,6 +19,30 @@ let tray = null;
 let quitting = false;
 let openVSCodeProcess = null;
 let openVSCodeToken = null;
+let graphWindow = null;
+
+function notifyGraphWindowState() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('window:graph-state', {
+    open: Boolean(graphWindow && !graphWindow.isDestroyed()),
+  });
+}
+
+function navigateGraphWindow(options = {}, focus = false) {
+  if (!graphWindow || graphWindow.isDestroyed()) return false;
+  graphWindow.webContents.send('window:graph-navigate', {
+    paperId: String(options.paperId || ''),
+    nodeId: options.nodeId ? String(options.nodeId) : null,
+    focusRevision: Number(options.focusRevision || 0),
+    mock: Boolean(options.mock),
+  });
+  if (focus) {
+    if (graphWindow.isMinimized()) graphWindow.restore();
+    graphWindow.show();
+    graphWindow.focus();
+  }
+  return true;
+}
 
 function desktopApiConfigPath() {
   return path.join(app.getPath('userData'), 'desktop-api-config.json');
@@ -879,6 +903,8 @@ async function createMainWindow() {
 }
 
 async function createGraphWindow(options = {}) {
+  if (navigateGraphWindow(options, true)) return graphWindow.id;
+
   const isMac = process.platform === 'darwin';
   const query = new URLSearchParams({
     paper: String(options.paperId || ''),
@@ -887,7 +913,8 @@ async function createGraphWindow(options = {}) {
   if (options.nodeId) query.set('node', String(options.nodeId));
   if (options.mock) query.set('mock', '1');
 
-  const graphWindow = new BrowserWindow({
+  const createdGraphWindow = new BrowserWindow({
+    parent: mainWindow || undefined,
     width: 1240,
     height: 860,
     minWidth: 820,
@@ -906,17 +933,31 @@ async function createGraphWindow(options = {}) {
       webviewTag: true,
     },
   });
+  graphWindow = createdGraphWindow;
 
-  if (app.isPackaged) {
-    await graphWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), {
-      query: Object.fromEntries(query.entries()),
-    });
-  } else {
-    const url = new URL(DEV_RENDERER_URL);
-    url.search = query.toString();
-    await graphWindow.loadURL(url.toString());
+  notifyGraphWindowState();
+  createdGraphWindow.on('closed', () => {
+    if (graphWindow === createdGraphWindow) graphWindow = null;
+    notifyGraphWindowState();
+  });
+
+  try {
+    if (app.isPackaged) {
+      await createdGraphWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), {
+        query: Object.fromEntries(query.entries()),
+      });
+    } else {
+      const url = new URL(DEV_RENDERER_URL);
+      url.search = query.toString();
+      await createdGraphWindow.loadURL(url.toString());
+    }
+  } catch (error) {
+    if (!createdGraphWindow.isDestroyed()) createdGraphWindow.destroy();
+    if (graphWindow === createdGraphWindow) graphWindow = null;
+    notifyGraphWindowState();
+    throw error;
   }
-  return graphWindow.id;
+  return createdGraphWindow.id;
 }
 
 async function loadAppWindow() {
@@ -968,7 +1009,15 @@ if (!gotSingleInstanceLock) {
 ipcMain.handle('desktop-api-config:get', () => loadDesktopApiConfig());
 ipcMain.handle('desktop-api-config:save', (_event, config) => saveDesktopApiConfig(config));
 ipcMain.handle('desktop-setup:get', () => loadDesktopSetup());
+ipcMain.handle('window:graph-state:get', () => ({
+  open: Boolean(graphWindow && !graphWindow.isDestroyed()),
+}));
 ipcMain.handle('window:open-graph', (_event, options) => createGraphWindow(options));
+ipcMain.handle('window:update-graph', (_event, options) => navigateGraphWindow(options));
+ipcMain.on('window:graph-selection', (_event, selection) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('window:graph-selection', selection);
+});
 ipcMain.handle('latex-folder:choose', async () => {
   const selection = await dialog.showOpenDialog({
     title: 'Open LaTeX Folder',

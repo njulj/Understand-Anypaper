@@ -2,7 +2,7 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { ReaderApp } from './ReaderApp';
 import { WritingApp } from './WritingApp';
-import './styles.css';
+import './app.css';
 
 function writingProjectId(): string | null | undefined {
   const route = window.location.protocol === 'file:' ? window.location.hash.slice(1) : window.location.pathname;
