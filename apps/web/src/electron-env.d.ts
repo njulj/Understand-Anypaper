@@ -25,6 +25,11 @@ declare global {
       getApiConfig: () => Promise<DesktopApiConfig>;
       saveApiConfig: (config: DesktopApiConfig) => Promise<DesktopApiConfig>;
       getSetupInfo: () => Promise<DesktopSetupInfo>;
+      openGraphWindow: (options: {
+        paperId: string;
+        nodeId?: string | null;
+        mock?: boolean;
+      }) => Promise<number>;
       chooseLatexFolder: () => Promise<string | null>;
       openVSCodeUrlForFolder: (folderPath: string) => Promise<string>;
     };

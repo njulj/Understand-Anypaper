@@ -878,6 +878,47 @@ async function createMainWindow() {
   });
 }
 
+async function createGraphWindow(options = {}) {
+  const isMac = process.platform === 'darwin';
+  const query = new URLSearchParams({
+    paper: String(options.paperId || ''),
+    view: 'graph',
+  });
+  if (options.nodeId) query.set('node', String(options.nodeId));
+  if (options.mock) query.set('mock', '1');
+
+  const graphWindow = new BrowserWindow({
+    width: 1240,
+    height: 860,
+    minWidth: 820,
+    minHeight: 600,
+    autoHideMenuBar: true,
+    title: 'Paper Argument Graph',
+    titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
+    ...(isMac
+      ? { vibrancy: 'under-window', visualEffectState: 'active', transparent: true, fullscreenable: false }
+      : { titleBarOverlay: true }),
+    backgroundColor: isMac ? '#00000000' : LOADING_BACKGROUND,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      webviewTag: true,
+    },
+  });
+
+  if (app.isPackaged) {
+    await graphWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), {
+      query: Object.fromEntries(query.entries()),
+    });
+  } else {
+    const url = new URL(DEV_RENDERER_URL);
+    url.search = query.toString();
+    await graphWindow.loadURL(url.toString());
+  }
+  return graphWindow.id;
+}
+
 async function loadAppWindow() {
   if (!mainWindow) {
     return;
@@ -927,6 +968,7 @@ if (!gotSingleInstanceLock) {
 ipcMain.handle('desktop-api-config:get', () => loadDesktopApiConfig());
 ipcMain.handle('desktop-api-config:save', (_event, config) => saveDesktopApiConfig(config));
 ipcMain.handle('desktop-setup:get', () => loadDesktopSetup());
+ipcMain.handle('window:open-graph', (_event, options) => createGraphWindow(options));
 ipcMain.handle('latex-folder:choose', async () => {
   const selection = await dialog.showOpenDialog({
     title: 'Open LaTeX Folder',

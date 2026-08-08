@@ -8,9 +8,11 @@ import {
   EyeOff,
   FileImage,
   FileText,
+  FlaskConical,
   GitBranch,
   Link2,
   Loader2,
+  Network,
   Plus,
   PenLine,
   Save,
@@ -43,6 +45,7 @@ import {
 } from './api';
 import { AgentActivityList, appendAgentActivity } from './AgentActivityList';
 import { GraphView, NODE_COLORS } from './GraphView';
+import { MOCK_PAPER_ID, mockGraph, mockPaper, mockSemanticUnits } from './mockPaper';
 import {
   contributionEvidenceSubtitles,
   contributionGraph,
@@ -116,6 +119,7 @@ type AppLocation = {
   paperId: string | null;
   nodeId: string | null;
   mode: string | null;
+  view?: 'graph' | null;
   sourcePaperId?: string | null;
   taskId?: string | null;
 };
@@ -138,22 +142,34 @@ function readAppLocation(): AppLocation {
     paperId: params.get('paper'),
     nodeId: params.get('node'),
     mode: params.get('mode'),
+    view: params.get('view') === 'graph' ? 'graph' : null,
     sourcePaperId: params.get('source_paper'),
     taskId: params.get('task'),
   };
 }
 
-function appUrl(paperId: string, nodeId?: string | null, mode?: string | null): string {
+function appUrl(
+  paperId: string,
+  nodeId?: string | null,
+  mode?: string | null,
+  options: { mock?: boolean; view?: 'graph' | null } = {},
+): string {
   const url = new URL(window.location.href);
   url.search = '';
   url.searchParams.set('paper', paperId);
   if (nodeId) url.searchParams.set('node', nodeId);
   if (mode) url.searchParams.set('mode', mode);
+  if (options.mock) url.searchParams.set('mock', '1');
+  if (options.view) url.searchParams.set('view', options.view);
   return url.toString();
 }
 
 function replaceAppLocation(paperId: string, nodeId?: string | null, mode?: string | null) {
-  window.history.replaceState({}, '', appUrl(paperId, nodeId, mode));
+  const current = new URLSearchParams(window.location.search);
+  window.history.replaceState({}, '', appUrl(paperId, nodeId, mode, {
+    mock: current.get('mock') === '1',
+    view: current.get('view') === 'graph' ? 'graph' : null,
+  }));
 }
 
 function citationProgressUrl(
@@ -210,7 +226,7 @@ const PANE_WIDTHS_STORAGE_KEY = 'pag.workspace-pane-widths.v1';
 const MIN_SOURCE_PANE_WIDTH = 260;
 const MIN_GRAPH_PANE_WIDTH = 360;
 const MIN_INSPECTOR_PANE_WIDTH = 280;
-const SPLITTER_WIDTH = 10;
+const SPLITTER_WIDTH = 0;
 
 type PaneWidths = {
   source: number;
@@ -278,6 +294,8 @@ export function ReaderApp() {
   const referenceExpansionKeys = useRef(new Set<string>());
   const externalExpansionKeys = useRef(new Set<string>());
   const initialLocation = useRef<AppLocation>(readAppLocation());
+  const isMockMode = new URLSearchParams(window.location.search).get('mock') === '1';
+  const isGraphWindow = initialLocation.current.view === 'graph';
   const citationAnalysisStarted = useRef(false);
   const citationProgressLoaded = useRef(false);
   const layoutRef = useRef<HTMLElement | null>(null);
@@ -432,6 +450,11 @@ export function ReaderApp() {
   );
 
   useEffect(() => {
+    if (isMockMode) {
+      setPapers([mockPaper]);
+      loadMockPaper(initialLocation.current.nodeId);
+      return;
+    }
     listPapers()
       .then(async (existing) => {
         setPapers(existing);
@@ -463,7 +486,7 @@ export function ReaderApp() {
         setStatus('error');
         setMessage(error instanceof Error ? error.message : 'Failed to restore the requested paper.');
       });
-  }, []);
+  }, [isMockMode]);
 
   useEffect(() => {
     const handleCompletion = (payload: unknown) => {
@@ -636,6 +659,10 @@ export function ReaderApp() {
     readyMessage?: string,
     requestedNodeId?: string | null,
   ) {
+    if (isMockMode || paperId === MOCK_PAPER_ID) {
+      loadMockPaper(requestedNodeId);
+      return;
+    }
     const [nextGraph, nextSemanticUnits, nextDocumentInfo] = await Promise.all([
       fetchGraph(paperId),
       fetchSemanticUnits(paperId),
@@ -655,6 +682,23 @@ export function ReaderApp() {
     setStatus('ready');
     setUploadProgress(null);
     setMessage(readyMessage ?? `Graph ready: ${nextGraph.nodes.length} nodes, ${nextGraph.edges.length} edges.`);
+  }
+
+  function loadMockPaper(requestedNodeId?: string | null) {
+    const nextGraph = JSON.parse(JSON.stringify(mockGraph)) as PaperArgumentGraph;
+    setGraph(nextGraph);
+    setSemanticUnits(JSON.parse(JSON.stringify(mockSemanticUnits)) as SemanticUnit[]);
+    setDocumentInfo(null);
+    setSourceMode('units');
+    setSelectedNodeId(
+      requestedNodeId && nextGraph.nodes.some((node) => node.id === requestedNodeId)
+        ? requestedNodeId
+        : nextGraph.nodes[0]?.id ?? null,
+    );
+    setFocusedContributionId(null);
+    setStatus('ready');
+    setUploadProgress(null);
+    setMessage('Mock mode — local sample data; no paper or backend is required.');
   }
 
   function clearPaperState(nextMessage = 'Upload a .txt, .md, or PDF to build a Paper Argument Graph.') {
@@ -727,6 +771,10 @@ export function ReaderApp() {
   }
 
   async function runCitationAnalysis(paperId: string, nodeId: string) {
+    if (isMockMode) {
+      setMessage('Citation analysis is unavailable in mock mode; use the included reference node to develop this UI.');
+      return;
+    }
     const key = `${paperId}:${nodeId}`;
     if (referenceExpansionKeys.current.has(key)) return;
     referenceExpansionKeys.current.add(key);
@@ -820,6 +868,7 @@ export function ReaderApp() {
   }
 
   async function expandExternalContribution(node: GraphNode) {
+    if (isMockMode) return;
     if (!graph || node.paper_id === graph.paper_id) return;
     const key = `${graph.paper_id}:${node.paper_id}:${node.id}`;
     if (externalExpansionKeys.current.has(key)) return;
@@ -848,6 +897,7 @@ export function ReaderApp() {
   }
 
   async function handleUpload(event: ChangeEvent<HTMLInputElement>) {
+    if (isMockMode) return;
     const file = event.target.files?.[0];
     if (!file) return;
     setStatus('uploading');
@@ -891,6 +941,10 @@ export function ReaderApp() {
 
   async function deleteCurrentPaper() {
     if (!graph) return;
+    if (isMockMode) {
+      setMessage('Mock mode data is local. Leave mock mode to manage stored papers.');
+      return;
+    }
     const title = graph.nodes.find((node) => node.node_type === 'Paper')?.title ?? graph.paper_id;
     if (!window.confirm(`Delete “${title}” and its graph?`)) return;
     setSaving(true);
@@ -917,6 +971,19 @@ export function ReaderApp() {
     if (!graph || !selectedNode) return;
     setSaving(true);
     try {
+      if (isMockMode) {
+        setGraph({
+          ...graph,
+          nodes: graph.nodes.map((node) =>
+            node.id === selectedNode.id
+              ? { ...node, title: editTitle, summary: editSummary, verified: editVerified }
+              : node,
+          ),
+        });
+        setMessage(`Saved local mock changes to ${selectedNode.id}.`);
+        setStatus('ready');
+        return;
+      }
       const nextGraph = await patchGraph(graph.paper_id, [
         {
           op: 'update_node',
@@ -940,6 +1007,21 @@ export function ReaderApp() {
     if (!window.confirm(`Remove node “${selectedNode.title}” and its relations?`)) return;
     setSaving(true);
     try {
+      if (isMockMode) {
+        const nextGraph = {
+          ...graph,
+          nodes: graph.nodes.filter((node) => node.id !== selectedNode.id),
+          edges: graph.edges.filter(
+            (edge) => edge.source_node_id !== selectedNode.id && edge.target_node_id !== selectedNode.id,
+          ),
+        };
+        setGraph(nextGraph);
+        if (selectedNode.id === focusedContributionId) setFocusedContributionId(null);
+        setSelectedNodeId(nextGraph.nodes[0]?.id ?? null);
+        setMessage('Removed node from local mock data.');
+        setStatus('ready');
+        return;
+      }
       const nextGraph = await patchGraph(graph.paper_id, [{ op: 'remove_node', id: selectedNode.id }]);
       setGraph(nextGraph);
       if (selectedNode.id === focusedContributionId) setFocusedContributionId(null);
@@ -975,6 +1057,15 @@ export function ReaderApp() {
     };
     setSaving(true);
     try {
+      if (isMockMode) {
+        setGraph({ ...graph, nodes: [...graph.nodes, node] });
+        setSelectedNodeId(node.id);
+        setNewNodeTitle('');
+        setNewNodeSummary('');
+        setMessage(`Added ${node.title} to local mock data.`);
+        setStatus('ready');
+        return;
+      }
       const nextGraph = await patchGraph(graph.paper_id, [{ op: 'add_node', node }]);
       setGraph(nextGraph);
       setSelectedNodeId(node.id);
@@ -1007,6 +1098,12 @@ export function ReaderApp() {
     };
     setSaving(true);
     try {
+      if (isMockMode) {
+        setGraph({ ...graph, edges: [...graph.edges, edge] });
+        setMessage(`Added ${edge.edge_type} relation to local mock data.`);
+        setStatus('ready');
+        return;
+      }
       const nextGraph = await patchGraph(graph.paper_id, [{ op: 'add_edge', edge }]);
       setGraph(nextGraph);
       setMessage(`Added ${edge.edge_type} relation.`);
@@ -1023,6 +1120,12 @@ export function ReaderApp() {
     if (!graph) return;
     setSaving(true);
     try {
+      if (isMockMode) {
+        setGraph({ ...graph, edges: graph.edges.filter((edge) => edge.id !== edgeId) });
+        setMessage('Removed relation from local mock data.');
+        setStatus('ready');
+        return;
+      }
       const nextGraph = await patchGraph(graph.paper_id, [{ op: 'remove_edge', id: edgeId }]);
       setGraph(nextGraph);
       setMessage('Relation removed.');
@@ -1069,6 +1172,39 @@ export function ReaderApp() {
 
   function nodeLabel(nodeId: string): string {
     return graph?.nodes.find((node) => node.id === nodeId)?.title ?? nodeId;
+  }
+
+  function switchMockMode() {
+    const url = new URL(window.location.href);
+    url.search = '';
+    if (!isMockMode) {
+      url.searchParams.set('mock', '1');
+      url.searchParams.set('paper', MOCK_PAPER_ID);
+    }
+    if (isGraphWindow) url.searchParams.set('view', 'graph');
+    window.location.assign(url);
+  }
+
+  function openGraphWindow() {
+    if (!graph) return;
+    const options = {
+      paperId: graph.paper_id,
+      nodeId: selectedNodeId,
+      mock: isMockMode,
+    };
+    if (desktopBridge?.openGraphWindow) {
+      void desktopBridge.openGraphWindow(options).catch((error) => {
+        setStatus('error');
+        setMessage(error instanceof Error ? error.message : 'Failed to open the graph window.');
+      });
+      return;
+    }
+    const url = appUrl(options.paperId, options.nodeId, null, { mock: options.mock, view: 'graph' });
+    const graphWindow = window.open(url, '_blank', 'popup,width=1240,height=860');
+    if (!graphWindow) {
+      setStatus('error');
+      setMessage('The browser blocked the graph window. Allow pop-ups and try again.');
+    }
   }
 
   function startPaneResize(
@@ -1134,6 +1270,8 @@ export function ReaderApp() {
     'shell',
     isDesktopApp ? 'desktop-shell' : '',
     isDesktopApp ? `desktop-platform-${desktopBridge?.platform ?? 'unknown'}` : '',
+    isMockMode ? 'mock-mode' : '',
+    isGraphWindow ? 'graph-window' : '',
   ]
     .filter(Boolean)
     .join(' ');
@@ -1146,7 +1284,7 @@ export function ReaderApp() {
     <main className={shellClassName}>
       <section
         ref={layoutRef}
-        className={isDesktopApp ? 'desktop-layout' : 'web-layout'}
+        className={`${isDesktopApp ? 'desktop-layout' : 'web-layout'}${isGraphWindow ? ' graph-window-layout' : ''}`}
         style={workspaceStyle}
       >
         <aside className="pdf-pane">
@@ -1176,6 +1314,7 @@ export function ReaderApp() {
               </div>
             ) : null}
           </div>
+          <div className="source-content">
           <div className={`status-line ${status}`}>
             <div className="status-message">
               {isBusy ? (
@@ -1278,6 +1417,7 @@ export function ReaderApp() {
               <span>Choose a paper</span>
             </button>
           )}
+          </div>
         </aside>
 
         <div
@@ -1295,7 +1435,7 @@ export function ReaderApp() {
             <div className="brand"><GitBranch size={22} /> Understand Anypaper</div>
             {isDesktopApp ? (
               <div className="desktop-titlebar-title" title={paperTitle || 'Understand Anypaper'}>
-                <GitBranch size={19} />
+                <GitBranch size={20} />
                 <span>{paperTitle || 'Understand Anypaper'}</span>
               </div>
             ) : null}
@@ -1328,8 +1468,8 @@ export function ReaderApp() {
                   ))}
                 </select>
               ) : null}
-              <button
-                className="icon-action toolbar-icon-action"
+              {!isGraphWindow ? <button
+                className="icon-action toolbar-icon-action desktop-optional-action"
                 type="button"
                 title="LaTeX writing workspace"
                 aria-label="LaTeX writing workspace"
@@ -1348,8 +1488,8 @@ export function ReaderApp() {
                 disabled={isBusy}
               >
                 <PenLine size={16} />
-              </button>
-              <button
+              </button> : null}
+              {!isGraphWindow ? <button
                 className="icon-action toolbar-icon-action"
                 type="button"
                 title="Add paper"
@@ -1362,19 +1502,19 @@ export function ReaderApp() {
                 ) : (
                   <UploadCloud size={16} />
                 )}
-              </button>
-              <button
-                className="icon-action toolbar-icon-action danger-icon-action"
+              </button> : null}
+              {!isGraphWindow ? <button
+                className="icon-action toolbar-icon-action danger-icon-action desktop-optional-action"
                 type="button"
                 title="Delete current paper"
                 aria-label="Delete current paper"
                 onClick={deleteCurrentPaper}
-                disabled={!graph || saving || isBusy}
+                disabled={!graph || saving || isBusy || isMockMode}
               >
                 <Trash2 size={16} />
-              </button>
-              <button
-                className="icon-action toolbar-icon-action"
+              </button> : null}
+              {!isGraphWindow ? <button
+                className="icon-action toolbar-icon-action desktop-optional-action"
                 type="button"
                 title="API settings"
                 aria-label="API settings"
@@ -1382,6 +1522,16 @@ export function ReaderApp() {
                 disabled={isBusy || saving}
               >
                 <Settings2 size={16} />
+              </button> : null}
+              <button
+                className={`icon-action toolbar-icon-action ${isMockMode ? 'active-icon-action' : ''}`}
+                type="button"
+                title={isMockMode ? 'Leave mock mode' : 'Open mock data mode'}
+                aria-label={isMockMode ? 'Leave mock mode' : 'Open mock data mode'}
+                onClick={switchMockMode}
+                disabled={isBusy}
+              >
+                <FlaskConical size={16} />
               </button>
               <label className="search-box" aria-label="Search graph nodes">
                 <Search size={16} />
@@ -1430,9 +1580,20 @@ export function ReaderApp() {
                     )}
                   </nav>
                 </div>
-                <div>
+                <div className="graph-summary-meta">
                   <span>{viewGraph.nodes.length} nodes</span>
                   <span>{viewGraph.edges.length} edges</span>
+                  {!isGraphWindow ? (
+                    <button
+                      className="graph-window-action"
+                      type="button"
+                      onClick={openGraphWindow}
+                      title="Open the graph and Inspector in a dedicated window"
+                    >
+                      <Network size={15} />
+                      Open graph window
+                    </button>
+                  ) : null}
                 </div>
               </div>
               <div className="graph-stage">
