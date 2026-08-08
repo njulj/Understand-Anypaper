@@ -1,0 +1,74 @@
+:root {
+  color-scheme: light;
+  --bg: #f4f7fb;
+  --panel: #ffffff;
+  --panel-soft: #eef3f8;
+  --toolbar: #ffffff;
+  --border: #d6dee8;
+  --text: #17202a;
+  --muted: #627083;
+  --accent: #2f6eea;
+  --accent-strong: #255bd0;
+  --danger: #cf3c3c;
+  --danger-text: #8f2020;
+  --success: #268a51;
+  --graph-grid-dot: #dce5ef;
+  --graph-edge: #8fa0b3;
+  --graph-node-stroke: rgba(15, 23, 42, 0.24);
+  --graph-selected-stroke: #17202a;
+  --pdf-page-bg: #ffffff;
+  --pdf-page-shadow: rgba(20, 35, 55, 0.16);
+  --content-highlight-bg: #e8f1ff;
+  --bbox-border: rgba(47, 110, 234, 0.38);
+  --bbox-bg: rgba(47, 110, 234, 0.08);
+  --bbox-highlight-border: #c77912;
+  --bbox-highlight-bg: rgba(255, 202, 102, 0.36);
+  --bbox-highlight-shadow: rgba(255, 202, 102, 0.22);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #101418;
+    --panel: #171c22;
+    --panel-soft: #1e252d;
+    --toolbar: #131820;
+    --border: #303944;
+    --text: #edf2f7;
+    --muted: #9aa8b5;
+    --accent: #4f8cff;
+    --accent-strong: #2f6eea;
+    --danger: #ff6b6b;
+    --danger-text: #ffd2d2;
+    --success: #58c783;
+    --graph-grid-dot: #222b35;
+    --graph-edge: #5b6b7d;
+    --graph-node-stroke: rgba(0, 0, 0, 0.45);
+    --graph-selected-stroke: #ffffff;
+    --pdf-page-bg: #f7f8fb;
+    --pdf-page-shadow: rgba(0, 0, 0, 0.24);
+    --content-highlight-bg: #1c2c44;
+    --bbox-border: rgba(79, 140, 255, 0.35);
+    --bbox-bg: rgba(79, 140, 255, 0.08);
+    --bbox-highlight-border: #ffca66;
+    --bbox-highlight-bg: rgba(255, 202, 102, 0.28);
+    --bbox-highlight-shadow: rgba(255, 202, 102, 0.18);
+  }
+}
+
+@theme inline {
+  --color-app-bg: var(--bg);
+  --color-app-panel: var(--panel);
+  --color-app-panel-soft: var(--panel-soft);
+  --color-app-toolbar: var(--toolbar);
+  --color-app-border: var(--border);
+  --color-app-text: var(--text);
+  --color-app-muted: var(--muted);
+  --color-app-accent: var(--accent);
+  --color-app-accent-strong: var(--accent-strong);
+  --color-app-danger: var(--danger);
+  --color-app-danger-text: var(--danger-text);
+  --color-app-success: var(--success);
+  --radius-control: 0.5rem;
+  --radius-card: 0.75rem;
+}

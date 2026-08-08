@@ -26,11 +26,13 @@
     "vite": "latest"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
     "@types/d3-force": "^3.0.0",
     "@types/react": "latest",
     "@types/react-dom": "latest",
     "electron": "^33.2.1",
-    "electron-builder": "^26.11.1"
+    "electron-builder": "^26.11.1",
+    "tailwindcss": "^4.3.3"
   },
   "build": {
     "appId": "com.aritxonly.understand-anypaper",
